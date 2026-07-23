@@ -114,6 +114,19 @@ pnpm test            # node:test suites
 pnpm run typecheck   # tsc --noEmit
 ```
 
+## Deploy (podman)
+
+```bash
+cp .env.example .env          # then fill the NEWT_* / PANGOLIN_ENDPOINT values
+podman-compose up -d --build  # starts mediation on :4100 (+ the Newt tunnel)
+```
+
+Newt values come from your Pangolin dashboard (Sites → Add Site → Newt); point
+the Pangolin site at `mediation:4100`. SQLite data persists in `./data`.
+Mediation runs standalone: without Newt credentials the tunnel container just
+crash-loops while mediation keeps serving on `:4100` — or run only it with
+`podman-compose up -d mediation`.
+
 ## Scope
 
 This is the development MVP: open endpoints, shared project id, no auth.

@@ -4,3 +4,4 @@ data/
 *.db-*
 *.log
 .mediation.json
+.env

@@ -1,0 +1,37 @@
+# Mediation + Pangolin Newt tunnel client.
+#
+# `podman-compose up -d --build` runs both. Mediation runs standalone:
+# newt has NO depends_on into it and mediation has no depends_on on newt, so
+# `podman-compose up mediation` works alone and newt simply crash-loops until
+# you fill PANGOLIN_ENDPOINT / NEWT_ID / NEWT_SECRET in .env.
+
+services:
+  mediation:
+    build:
+      context: .
+      dockerfile: Containerfile
+    ports:
+      - "4100:4100"
+    volumes:
+      - ./data:/data:Z        # SQLite persistence (DB_PATH=/data/mediation.db)
+    env_file: .env
+    restart: unless-stopped
+    healthcheck:
+      # alpine node image has no curl/wget; use node's built-in fetch.
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4100/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # Pangolin tunnel client: dials out to your Pangolin instance and proxies
+  # traffic to mediation:4100 over this compose network. The target/domain is
+  # configured in the Pangolin dashboard, not here. Crash-loops harmlessly
+  # until the NEWT_* credentials are set.
+  newt:
+    image: docker.io/fosrl/newt
+    environment:
+      PANGOLIN_ENDPOINT: ${PANGOLIN_ENDPOINT}
+      NEWT_ID: ${NEWT_ID}
+      NEWT_SECRET: ${NEWT_SECRET}
+    restart: unless-stopped
