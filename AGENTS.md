@@ -2,7 +2,9 @@
 
 Mediation: live coordination service that prevents developers and coding agents
 from unknowingly duplicating work. Product spec: `docs/PRODUCT.md`.
-Agent-facing protocol docs: `AGENT.md` (served at `/AGENT.md`).
+Agent-facing protocol docs: `docs/PROTOCOL.md` (served at `/AGENT.md` — the
+URL agents are told to fetch; don't confuse the two files: AGENTS.md = how to
+work on this repo, docs/PROTOCOL.md = the product's wire protocol).
 
 ## Stack
 
@@ -22,6 +24,7 @@ src/server/   Hono app + SQLite store + static serving. Imports core.
 src/cli/      mediation-agent CLI (global fetch). Imports core only for types.
 web/          Dashboard: static, vanilla JS, no build step. Talks to /api only.
 test/         node:test suites.
+docs/         PRODUCT.md (product goal) + PROTOCOL.md (wire protocol, served at /AGENT.md).
 design/       Imported claude.ai design reference (read-only).
 ```
 

@@ -113,7 +113,9 @@ export function buildApp(store: Store): Hono {
 
   app.get('/', (c) => serveFile(c, path.join(WEB_DIR, 'index.html')));
 
-  app.get('/AGENT.md', (c) => serveFile(c, path.join(ROOT, 'AGENT.md')));
+  // The protocol doc lives at docs/PROTOCOL.md but stays served at /AGENT.md —
+  // that URL is the discovery convention agents are told to fetch.
+  app.get('/AGENT.md', (c) => serveFile(c, path.join(ROOT, 'docs', 'PROTOCOL.md')));
 
   app.get('/web/*', (c) => {
     const rel = decodeURIComponent(c.req.path.slice('/web/'.length));

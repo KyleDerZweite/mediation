@@ -58,7 +58,7 @@ Product spec: [`docs/PRODUCT.md`](docs/PRODUCT.md).
 
 Conflicts are **warnings, not locks** — no request is ever rejected because of
 overlap. Full agent-facing instructions with request/response examples:
-[`AGENT.md`](AGENT.md) (also served at `/AGENT.md`).
+[`docs/PROTOCOL.md`](docs/PROTOCOL.md) (served to agents at `/AGENT.md`).
 
 ## CLI
 
