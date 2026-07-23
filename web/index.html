@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mediation — Live coordination</title>
+<link rel="icon" href="/web/logo.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/web/styles.css">
+</head>
+<body>
+<div class="shell">
+
+  <aside class="sidebar">
+    <div class="brand">
+      <img src="/web/logo.png" alt="Mediation" class="brand-logo">
+      <div class="brand-text">
+        <span class="brand-name">Mediation</span>
+        <span class="brand-tag">Live coordination</span>
+      </div>
+    </div>
+
+    <div class="conn-chip" id="connChip">
+      <span class="dot dot-ok pulse" id="connDot"></span>
+      <span class="conn-label" id="connLabel">Connecting…</span>
+      <span class="conn-host mono" id="connHost"></span>
+    </div>
+
+    <nav class="side-nav" id="sideNav"></nav>
+
+    <div class="side-heading">
+      <span>Projects</span><span class="side-heading-count" id="liveTotal"></span>
+    </div>
+    <div class="side-projects" id="sideProjects"></div>
+
+    <div class="side-footer">
+      <span class="side-avatar">M</span>
+      <div class="side-footer-text">
+        <span class="side-footer-name">Mediation</span>
+        <span class="side-footer-role">MVP — no accounts</span>
+      </div>
+    </div>
+  </aside>
+
+  <div class="content">
+    <header class="topbar">
+      <div class="crumbs-wrap">
+        <div class="crumbs" id="crumbs"></div>
+        <h1 class="page-title" id="pageTitle">Overview</h1>
+      </div>
+      <div class="topbar-right">
+        <div class="search-wrap">
+          <span class="search-icon" id="searchIcon"></span>
+          <input class="search-input" placeholder="Search sessions, files, agents…" aria-label="Search">
+        </div>
+        <div class="sync-chip">
+          <span class="dot dot-ok pulse" id="syncDot"></span>
+          <span id="syncLabel">Synced —</span>
+        </div>
+      </div>
+    </header>
+
+    <main class="main" id="main"></main>
+  </div>
+</div>
+<script type="module" src="/web/app.js"></script>
+</body>
+</html>

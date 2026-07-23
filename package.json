@@ -1,18 +1,28 @@
 {
   "name": "mediation",
-  "version": "0.1.0",
+  "version": "0.2.0",
+  "private": true,
   "description": "Live coordination service for developers and coding agents — see overlapping work before Git makes it visible.",
   "type": "module",
-  "main": "server.js",
   "bin": {
-    "mediation-agent": "bin/mediation-agent.js"
+    "mediation-agent": "src/cli/mediation-agent.ts"
   },
   "scripts": {
-    "start": "node server.js",
-    "test": "node --test"
+    "start": "node --disable-warning=ExperimentalWarning src/server/index.ts",
+    "test": "node --disable-warning=ExperimentalWarning --test \"test/*.test.ts\"",
+    "typecheck": "tsc --noEmit"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.18"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "@hono/node-server": "^1.14.0",
+    "hono": "^4.7.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.0",
+    "typescript": "^5.7.0"
+  }
 }

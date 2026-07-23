@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+  html,body{margin:0;padding:0}
+  body{font-family:'IBM Plex Sans',system-ui,-apple-system,sans-serif;color:#101828;background:#f6f7f9;-webkit-font-smoothing:antialiased}
+  *{box-sizing:border-box}
+  a{color:#1f6feb;text-decoration:none}
+  a:hover{color:#155ec4}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-thumb{background:#d7dce3;border-radius:6px;border:3px solid transparent;background-clip:content-box}
+  ::-webkit-scrollbar-thumb:hover{background:#c1c8d1;background-clip:content-box}
+  @keyframes mpulse{0%{box-shadow:0 0 0 0 rgba(16,185,129,.45)}70%{box-shadow:0 0 0 6px rgba(16,185,129,0)}100%{box-shadow:0 0 0 0 rgba(16,185,129,0)}}
+  @keyframes fu{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+  input{font-family:inherit}
+</style>
+</helmet>
+<div style="display:flex;height:100vh;width:100%;overflow:hidden">
+
+  <aside style="width:258px;flex:0 0 258px;background:#0f1524;color:#c7cdd9;display:flex;flex-direction:column;border-right:1px solid #1c2436">
+    <div style="display:flex;align-items:center;gap:11px;padding:18px 16px 6px">
+      <img src="uploads/logo.png" alt="Mediation" style="width:30px;height:30px;object-fit:contain">
+      <div style="display:flex;flex-direction:column;line-height:1.12">
+        <span style="font-family:'Space Grotesk';font-weight:600;font-size:16px;color:#f2f5fa;letter-spacing:-.01em">Mediation</span>
+        <span style="font-size:10px;letter-spacing:.15em;text-transform:uppercase;color:#5b6478">Live coordination</span>
+      </div>
+    </div>
+    <div style="margin:12px 14px 4px;display:flex;align-items:center;gap:8px;background:#141b2d;border:1px solid #1f2942;border-radius:8px;padding:8px 10px">
+      <span style="width:7px;height:7px;border-radius:50%;background:#10b981;flex:0 0 auto;animation:mpulse 2.4s infinite"></span>
+      <span style="font-size:11.5px;color:#9aa3b5">MCP connected</span>
+      <span style="margin-left:auto;font-family:'IBM Plex Mono';font-size:11px;color:#5b6478">acme</span>
+    </div>
+
+    <nav style="display:flex;flex-direction:column;gap:2px;padding:8px 10px 4px">
+      <sc-for list="{{ nav }}" as="n" hint-placeholder-count="4">
+        <button onClick="{{ n.open }}" style="display:flex;align-items:center;gap:11px;padding:8px 10px;border:none;border-radius:8px;cursor:pointer;font:inherit;font-size:13.5px;text-align:left;width:100%;background:{{ n.bg }};color:{{ n.fg }}" style-hover="background:#161d2e">
+          {{ n.icon }}
+          <span>{{ n.label }}</span>
+          <sc-if value="{{ n.badge }}" hint-placeholder-val="{{ true }}"><span style="margin-left:auto;background:#233150;color:#8fc0ff;font-size:11px;font-weight:600;min-width:18px;text-align:center;border-radius:9px;padding:1px 6px">{{ n.badge }}</span></sc-if>
+        </button>
+      </sc-for>
+    </nav>
+
+    <div style="padding:14px 16px 6px;font-size:10px;letter-spacing:.15em;text-transform:uppercase;color:#5b6478;display:flex;justify-content:space-between">
+      <span>Projects</span><span style="color:#4b5468">{{ liveTotal }} live</span>
+    </div>
+    <div style="flex:1;overflow:auto;padding:0 10px 10px;display:flex;flex-direction:column;gap:1px">
+      <sc-for list="{{ sideProjects }}" as="p" hint-placeholder-count="4">
+        <button onClick="{{ p.open }}" style="display:flex;align-items:center;gap:10px;padding:8px 10px;border:none;border-radius:8px;cursor:pointer;font:inherit;width:100%;background:{{ p.bg }};color:{{ p.fg }}" style-hover="background:#161d2e">
+          <span style="width:7px;height:7px;border-radius:50%;flex:0 0 auto;background:{{ p.dot }}"></span>
+          <span style="font-family:'IBM Plex Mono';font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ p.name }}</span>
+          <sc-if value="{{ p.liveStr }}" hint-placeholder-val="{{ true }}"><span style="margin-left:auto;font-size:11px;color:#6b7488;flex:0 0 auto">{{ p.liveStr }}</span></sc-if>
+        </button>
+      </sc-for>
+    </div>
+
+    <div style="border-top:1px solid #1c2436;padding:12px 14px;display:flex;align-items:center;gap:10px">
+      <span style="width:30px;height:30px;border-radius:50%;background:linear-gradient(135deg,#2fb6e6,#2f6bed);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:#fff;flex:0 0 auto">MV</span>
+      <div style="display:flex;flex-direction:column;line-height:1.25;min-width:0">
+        <span style="font-size:12.5px;color:#e6ebf3">Mara Vogt</span>
+        <span style="font-size:11px;color:#6b7488">Instance admin</span>
+      </div>
+    </div>
+  </aside>
+
+  <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+    <header style="height:56px;flex:0 0 56px;border-bottom:1px solid #e4e7ec;background:#fff;display:flex;align-items:center;gap:16px;padding:0 24px">
+      <div style="display:flex;flex-direction:column;line-height:1.2;min-width:0">
+        <div style="display:flex;align-items:center;gap:7px;font-size:11.5px;color:#98a2b3">
+          <span>{{ crumbRoot }}</span>
+          <sc-if value="{{ crumbSub }}" hint-placeholder-val="{{ true }}"><span>/</span><span style="color:#475467;font-family:'IBM Plex Mono';font-size:11px">{{ crumbSub }}</span></sc-if>
+        </div>
+        <h1 style="margin:0;font-size:15px;font-weight:600;letter-spacing:-.01em">{{ title }}</h1>
+      </div>
+      <div style="margin-left:auto;display:flex;align-items:center;gap:16px">
+        <div style="position:relative;display:flex;align-items:center">
+          <span style="position:absolute;left:9px;display:flex;color:#98a2b3">{{ searchIcon }}</span>
+          <input placeholder="Search sessions, files, agents…" style="width:250px;height:34px;border:1px solid #e4e7ec;border-radius:8px;padding:0 10px 0 30px;font-size:12.5px;color:#101828;outline:none;background:#f9fafb" style-focus="border-color:#1f6feb;background:#fff">
+        </div>
+        <div style="display:flex;align-items:center;gap:7px;font-size:12px;color:#667085;white-space:nowrap">
+          <span style="width:7px;height:7px;border-radius:50%;background:#10b981;animation:mpulse 2.4s infinite"></span>
+          <span>Synced {{ secs }}s ago</span>
+        </div>
+      </div>
+    </header>
+
+    <main style="flex:1;overflow:auto;min-height:0">
+
+      <sc-if value="{{ isOverview }}" hint-placeholder-val="{{ true }}">
+        <div style="padding:26px 28px;max-width:1180px;margin:0 auto;animation:fu .25s ease">
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:24px">
+            <sc-for list="{{ stats }}" as="st" hint-placeholder-count="4">
+              <div style="background:#fff;border:1px solid #e4e7ec;border-radius:12px;padding:15px 17px">
+                <div style="display:flex;align-items:center;gap:8px;color:#667085;font-size:12px;margin-bottom:10px">{{ st.icon }}<span>{{ st.label }}</span></div>
+                <div style="font-size:27px;font-weight:600;font-family:'Space Grotesk';letter-spacing:-.02em;line-height:1">{{ st.value }}</div>
+                <div style="font-size:11.5px;color:{{ st.hintColor }};margin-top:6px">{{ st.hint }}</div>
+              </div>
+            </sc-for>
+          </div>
+          <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:13px">
+            <h2 style="margin:0;font-size:14px;font-weight:600">Projects</h2>
+            <span style="font-size:12px;color:#98a2b3">Live state before Git makes it visible</span>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:14px">
+            <sc-for list="{{ projects }}" as="p" hint-placeholder-count="4">
+              <div onClick="{{ p.open }}" style="background:#fff;border:1px solid #e4e7ec;border-radius:14px;padding:18px;cursor:pointer;transition:border-color .14s,box-shadow .14s" style-hover="border-color:#c3d0e8;box-shadow:0 8px 22px -14px rgba(16,24,40,.35)">
+                <div style="display:flex;align-items:center;gap:10px;margin-bottom:7px">
+                  <span style="width:8px;height:8px;border-radius:50%;flex:0 0 auto;background:{{ p.dot }}"></span>
+                  <span style="font-family:'IBM Plex Mono';font-size:15px;font-weight:600">{{ p.name }}</span>
+                  <span style="margin-left:auto;display:flex">{{ p.chev }}</span>
+                </div>
+                <div style="font-size:12.5px;color:#667085;margin-bottom:15px">{{ p.desc }}</div>
+                <div style="display:flex;gap:20px;flex-wrap:wrap;font-size:12.5px;color:#475467;margin-bottom:14px">
+                  <span><b style="font-weight:600;color:#101828">{{ p.live }}</b> live sessions</span>
+                  <span><b style="font-weight:600;color:#101828">{{ p.agents }}</b> agents</span>
+                  <span><b style="font-weight:600;color:#101828">{{ p.members }}</b> members</span>
+                </div>
+                <div style="border-top:1px dashed #e7eaef;padding-top:12px;display:flex;align-items:center;gap:8px;font-size:12px;color:#667085">
+                  {{ p.fileIcon }}<span style="font-family:'IBM Plex Mono';overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ p.lastFile }}</span><span style="margin-left:auto;color:#98a2b3;flex:0 0 auto">{{ p.updated }}</span>
+                </div>
+                <sc-if value="{{ p.deferred }}" hint-placeholder-val="{{ 0 }}">
+                  <div style="margin-top:11px;display:flex;align-items:center;gap:7px;background:#fbf6ec;border:1px solid #f4e6cb;border-radius:8px;padding:7px 10px;font-size:11.5px;color:#8a5a12">{{ p.shieldIcon }}<span>{{ p.deferred }} overlapping agent claims deferred here today</span></div>
+                </sc-if>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isProject }}" hint-placeholder-val="{{ false }}">
+        <div style="padding:22px 28px;max-width:1240px;margin:0 auto;animation:fu .25s ease">
+          <div style="display:flex;align-items:flex-start;gap:16px;margin-bottom:18px">
+            <div style="min-width:0">
+              <div style="display:flex;align-items:center;gap:11px">
+                <span style="width:9px;height:9px;border-radius:50%;flex:0 0 auto;background:{{ proj.dot }}"></span>
+                <h2 style="margin:0;font-family:'IBM Plex Mono';font-size:20px;font-weight:600;letter-spacing:-.01em;white-space:nowrap">{{ proj.name }}</h2>
+                <span style="display:flex;align-items:center;gap:6px;background:#f1f4f8;border:1px solid #e4e7ec;border-radius:7px;padding:3px 9px;font-family:'IBM Plex Mono';font-size:11.5px;color:#475467">{{ proj.repoIcon }}{{ proj.repo }}</span>
+              </div>
+              <div style="font-size:12.5px;color:#667085;margin-top:7px">{{ proj.desc }} · default <span style="font-family:'IBM Plex Mono';color:#475467">main</span> · base <span style="font-family:'IBM Plex Mono';color:#475467">{{ proj.base }}</span></div>
+            </div>
+            <div style="margin-left:auto;display:flex;gap:8px;flex:0 0 auto">
+              <sc-for list="{{ projStats }}" as="ps" hint-placeholder-count="3">
+                <div style="background:#fff;border:1px solid #e4e7ec;border-radius:10px;padding:8px 14px;text-align:center;min-width:74px">
+                  <div style="font-size:18px;font-weight:600;font-family:'Space Grotesk';line-height:1.1">{{ ps.value }}</div>
+                  <div style="font-size:11px;color:#98a2b3;margin-top:2px">{{ ps.label }}</div>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+
+          <div style="display:flex;gap:2px;border-bottom:1px solid #e4e7ec;margin-bottom:20px">
+            <sc-for list="{{ tabs }}" as="t" hint-placeholder-count="3">
+              <button onClick="{{ t.open }}" style="background:none;border:none;padding:10px 13px;font:inherit;font-size:13px;cursor:pointer;color:{{ t.fg }};border-bottom:2px solid {{ t.bd }};margin-bottom:-1px;font-weight:{{ t.w }}">{{ t.label }}</button>
+            </sc-for>
+          </div>
+
+          <sc-if value="{{ isNow }}" hint-placeholder-val="{{ true }}">
+            <div style="display:grid;grid-template-columns:{{ gridCols }};gap:20px;align-items:start">
+              <div style="display:flex;flex-direction:column;gap:14px;min-width:0">
+                <div style="display:flex;align-items:center;justify-content:space-between">
+                  <span style="font-size:13px;font-weight:600;color:#344054">Active work claims</span>
+                  <span style="font-size:12px;color:#98a2b3">{{ sessCount }} sessions reporting</span>
+                </div>
+                <sc-for list="{{ sess }}" as="s" hint-placeholder-count="3">
+                  <div style="background:#fff;border:1px solid #e4e7ec;border-radius:14px;padding:16px 18px">
+                    <div style="display:flex;align-items:center;gap:11px;flex-wrap:wrap">
+                      <span style="width:34px;height:34px;border-radius:50%;background:{{ s.avatarBg }};display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;color:#fff;flex:0 0 auto">{{ s.initials }}</span>
+                      <div style="flex:1 0 190px">
+                        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                          <span style="font-size:14px;font-weight:600">{{ s.human }}</span>
+                          <span style="display:flex;align-items:center;gap:5px;background:#eef2f7;border-radius:6px;padding:2px 8px;font-size:11.5px;color:#475467">{{ s.agentIcon }}{{ s.agent }}</span>
+                          <span style="font-family:'IBM Plex Mono';font-size:11px;color:#98a2b3">{{ s.machine }}</span>
+                        </div>
+                      </div>
+                      <div style="margin-left:auto;display:flex;align-items:center;gap:12px;flex:0 0 auto">
+                        <span style="background:{{ s.tint }};color:{{ s.color }};font-size:11.5px;font-weight:600;border-radius:7px;padding:3px 9px">{{ s.statusLabel }}</span>
+                        <span style="font-size:12px;color:#98a2b3;display:flex;align-items:center;gap:5px"><span style="width:6px;height:6px;border-radius:50%;background:#10b981;animation:mpulse 2.4s infinite"></span>{{ s.activity }}</span>
+                      </div>
+                    </div>
+                    <div style="margin-top:13px;font-size:13.5px;color:#101828;line-height:1.5">{{ s.intent }}</div>
+                    <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:11px">
+                      <sc-for list="{{ s.files }}" as="f" hint-placeholder-count="2">
+                        <span style="font-family:'IBM Plex Mono';font-size:11.5px;color:#475467;background:#f6f8fa;border:1px solid #e9edf2;border-radius:6px;padding:3px 8px">{{ f }}</span>
+                      </sc-for>
+                    </div>
+                    <sc-if value="{{ showFinding }}" hint-placeholder-val="{{ false }}"><sc-if value="{{ s.finding }}" hint-placeholder-val="{{ false }}">
+                      <div style="margin-top:12px;background:#f2fafd;border:1px solid #dcf0f6;border-radius:9px;padding:9px 11px;font-size:12.5px;color:#0e5a6e;display:flex;gap:9px;line-height:1.45">
+                        <span style="flex:0 0 auto;margin-top:1px">{{ s.findIcon }}</span><span>{{ s.finding }}</span>
+                      </div>
+                    </sc-if></sc-if>
+                    <div style="margin-top:13px;display:flex;align-items:center;gap:15px;font-size:12px;color:#667085;flex-wrap:wrap">
+                      <span style="display:flex;align-items:center;gap:6px">{{ s.branchIcon }}<span style="font-family:'IBM Plex Mono'">{{ s.branch }}</span></span>
+                      <sc-if value="{{ s.pr }}" hint-placeholder-val="{{ false }}"><span style="display:flex;align-items:center;gap:6px;color:#7c3aed">{{ s.prIcon }}<span style="font-family:'IBM Plex Mono'">{{ s.pr }}</span></span></sc-if>
+                      <sc-if value="{{ s.deferred }}" hint-placeholder-val="{{ 0 }}"><span style="margin-left:auto;display:flex;align-items:center;gap:6px;color:#8a5a12;background:#fbf6ec;border:1px solid #f4e6cb;border-radius:7px;padding:3px 9px;font-size:11.5px">{{ s.shieldIcon }}{{ s.deferred }} agents deferred here</span></sc-if>
+                    </div>
+                  </div>
+                </sc-for>
+                <sc-if value="{{ sessEmpty }}" hint-placeholder-val="{{ false }}">
+                  <div style="background:#fff;border:1px dashed #dfe3e9;border-radius:14px;padding:34px;text-align:center;color:#98a2b3;font-size:13px">No active sessions. Last activity {{ proj.updated }} on <span style="font-family:'IBM Plex Mono'">{{ proj.lastFile }}</span>.</div>
+                </sc-if>
+              </div>
+
+              <sc-if value="{{ showRail }}" hint-placeholder-val="{{ true }}">
+                <div style="display:flex;flex-direction:column;gap:14px;min-width:0">
+                  <div style="background:#fff;border:1px solid #e4e7ec;border-radius:14px;overflow:hidden">
+                    <div style="padding:13px 16px;border-bottom:1px solid #eef1f5;display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;color:#344054"><span style="width:7px;height:7px;border-radius:50%;background:#10b981;animation:mpulse 2.4s infinite"></span>Live activity</div>
+                    <div style="padding:4px 16px 8px">
+                      <sc-for list="{{ activity }}" as="a" hint-placeholder-count="6">
+                        <div style="display:flex;gap:11px;padding:9px 0;border-bottom:1px solid #f2f4f7">
+                          <span style="color:{{ a.color }};flex:0 0 auto;margin-top:1px">{{ a.icon }}</span>
+                          <div style="min-width:0">
+                            <div style="font-size:12.5px;color:#344054;line-height:1.4">{{ a.text }}</div>
+                            <div style="font-size:11px;color:#98a2b3;margin-top:2px">{{ a.who }} · {{ a.t }} ago</div>
+                          </div>
+                        </div>
+                      </sc-for>
+                    </div>
+                  </div>
+                  <div style="background:#fff;border:1px solid #e4e7ec;border-radius:14px;overflow:hidden">
+                    <div style="padding:13px 16px;border-bottom:1px solid #eef1f5;font-size:13px;font-weight:600;color:#344054">Discovered bugs</div>
+                    <div style="padding:4px 16px 8px">
+                      <sc-for list="{{ bugs }}" as="b" hint-placeholder-count="3">
+                        <div style="display:flex;gap:11px;padding:10px 0;border-bottom:1px solid #f2f4f7">
+                          <span style="width:8px;height:8px;border-radius:50%;flex:0 0 auto;margin-top:5px;background:{{ b.sevColor }}"></span>
+                          <div style="min-width:0">
+                            <div style="font-size:12.5px;color:#344054;line-height:1.4"><span style="font-family:'IBM Plex Mono';color:#98a2b3;font-size:11px">{{ b.id }}</span> {{ b.title }}</div>
+                            <div style="font-size:11px;color:#98a2b3;margin-top:2px">{{ b.by }} · {{ b.status }} · {{ b.when }}</div>
+                          </div>
+                        </div>
+                      </sc-for>
+                      <sc-if value="{{ bugsEmpty }}" hint-placeholder-val="{{ false }}"><div style="padding:16px 0;color:#98a2b3;font-size:12.5px">No bugs reported.</div></sc-if>
+                    </div>
+                  </div>
+                </div>
+              </sc-if>
+            </div>
+          </sc-if>
+
+          <sc-if value="{{ isActTab }}" hint-placeholder-val="{{ false }}">
+            <div style="background:#fff;border:1px solid #e4e7ec;border-radius:14px;padding:6px 20px;max-width:760px">
+              <sc-for list="{{ activity }}" as="a" hint-placeholder-count="8">
+                <div style="display:flex;gap:13px;padding:12px 0;border-bottom:1px solid #f2f4f7">
+                  <span style="color:{{ a.color }};flex:0 0 auto;margin-top:1px">{{ a.icon }}</span>
+                  <div style="min-width:0;flex:1"><div style="font-size:13px;color:#344054">{{ a.text }}</div><div style="font-size:11.5px;color:#98a2b3;margin-top:2px">{{ a.who }}</div></div>
+                  <span style="font-size:11.5px;color:#98a2b3;flex:0 0 auto">{{ a.t }} ago</span>
+                </div>
+              </sc-for>
+            </div>
+          </sc-if>
+
+          <sc-if value="{{ isCompTab }}" hint-placeholder-val="{{ false }}">
+            <div style="background:#fff;border:1px solid #e4e7ec;border-radius:14px;padding:6px 20px;max-width:760px">
+              <sc-for list="{{ completed }}" as="c" hint-placeholder-count="4">
+                <div style="display:flex;gap:13px;padding:13px 0;border-bottom:1px solid #f2f4f7;align-items:center">
+                  <span style="color:{{ c.color }};flex:0 0 auto">{{ c.icon }}</span>
+                  <div style="min-width:0;flex:1"><div style="font-size:13px;color:#101828">{{ c.title }}</div><div style="font-size:11.5px;color:#98a2b3;margin-top:2px">{{ c.by }}</div></div>
+                  <span style="font-family:'IBM Plex Mono';font-size:12px;color:#7c3aed;flex:0 0 auto">{{ c.ref }}</span>
+                  <span style="font-size:11.5px;color:#98a2b3;flex:0 0 auto;width:82px;text-align:right">{{ c.when }}</span>
+                </div>
+              </sc-for>
+            </div>
+          </sc-if>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isActivity }}" hint-placeholder-val="{{ false }}">
+        <div style="padding:26px 28px;max-width:820px;margin:0 auto;animation:fu .25s ease">
+          <div style="font-size:12.5px;color:#98a2b3;margin-bottom:14px">Every event across the instance, newest first — sessions, claims, findings, deferrals and merges.</div>
+          <div style="background:#fff;border:1px solid #e4e7ec;border-radius:14px;padding:6px 20px">
+            <sc-for list="{{ globalAct }}" as="a" hint-placeholder-count="10">
+              <div style="display:flex;gap:13px;padding:12px 0;border-bottom:1px solid #f2f4f7">
+                <span style="color:{{ a.color }};flex:0 0 auto;margin-top:1px">{{ a.icon }}</span>
+                <div style="min-width:0;flex:1"><div style="font-size:13px;color:#344054;line-height:1.4">{{ a.text }}</div><div style="font-size:11.5px;color:#98a2b3;margin-top:2px"><span style="font-family:'IBM Plex Mono'">{{ a.proj }}</span> · {{ a.who }}</div></div>
+                <span style="font-size:11.5px;color:#98a2b3;flex:0 0 auto">{{ a.t }} ago</span>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isAgents }}" hint-placeholder-val="{{ false }}">
+        <div style="padding:26px 28px;max-width:960px;margin:0 auto;animation:fu .25s ease;display:flex;flex-direction:column;gap:22px">
+          <div style="background:#0f1524;border-radius:14px;padding:20px 22px;color:#c7cdd9">
+            <div style="display:flex;align-items:center;gap:9px;margin-bottom:16px"><span style="display:flex;color:#8fc0ff">{{ plugIcon }}</span><span style="font-size:14px;font-weight:600;color:#f2f5fa">MCP connection</span><span style="margin-left:auto;display:flex;align-items:center;gap:6px;font-size:11.5px;color:#10b981"><span style="width:6px;height:6px;border-radius:50%;background:#10b981;animation:mpulse 2.4s infinite"></span>Live</span></div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px">
+              <div><div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#5b6478;margin-bottom:4px">Endpoint</div><div style="font-family:'IBM Plex Mono';font-size:12.5px;color:#dbe2ec">{{ mcp.endpoint }}</div></div>
+              <div><div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#5b6478;margin-bottom:4px">Project ID</div><div style="font-family:'IBM Plex Mono';font-size:12.5px;color:#dbe2ec">{{ mcp.projectId }}</div></div>
+            </div>
+            <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#5b6478;margin-bottom:6px">Agent config</div>
+            <pre style="margin:0;background:#0a0e19;border:1px solid #1c2436;border-radius:9px;padding:13px 15px;font-family:'IBM Plex Mono';font-size:12px;line-height:1.6;overflow:auto;color:#9fb4d4">{{ mcp.snippet }}</pre>
+            <div style="font-size:11.5px;color:#6b7488;margin-top:10px">Unauthenticated agents discover <span style="font-family:'IBM Plex Mono';color:#8fc0ff">auth.md</span>, request a credential, and receive a short verification code for a human to confirm.</div>
+          </div>
+
+          <div>
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:11px"><h3 style="margin:0;font-size:14px;font-weight:600">Registered agents</h3><span style="font-size:12px;color:#98a2b3">{{ agentCount }} credentials</span></div>
+            <div style="background:#fff;border:1px solid #e4e7ec;border-radius:14px;overflow:hidden">
+              <div style="display:grid;grid-template-columns:1.4fr 1.3fr 1fr 1.4fr .9fr .7fr;padding:10px 16px;border-bottom:1px solid #eef1f5;font-size:11px;letter-spacing:.05em;text-transform:uppercase;color:#98a2b3">
+                <span>Agent</span><span>Owner</span><span>Machine</span><span>Scope</span><span>Last seen</span><span>Status</span>
+              </div>
+              <sc-for list="{{ agents }}" as="a" hint-placeholder-count="5">
+                <div style="display:grid;grid-template-columns:1.4fr 1.3fr 1fr 1.4fr .9fr .7fr;padding:12px 16px;border-bottom:1px solid #f2f4f7;font-size:12.5px;align-items:center">
+                  <span style="display:flex;align-items:center;gap:8px;color:#101828">{{ a.botIcon }}{{ a.name }}</span>
+                  <span style="color:#475467">{{ a.owner }}</span>
+                  <span style="font-family:'IBM Plex Mono';font-size:11.5px;color:#667085">{{ a.machine }}</span>
+                  <span style="font-family:'IBM Plex Mono';font-size:11px;color:#8a93a3">{{ a.scope }}</span>
+                  <span style="color:#98a2b3">{{ a.lastSeen }}</span>
+                  <span><span style="background:{{ a.st }};color:{{ a.sc }};font-size:11px;font-weight:600;border-radius:7px;padding:2px 8px;text-transform:capitalize">{{ a.status }}</span></span>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px">
+            <div>
+              <h3 style="margin:0 0 11px;font-size:14px;font-weight:600">Pending agent approvals</h3>
+              <div style="display:flex;flex-direction:column;gap:10px">
+                <sc-for list="{{ pendingAgents }}" as="pa" hint-placeholder-count="2">
+                  <div style="background:#fff;border:1px solid #e4e7ec;border-radius:12px;padding:13px 15px">
+                    <div style="display:flex;align-items:center;gap:8px"><span style="display:flex;color:#667085">{{ pa.botIcon }}</span><span style="font-size:13px;font-weight:600">{{ pa.agent }}</span><span style="font-family:'IBM Plex Mono';font-size:11px;color:#98a2b3">{{ pa.machine }}</span></div>
+                    <div style="display:flex;align-items:center;gap:10px;margin:11px 0;background:#f6f8fa;border:1px dashed #dfe3e9;border-radius:8px;padding:8px 11px">
+                      <span style="font-size:11px;color:#98a2b3">Verify code</span><span style="font-family:'IBM Plex Mono';font-size:15px;font-weight:600;letter-spacing:.08em;color:#1f6feb">{{ pa.code }}</span><span style="margin-left:auto;font-size:11px;color:#98a2b3">{{ pa.requested }}</span>
+                    </div>
+                    <div style="display:flex;gap:8px">
+                      <button style="flex:1;border:none;background:#1f6feb;color:#fff;font:inherit;font-size:12.5px;font-weight:500;border-radius:8px;padding:7px;cursor:pointer" style-hover="background:#155ec4">Confirm</button>
+                      <button style="border:1px solid #e4e7ec;background:#fff;color:#667085;font:inherit;font-size:12.5px;border-radius:8px;padding:7px 14px;cursor:pointer" style-hover="background:#f6f8fa">Deny</button>
+                    </div>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+            <div>
+              <h3 style="margin:0 0 11px;font-size:14px;font-weight:600">Pending accounts <span style="font-size:11px;font-weight:500;color:#98a2b3">· instance admin</span></h3>
+              <div style="background:#fff;border:1px solid #e4e7ec;border-radius:12px;overflow:hidden">
+                <sc-for list="{{ pendingUsers }}" as="u" hint-placeholder-count="2">
+                  <div style="display:flex;align-items:center;gap:11px;padding:13px 15px;border-bottom:1px solid #f2f4f7">
+                    <span style="width:30px;height:30px;border-radius:50%;background:#eef2f7;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:#667085;flex:0 0 auto">{{ u.initials }}</span>
+                    <div style="min-width:0"><div style="font-size:13px;font-weight:500">{{ u.name }}</div><div style="font-size:11.5px;color:#98a2b3;font-family:'IBM Plex Mono'">{{ u.email }}</div></div>
+                    <div style="margin-left:auto;display:flex;gap:6px;flex:0 0 auto">
+                      <button style="border:none;background:#e7f8f0;color:#0e9f6e;border-radius:7px;width:30px;height:30px;display:flex;align-items:center;justify-content:center;cursor:pointer" style-hover="background:#d6f3e5">{{ u.checkIcon }}</button>
+                      <button style="border:1px solid #e4e7ec;background:#fff;color:#98a2b3;border-radius:7px;width:30px;height:30px;display:flex;align-items:center;justify-content:center;cursor:pointer" style-hover="background:#f6f8fa">{{ u.xIcon }}</button>
+                    </div>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ isSettings }}" hint-placeholder-val="{{ false }}">
+        <div style="padding:26px 28px;max-width:820px;margin:0 auto;animation:fu .25s ease;display:flex;flex-direction:column;gap:22px">
+          <div>
+            <h3 style="margin:0 0 11px;font-size:14px;font-weight:600">Instance policy</h3>
+            <div style="background:#fff;border:1px solid #e4e7ec;border-radius:14px;overflow:hidden">
+              <sc-for list="{{ policies }}" as="p" hint-placeholder-count="4">
+                <div style="display:flex;align-items:flex-start;gap:14px;padding:15px 17px;border-bottom:1px solid #f2f4f7">
+                  <div style="flex:1"><div style="font-size:13px;font-weight:600;color:#101828">{{ p.label }}</div><div style="font-size:12px;color:#667085;margin-top:3px;line-height:1.45">{{ p.desc }}</div></div>
+                  <span style="font-family:'IBM Plex Mono';font-size:12.5px;color:#1f6feb;background:#eef4fe;border-radius:7px;padding:4px 10px;flex:0 0 auto">{{ p.value }}</span>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+          <div>
+            <h3 style="margin:0 0 11px;font-size:14px;font-weight:600">Roles</h3>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+              <sc-for list="{{ roles }}" as="r" hint-placeholder-count="4">
+                <div style="background:#fff;border:1px solid #e4e7ec;border-radius:12px;padding:14px 16px"><div style="font-size:13px;font-weight:600;color:#101828">{{ r.name }}</div><div style="font-size:12px;color:#667085;margin-top:4px;line-height:1.45">{{ r.desc }}</div></div>
+              </sc-for>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1440,&quot;height&quot;:900},&quot;showFindings&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Content&quot;},&quot;showActivityRail&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:true,&quot;tsType&quot;:&quot;boolean&quot;,&quot;section&quot;:&quot;Layout&quot;},&quot;defaultProject&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;mediation-core&quot;,&quot;mediation-mcp&quot;,&quot;mediation-web&quot;,&quot;docs&quot;],&quot;default&quot;:&quot;mediation-core&quot;,&quot;tsType&quot;:&quot;string&quot;,&quot;section&quot;:&quot;Content&quot;}}">
+class Component extends DCLogic {
+  state = { view:'overview', pid:null, tab:'now', secs:3 };
+  componentDidMount(){ this._t = setInterval(()=>this.setState(s=>({secs:(s.secs%59)+1})),1000); }
+  componentWillUnmount(){ clearInterval(this._t); }
+
+  ic(name, c, s, w){
+    c = c||'currentColor'; s = s||18; w = w||1.75;
+    const D = {
+      grid:[['rect',3,3,7,7,1.5],['rect',14,3,7,7,1.5],['rect',3,14,7,7,1.5],['rect',14,14,7,7,1.5]],
+      activity:[['polyline','2 12 6 12 9 3 15 21 18 12 22 12']],
+      key:[['circle',8,15,5],['path','M11.5 11.5 21 2'],['path','M17 6l3 3']],
+      sliders:[['line',4,21,4,14],['line',4,10,4,3],['line',12,21,12,12],['line',12,8,12,3],['line',20,21,20,16],['line',20,12,20,3],['line',2,14,7,14],['line',9,8,15,8],['line',17,16,22,16]],
+      repo:[['line',6,3,6,15],['circle',18,6,3],['circle',6,18,3],['path','M18 9a9 9 0 0 1-9 9']],
+      bot:[['rect',4,8,16,12,3],['circle',9,14,0.9],['circle',15,14,0.9],['path','M12 8V5'],['circle',12,4,1]],
+      file:[['path','M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z'],['path','M14 3v5h5']],
+      bug:[['rect',8,7,8,13,4],['path','M12 7V4'],['line',3,11,7,11],['line',17,11,21,11],['line',3,17,7,16],['line',17,16,21,17],['line',3,14,7,14],['line',17,14,21,14]],
+      commit:[['circle',12,12,3],['line',3,12,9,12],['line',15,12,21,12]],
+      pr:[['circle',6,6,2.4],['circle',6,18,2.4],['line',6,8.4,6,15.6],['circle',18,18,2.4],['path','M18 15.6V11a4 4 0 0 0-4-4h-3'],['polyline','11 4 8 7 11 10']],
+      clock:[['circle',12,12,9],['polyline','12 7 12 12 15 14']],
+      chevron:[['polyline','9 6 15 12 9 18']],
+      search:[['circle',11,11,7],['line',16.5,16.5,21,21]],
+      shield:[['path','M12 3l8 3v6c0 5-3.4 7.6-8 9-4.6-1.4-8-4-8-9V6z'],['polyline','9 12 11 14 15 10']],
+      branch:[['line',6,3,6,15],['circle',18,6,3],['circle',6,18,3],['path','M18 9a9 9 0 0 1-9 9']],
+      plug:[['path','M9 2v6'],['path','M15 2v6'],['path','M7 8h10v3a5 5 0 0 1-10 0z'],['path','M12 16v6']],
+      check:[['polyline','4 12 10 18 20 6']],
+      x:[['line',6,6,18,18],['line',18,6,6,18]]
+    };
+    const parts = D[name] || [];
+    const kids = parts.map((p,i)=>{
+      const t = p[0];
+      if(t==='rect') return React.createElement('rect',{key:i,x:p[1],y:p[2],width:p[3],height:p[4],rx:p[5]||0});
+      if(t==='circle') return React.createElement('circle',{key:i,cx:p[1],cy:p[2],r:p[3]});
+      if(t==='line') return React.createElement('line',{key:i,x1:p[1],y1:p[2],x2:p[3],y2:p[4]});
+      if(t==='polyline') return React.createElement('polyline',{key:i,points:p[1]});
+      return React.createElement('path',{key:i,d:p[1]});
+    });
+    return React.createElement('svg',{width:s,height:s,viewBox:'0 0 24 24',fill:'none',stroke:c,strokeWidth:w,strokeLinecap:'round',strokeLinejoin:'round',style:{flex:'0 0 auto'}},...kids);
+  }
+
+  buildData(){
+    const S = (o)=>o;
+    return {
+      projects:[
+        S({id:'mediation-core',name:'mediation-core',desc:'Coordination service & API',repo:'acme/mediation-core',members:8,live:3,agents:2,lastFile:'src/sessions/heartbeat.ts',updated:'12s ago',pulse:true,deferred:2,base:'a3f9c1e'}),
+        S({id:'mediation-mcp',name:'mediation-mcp',desc:'MCP server for agent sessions',repo:'acme/mediation-mcp',members:5,live:1,agents:1,lastFile:'server/tools/claim.ts',updated:'3m ago',pulse:true,deferred:0,base:'7d21b0f'}),
+        S({id:'mediation-web',name:'mediation-web',desc:'Dashboard front-end',repo:'acme/mediation-web',members:4,live:2,agents:2,lastFile:'app/routes/project.tsx',updated:'48s ago',pulse:true,deferred:0,base:'c11e9a2'}),
+        S({id:'docs',name:'mediation-docs',desc:'Docs site & agent auth.md',repo:'acme/mediation-docs',members:3,live:0,agents:0,lastFile:'guide/auth.md',updated:'2h ago',pulse:false,deferred:0,base:'0b4e88d'})
+      ],
+      sessions:{
+        'mediation-core':[
+          {id:'s1',human:'Dana Okafor',initials:'DO',agent:'Claude Code',machine:'dana-mbp',branch:'fix/session-expiry',status:'inv',statusLabel:'Investigating',color:'#0891b2',intent:'Fix: work claims are not expiring when a session drops its socket, leaving stale locks on files.',files:['src/sessions/heartbeat.ts','src/claims/expiry.ts'],finding:"Heartbeat timer isn't cleared on socket close — stale claims linger ~5 min after disconnect.",activity:'12s ago',pr:null,deferred:2},
+          {id:'s2',human:'Rui Chen',initials:'RC',agent:'Cursor',machine:'rui-linux',branch:'feat/join-codes',status:'edit',statusLabel:'Editing',color:'#1f6feb',intent:'Add expiring, revocable project join codes with an optional max-uses limit.',files:['src/invites/code.ts','src/invites/redeem.ts','api/routes/invites.ts'],finding:'Reusing the token table; added max_uses + expires_at columns.',activity:'40s ago',pr:'#142 draft',deferred:0},
+          {id:'s3',human:'CI · nightly',initials:'CI',agent:'Claude Code',machine:'runner-07',branch:'chore/bump-deps',status:'test',statusLabel:'Running tests',color:'#b45309',intent:'Weekly dependency bump across the service.',files:['package.json','pnpm-lock.yaml'],finding:'2 majors held back (ws, zod) — breaking changes flagged for review.',activity:'1m ago',pr:'#141 open',deferred:0}
+        ],
+        'mediation-mcp':[
+          {id:'m1',human:'Sol Park',initials:'SP',agent:'Aider',machine:'sol-wsl',branch:'fix/tool-timeout',status:'edit',statusLabel:'Editing',color:'#1f6feb',intent:'Tool-call timeouts are not propagated to claim status; claim stays "active" forever.',files:['server/tools/claim.ts','server/rpc.ts'],finding:'Timeout is swallowed in a try/catch — status never transitions to stalled.',activity:'3m ago',pr:null,deferred:1}
+        ],
+        'mediation-web':[
+          {id:'w1',human:'Priya N.',initials:'PN',agent:'Claude Code',machine:'priya-mbp',branch:'feat/project-view',status:'inv',statusLabel:'Investigating',color:'#0891b2',intent:'Build the per-project live work view (this screen).',files:['app/routes/project.tsx','app/components/SessionCard.tsx'],finding:'Reusing the activity-feed component from the overview.',activity:'48s ago',pr:'#57 draft',deferred:0},
+          {id:'w2',human:'Rui Chen',initials:'RC',agent:'Cursor',machine:'rui-linux',branch:'feat/join-codes-ui',status:'edit',statusLabel:'Editing',color:'#1f6feb',intent:'Join-code redemption screen for new members.',files:['app/routes/join.tsx'],finding:'',activity:'2m ago',pr:null,deferred:0}
+        ],
+        'docs':[]
+      },
+      activity:{
+        'mediation-core':[
+          {kind:'edit',text:"Dana's agent touched src/sessions/heartbeat.ts",who:'Claude Code',t:'12s'},
+          {kind:'defer',text:"Incoming agent claim declined — overlaps Dana's session-expiry fix",who:'MCP',t:'38s'},
+          {kind:'claim',text:'Rui claimed feat/join-codes (3 files)',who:'Cursor',t:'40s'},
+          {kind:'bug',text:'Bug B-31 reported: stale claims survive socket drop',who:'Claude Code',t:'1m'},
+          {kind:'test',text:'CI started tests on chore/bump-deps',who:'Claude Code',t:'1m'},
+          {kind:'commit',text:'a3f9c1e pushed to chore/bump-deps',who:'CI',t:'4m'},
+          {kind:'pr',text:'PR #142 opened as draft',who:'Cursor',t:'7m'},
+          {kind:'session',text:"Dana's session started on dana-mbp",who:'Claude Code',t:'12m'},
+          {kind:'expire',text:'Session runner-03 expired (no heartbeat 90s)',who:'system',t:'26m'}
+        ],
+        'mediation-mcp':[
+          {kind:'edit',text:'Sol touched server/tools/claim.ts',who:'Aider',t:'3m'},
+          {kind:'defer',text:'Incoming claim declined — overlaps Sol\u2019s timeout fix',who:'MCP',t:'5m'},
+          {kind:'session',text:'Sol\u2019s session started on sol-wsl',who:'Aider',t:'22m'}
+        ],
+        'mediation-web':[
+          {kind:'edit',text:'Priya touched app/routes/project.tsx',who:'Claude Code',t:'48s'},
+          {kind:'claim',text:'Rui claimed feat/join-codes-ui',who:'Cursor',t:'2m'},
+          {kind:'pr',text:'PR #57 opened as draft',who:'Claude Code',t:'9m'}
+        ],
+        'docs':[]
+      },
+      bugs:{
+        'mediation-core':[
+          {id:'B-31',title:'Stale claims survive socket drop',by:'Claude Code (Dana)',sev:'high',when:'3m ago',status:'being fixed'},
+          {id:'B-30',title:'Join code redeemable after expiry (edge case)',by:'Cursor (Rui)',sev:'med',when:'11m ago',status:'open'},
+          {id:'B-29',title:'Heartbeat log spam at debug level',by:'Claude Code (CI)',sev:'low',when:'26m ago',status:'open'}
+        ],
+        'mediation-mcp':[{id:'B-28',title:'Tool timeout leaves claim active',by:'Aider (Sol)',sev:'high',when:'4m ago',status:'being fixed'}],
+        'mediation-web':[],
+        'docs':[]
+      },
+      completed:{
+        'mediation-core':[
+          {kind:'pr',ref:'#141',title:'Weekly dependency bump',by:'CI · nightly',when:'open · 1m'},
+          {kind:'merged',ref:'#138',title:'Session heartbeat protocol v2',by:'Mara Vogt',when:'2h ago'},
+          {kind:'commit',ref:'8c1d2a',title:'Add claim TTL config',by:'Dana Okafor',when:'5h ago'},
+          {kind:'merged',ref:'#135',title:'Instance admin approval flow',by:'Rui Chen',when:'yesterday'}
+        ],
+        'mediation-mcp':[{kind:'merged',ref:'#40',title:'Claim RPC schema',by:'Sol Park',when:'1d ago'}],
+        'mediation-web':[{kind:'merged',ref:'#52',title:'Overview stat strip',by:'Priya N.',when:'6h ago'}],
+        'docs':[{kind:'merged',ref:'#12',title:'auth.md agent registration',by:'Mara Vogt',when:'2d ago'}]
+      },
+      global:[
+        {kind:'edit',proj:'mediation-core',text:"Dana's agent touched src/sessions/heartbeat.ts",who:'Claude Code',t:'12s'},
+        {kind:'defer',proj:'mediation-core',text:"Agent claim declined — overlaps Dana's session-expiry fix",who:'MCP',t:'38s'},
+        {kind:'claim',proj:'mediation-core',text:'Rui claimed feat/join-codes (3 files)',who:'Cursor',t:'40s'},
+        {kind:'edit',proj:'mediation-web',text:'Priya touched app/routes/project.tsx',who:'Claude Code',t:'48s'},
+        {kind:'bug',proj:'mediation-core',text:'Bug B-31 reported: stale claims survive socket drop',who:'Claude Code',t:'1m'},
+        {kind:'edit',proj:'mediation-mcp',text:'Sol touched server/tools/claim.ts',who:'Aider',t:'3m'},
+        {kind:'commit',proj:'mediation-core',text:'a3f9c1e pushed to chore/bump-deps',who:'CI',t:'4m'},
+        {kind:'defer',proj:'mediation-mcp',text:'Agent claim declined — overlaps Sol\u2019s timeout fix',who:'MCP',t:'5m'},
+        {kind:'pr',proj:'mediation-core',text:'PR #142 opened as draft',who:'Cursor',t:'7m'},
+        {kind:'pr',proj:'mediation-web',text:'PR #57 opened as draft',who:'Claude Code',t:'9m'},
+        {kind:'session',proj:'mediation-core',text:"Dana's session started on dana-mbp",who:'Claude Code',t:'12m'},
+        {kind:'expire',proj:'mediation-core',text:'Session runner-03 expired (no heartbeat 90s)',who:'system',t:'26m'}
+      ],
+      agents:[
+        {name:'Claude Code',owner:'Dana Okafor',machine:'dana-mbp',scope:'claims:write · state:read',lastSeen:'12s ago',status:'active'},
+        {name:'Cursor',owner:'Rui Chen',machine:'rui-linux',scope:'claims:write · state:read',lastSeen:'40s ago',status:'active'},
+        {name:'Claude Code',owner:'CI · nightly',machine:'runner-07',scope:'claims:write · state:read',lastSeen:'1m ago',status:'active'},
+        {name:'Cursor',owner:'Mara Vogt',machine:'mara-mbp',scope:'state:read',lastSeen:'3d ago',status:'idle'},
+        {name:'Aider',owner:'Sol Park',machine:'sol-wsl',scope:'claims:write',lastSeen:'revoked',status:'revoked'}
+      ],
+      pendingAgents:[
+        {agent:'Claude Code',machine:'dana-mbp-2',code:'H4T-92K',requested:'2m ago'},
+        {agent:'Gemini CLI',machine:'ci-runner-11',code:'QX8-51D',requested:'9m ago'}
+      ],
+      pendingUsers:[
+        {name:'Priya N.',initials:'PN',email:'priya@acme.dev'},
+        {name:'Tom R.',initials:'TR',email:'tom@contractor.io'}
+      ],
+      mcp:{
+        endpoint:'https://mediate.acme.dev/mcp',
+        projectId:'proj_9f2a7c',
+        snippet:'{\n  "mcpServers": {\n    "mediation": {\n      "url": "https://mediate.acme.dev/mcp",\n      "project": "proj_9f2a7c",\n      "auth": "see auth.md — agent self-registers"\n    }\n  }\n}'
+      }
+    };
+  }
+
+  renderVals(){
+    const d = this._d || (this._d = this.buildData());
+    const view = this.state.view;
+    const pid = this.state.pid || this.props.defaultProject || 'mediation-core';
+    const tab = this.state.tab;
+    const showFinding = this.props.showFindings !== false;
+    const showRail = this.props.showActivityRail !== false;
+    const setView = (v)=>this.setState({view:v,secs:0});
+    const openProject = (id)=>this.setState({view:'project',pid:id,tab:'now',secs:0});
+    const setTab = (t)=>this.setState({tab:t});
+
+    const KIND = {edit:['#1f6feb','file'],claim:['#0891b2','repo'],defer:['#7c3aed','shield'],bug:['#e11d48','bug'],test:['#b45309','clock'],commit:['#475467','commit'],pr:['#7c3aed','pr'],session:['#10b981','bot'],expire:['#98a2b3','clock'],merged:['#7c3aed','pr']};
+    const deco = (arr)=>arr.map((a,i)=>({...a,key:i,color:KIND[a.kind][0],icon:this.ic(KIND[a.kind][1],KIND[a.kind][0],16)}));
+
+    const NAV = [['overview','Overview','grid'],['activity','Activity','activity'],['agents','Agents & Auth','key'],['settings','Settings','sliders']];
+    const nav = NAV.map(([k,label,icon])=>{
+      const active = view===k;
+      return {key:k,label,open:()=>setView(k),bg:active?'#182136':'transparent',fg:active?'#eaf1ff':'#aab2c2',icon:this.ic(icon,active?'#8fc0ff':'#7b8496',18),badge:k==='agents'?String(d.pendingAgents.length+d.pendingUsers.length):null};
+    });
+
+    const sideProjects = d.projects.map(p=>{
+      const active = view==='project' && pid===p.id;
+      return {name:p.name,liveStr:p.live?String(p.live):'',dot:p.pulse?'#10b981':'#98a2b3',open:()=>openProject(p.id),bg:active?'#182136':'transparent',fg:active?'#eaf1ff':'#aab2c2'};
+    });
+
+    const projects = d.projects.map(p=>({...p,open:()=>openProject(p.id),dot:p.pulse?'#10b981':'#98a2b3',chev:this.ic('chevron','#c0c7d1',18),fileIcon:this.ic('file','#98a2b3',14),shieldIcon:this.ic('shield','#c9922e',13)}));
+
+    const stats = [
+      {label:'Active projects',value:'3',hint:'1 idle',hintColor:'#98a2b3',icon:this.ic('repo','#667085',15)},
+      {label:'Live sessions',value:'6',hint:'across 3 projects',hintColor:'#98a2b3',icon:this.ic('bot','#667085',15)},
+      {label:'Connected agents',value:'4',hint:'2 idle · 1 revoked',hintColor:'#98a2b3',icon:this.ic('key','#667085',15)},
+      {label:'Overlaps averted · 24h',value:'7',hint:'agents deferred via MCP',hintColor:'#0891b2',icon:this.ic('shield','#667085',15)}
+    ];
+
+    const proj = d.projects.find(x=>x.id===pid) || d.projects[0];
+    const rawSess = d.sessions[pid] || [];
+    const TINT = {'#0891b2':'#e6f6fb','#1f6feb':'#e8f0fe','#b45309':'#fbf1e0','#7c3aed':'#f2ecfe'};
+    const AV = {'#0891b2':'linear-gradient(135deg,#22b8cf,#0e7490)','#1f6feb':'linear-gradient(135deg,#4d9bff,#1f6feb)','#b45309':'linear-gradient(135deg,#f0a850,#b45309)'};
+    const sess = rawSess.map(s=>({...s,tint:TINT[s.color]||'#eef1f6',avatarBg:AV[s.color]||'linear-gradient(135deg,#8b96a8,#5b6478)',agentIcon:this.ic('bot','#5b6b85',14),branchIcon:this.ic('branch','#98a2b3',14),findIcon:this.ic('search','#0891b2',14),prIcon:this.ic('pr','#7c3aed',13),shieldIcon:this.ic('shield','#c9922e',13)}));
+    const activity = deco(d.activity[pid] || []);
+    const SEV = {high:'#e11d48',med:'#f59e0b',low:'#98a2b3'};
+    const bugs = (d.bugs[pid]||[]).map((b,i)=>({...b,key:i,sevColor:SEV[b.sev]}));
+    const completed = deco(d.completed[pid]||[]);
+
+    const projStats = [{value:String(proj.live),label:'live'},{value:String(proj.agents),label:'agents'},{value:String(proj.members),label:'members'}];
+    const TAB = [['now','Now'],['activity','Activity'],['completed','Completed']];
+    const tabs = TAB.map(([k,label])=>{const a=tab===k;return {label,open:()=>setTab(k),fg:a?'#101828':'#667085',bd:a?'#1f6feb':'transparent',w:a?'600':'500'};});
+
+    const agents = d.agents.map((a,i)=>({...a,key:i,botIcon:this.ic('bot','#667085',15),sc:a.status==='active'?'#0e9f6e':a.status==='idle'?'#98a2b3':'#e11d48',st:a.status==='active'?'#e7f8f0':a.status==='idle'?'#f1f3f6':'#fdeaec'}));
+    const pendingAgents = d.pendingAgents.map((p,i)=>({...p,key:i,botIcon:this.ic('bot','#667085',15)}));
+    const pendingUsers = d.pendingUsers.map((u,i)=>({...u,key:i,checkIcon:this.ic('check','#0e9f6e',15),xIcon:this.ic('x','#98a2b3',14)}));
+
+    const policies = [
+      {label:'Instance account approval',value:'Required',desc:'New human accounts stay pending until an instance admin approves them.'},
+      {label:'Agent self-registration',value:'Enabled',desc:'Agents obtain a verification code; the human owner confirms. No admin needed per machine.'},
+      {label:'Session heartbeat TTL',value:'90s',desc:'A session is considered gone if it stops reporting for this long.'},
+      {label:'Claim idle expiry',value:'5 min',desc:'Idle work claims auto-release so overlap warnings never rely on stale locks.'}
+    ];
+    const roles = [
+      {name:'Instance administrator',desc:'Approves accounts and sets instance policy.'},
+      {name:'Project administrator',desc:'Manages members, invites and destructive project actions.'},
+      {name:'Project member',desc:'Reads project state; owns their sessions and claims.'},
+      {name:'Agent credential',desc:'Scoped: read state, create/update its own claims. No admin.'}
+    ];
+
+    const META = {
+      overview:['Instance','','Overview'],
+      project:['Projects',proj.name,proj.name],
+      activity:['Instance','','Activity'],
+      agents:['Instance','','Agents & Auth'],
+      settings:['Instance','','Settings']
+    }[view];
+
+    return {
+      secs:this.state.secs,
+      nav, sideProjects, liveTotal:'6',
+      searchIcon:this.ic('search','#98a2b3',15),
+      crumbRoot:META[0], crumbSub:META[1], title:META[2],
+      isOverview:view==='overview', isProject:view==='project', isActivity:view==='activity', isAgents:view==='agents', isSettings:view==='settings',
+      stats, projects,
+      proj:{...proj,dot:proj.pulse?'#10b981':'#98a2b3',repoIcon:this.ic('repo','#98a2b3',13)},
+      projStats, tabs,
+      isNow:tab==='now', isActTab:tab==='activity', isCompTab:tab==='completed',
+      gridCols: showRail ? '1fr 340px' : 'minmax(0,860px)',
+      showRail, showFinding,
+      sess, sessCount:String(sess.length), sessEmpty:sess.length===0,
+      activity, bugs, bugsEmpty:bugs.length===0, completed,
+      globalAct:deco(d.global),
+      agents, agentCount:String(agents.length), pendingAgents, pendingUsers, mcp:d.mcp,
+      plugIcon:this.ic('plug','#8fc0ff',18),
+      policies, roles
+    };
+  }
+}
+</script>
+</body>
+</html>

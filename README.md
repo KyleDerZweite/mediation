@@ -12,37 +12,38 @@ unknowingly solve the same problem twice.
 
 ## Quick start
 
-Requires Node.js ≥ 20. Zero dependencies.
-
 ```bash
+npm install
 npm start                 # http://localhost:4100
 # dashboard:  http://localhost:4100/?project=demo
 # agent docs: http://localhost:4100/AGENT.md
 ```
 
-Config via env: `PORT`, `HOST`, `DATA_DIR` (default `./data`),
-`SESSION_TTL_MS` (default `120000`).
+## Stack
 
-## How it works
+Node.js ≥ 22.18, TypeScript run natively (type stripping — no build step),
+[Hono](https://hono.dev) for HTTP, [Zod](https://zod.dev) for protocol
+validation, built-in `node:sqlite` for persistence. Nothing else.
 
-1. Each agent session **connects** to a shared project id and heartbeats to
-   stay alive.
-2. Before starting work, an agent **checks** for overlapping claims
-   (files, components, or similar task descriptions). Conflicts are warnings,
-   not locks — the agent can stop, coordinate, narrow scope, or continue.
-3. Each session publishes a **work claim**: intent, task reference, affected
-   files/components, branch, base revision, status, and findings as they are
-   discovered.
-4. Sessions **report repo state** (branch, revision, dirty files) so the
-   dashboard shows what is actually being touched.
-5. Agents **file bugs** they discover, even ones they don't fix.
-6. Finished work is **completed with commits/PRs** attached.
-7. Sessions and claims **expire** automatically when heartbeats stop.
+## Structure
+
+```
+src/core/     Domain: types, wire schemas (zod), overlap rules. Pure, no I/O.
+src/server/   Hono app + SQLite store + static serving.
+src/cli/      mediation-agent CLI (global fetch, no deps).
+web/          Dashboard: static, vanilla JS, no build step.
+test/         node:test suites.
+```
+
+Boundaries and contributor conventions: [`AGENTS.md`](AGENTS.md).
+Product spec: [`docs/PRODUCT.md`](docs/PRODUCT.md).
 
 ## API summary
 
 | Method | Path | Purpose |
 | --- | --- | --- |
+| GET | `/api/health` | liveness check |
+| GET | `/api/projects` | list projects with live counts |
 | POST | `/api/projects/:p/sessions` | start a session |
 | POST | `/api/projects/:p/sessions/:id/heartbeat` | keep alive / report activity |
 | DELETE | `/api/projects/:p/sessions/:id` | end session, release claims |
@@ -51,32 +52,55 @@ Config via env: `PORT`, `HOST`, `DATA_DIR` (default `./data`),
 | PATCH | `/api/projects/:p/claims/:id` | update status/files/findings |
 | POST | `/api/projects/:p/claims/:id/complete` | finish with commits/PRs |
 | POST | `/api/projects/:p/bugs` | report a discovered bug |
-| PATCH | `/api/projects/:p/bugs/:id` | update bug status |
+| PATCH | `/api/projects/:p/bugs/:id` | update bug status/severity |
 | GET | `/api/projects/:p/state` | full live project state (dashboard uses this) |
 | GET | `/api/projects/:p/check` | pre-flight overlap check |
 
-Full agent-facing instructions: [`AGENT.md`](AGENT.md).
+Conflicts are **warnings, not locks** — no request is ever rejected because of
+overlap. Full agent-facing instructions with request/response examples:
+[`AGENT.md`](AGENT.md) (also served at `/AGENT.md`).
 
 ## CLI
 
 ```bash
-node bin/mediation-agent.js connect --project demo --agent my-agent
-node bin/mediation-agent.js check --project demo --files src/x.js --intent "fix login loop"
-node bin/mediation-agent.js claim --project demo --session <id> --intent "..." --files src/x.js
+node src/cli/mediation-agent.ts connect --project demo --agent my-agent
+export MEDIATION_SESSION=<id> MEDIATION_PROJECT=demo
+node src/cli/mediation-agent.ts heartbeat --watch 30 &
+node src/cli/mediation-agent.ts check --files src/x.js --intent "fix login loop"
+node src/cli/mediation-agent.ts claim --intent "fix login loop" --files src/x.js
+node src/cli/mediation-agent.ts complete --claim <id> --commits <sha>
 ```
 
-`mediation-agent check` exits with code `3` when overlap is detected, so
-agents can gate on it in scripts.
+`check` exits with code `3` when overlap is detected, so agents can gate on it
+in scripts:
+
+```bash
+node src/cli/mediation-agent.ts check --files src/x.js || exit 1   # stop on overlap (exit 3)
+```
+
+## Configuration
+
+Environment variables for the server:
+
+| Var | Default | Meaning |
+| --- | --- | --- |
+| `PORT` | `4100` | listen port |
+| `HOST` | — | listen host |
+| `DB_PATH` | `./data/mediation.db` | SQLite database file |
+| `SESSION_TTL_MS` | `120000` | session expiry without heartbeat |
+
+Idle claims expire after 30 minutes; completed claims are kept.
 
 ## Tests
 
 ```bash
-npm test
+npm test            # node:test suites
+npm run typecheck   # tsc --noEmit
 ```
 
 ## Scope
 
 This is the development MVP: open endpoints, shared project id, no auth.
 The production identity model (human accounts, project membership, scoped
-agent credentials, invitations, audit trail) is specified in the product
-document and is intentionally out of scope here.
+agent credentials, invitations, audit trail) is specified in
+[`docs/PRODUCT.md`](docs/PRODUCT.md) and is intentionally out of scope here.
