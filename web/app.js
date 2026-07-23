@@ -27,6 +27,44 @@ function initials(name) {
 
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
+/* ---------------- DOM morphing ----------------
+   Patch a container toward new HTML instead of replacing it wholesale.
+   Unchanged nodes are left alone, so CSS animations don't restart, scroll
+   positions survive, and the page doesn't flicker on the 3s poll. */
+
+function syncNode(from, to) {
+  if (from.nodeType !== to.nodeType || from.nodeName !== to.nodeName) {
+    from.replaceWith(to.cloneNode(true));
+    return;
+  }
+  if (from.nodeType === Node.TEXT_NODE) {
+    if (from.nodeValue !== to.nodeValue) from.nodeValue = to.nodeValue;
+    return;
+  }
+  if (from.nodeType !== Node.ELEMENT_NODE) return;
+  for (const { name } of [...from.attributes]) {
+    if (!to.hasAttribute(name)) from.removeAttribute(name);
+  }
+  for (const { name, value } of [...to.attributes]) {
+    if (from.getAttribute(name) !== value) from.setAttribute(name, value);
+  }
+  syncChildren(from, to);
+}
+
+function syncChildren(from, to) {
+  while (from.childNodes.length > to.childNodes.length) from.removeChild(from.lastChild);
+  for (let i = 0; i < to.childNodes.length; i++) {
+    if (i < from.childNodes.length) syncNode(from.childNodes[i], to.childNodes[i]);
+    else from.appendChild(to.childNodes[i].cloneNode(true));
+  }
+}
+
+function morph(el, html) {
+  const tpl = document.createElement('template');
+  tpl.innerHTML = html;
+  syncChildren(el, tpl.content);
+}
+
 /* ---------------- icons (ported from design reference) ---------------- */
 
 const ICON_DEFS = {
@@ -191,16 +229,16 @@ const NAV = [
 
 function renderSidebar() {
   const r = state.route;
-  $('sideNav').innerHTML = NAV.map(([key, label, ic, href]) => {
+  morph($('sideNav'), NAV.map(([key, label, ic, href]) => {
     const active = r.view === key;
     return `<a class="side-nav-item${active ? ' active' : ''}" href="${href}">
       ${icon(ic, active ? '#8fc0ff' : '#7b8496', 18)}<span>${label}</span></a>`;
-  }).join('');
+  }).join(''));
 
   const liveTotal = state.projects.reduce((n, p) => n + p.sessions, 0);
   $('liveTotal').textContent = `${liveTotal} live`;
 
-  $('sideProjects').innerHTML = state.projects.length
+  morph($('sideProjects'), state.projects.length
     ? state.projects.map((p) => {
       const active = r.view === 'project' && r.pid === p.id;
       return `<a class="side-proj${active ? ' active' : ''}" href="#/p/${encodeURIComponent(p.id)}">
@@ -209,7 +247,7 @@ function renderSidebar() {
         ${p.sessions > 0 ? `<span class="side-proj-live">${p.sessions} live</span>` : ''}
       </a>`;
     }).join('')
-    : `<div class="side-empty">No projects yet. A project appears the first time an agent connects to it.</div>`;
+    : `<div class="side-empty">No projects yet. A project appears the first time an agent connects to it.</div>`);
 }
 
 const HEADER_META = {
@@ -224,7 +262,7 @@ function renderHeader() {
   const meta = r.view === 'project'
     ? ['Projects', r.pid, r.pid]
     : HEADER_META[r.view] || HEADER_META.overview;
-  $('crumbs').innerHTML = `<span>${esc(meta[0])}</span>${meta[1] ? `<span>/</span><span class="crumb-sub">${esc(meta[1])}</span>` : ''}`;
+  morph($('crumbs'), `<span>${esc(meta[0])}</span>${meta[1] ? `<span>/</span><span class="crumb-sub">${esc(meta[1])}</span>` : ''}`);
   $('pageTitle').textContent = meta[2];
 }
 
@@ -648,35 +686,48 @@ function renderSettings() {
 
 /* ---------------- render root ---------------- */
 
+let lastRouteKey = null;
+
 function render() {
   renderConnection();
   renderSidebar();
   renderHeader();
   const main = $('main');
   const r = state.route;
-  if (r.view === 'project') main.innerHTML = renderProject();
-  else if (r.view === 'activity') main.innerHTML = renderInstanceActivity();
-  else if (r.view === 'agents') main.innerHTML = renderInstanceAgents();
-  else if (r.view === 'settings') main.innerHTML = renderSettings();
-  else main.innerHTML = renderOverview();
+  const html =
+    r.view === 'project' ? renderProject()
+    : r.view === 'activity' ? renderInstanceActivity()
+    : r.view === 'agents' ? renderInstanceAgents()
+    : r.view === 'settings' ? renderSettings()
+    : renderOverview();
 
-  const copyBtn = $('copyBtn');
-  if (copyBtn) {
-    copyBtn.addEventListener('click', async () => {
-      try {
-        await navigator.clipboard.writeText($('cliSnippet').textContent);
-        copyBtn.textContent = 'Copied';
-        setTimeout(() => { copyBtn.textContent = 'Copy'; }, 1500);
-      } catch {
-        copyBtn.textContent = 'Select & copy';
-      }
-    });
+  // Fresh DOM on navigation (entry animation plays once); in-place patch on
+  // data refresh (no flicker, no animation restarts, scroll preserved).
+  const routeKey = `${r.view}:${r.pid || ''}:${r.tab || ''}`;
+  if (routeKey !== lastRouteKey) {
+    lastRouteKey = routeKey;
+    main.innerHTML = html;
+  } else {
+    morph(main, html);
   }
 }
 
 /* ---------------- boot ---------------- */
 
 $('searchIcon').innerHTML = icon('search', '#98a2b3', 15);
+
+// Delegated: the button is re-created/morphed with the settings view.
+document.addEventListener('click', async (e) => {
+  const btn = e.target.closest('#copyBtn');
+  if (!btn) return;
+  try {
+    await navigator.clipboard.writeText($('cliSnippet').textContent);
+    btn.textContent = 'Copied';
+    setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
+  } catch {
+    btn.textContent = 'Select & copy';
+  }
+});
 
 function onRoute() {
   state.route = parseRoute();
