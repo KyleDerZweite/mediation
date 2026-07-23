@@ -24,6 +24,7 @@ src/server/   Hono app + SQLite store + static serving. Imports core.
 src/cli/      mediation-agent CLI (global fetch). Imports core only for types.
 web/          Dashboard: static, vanilla JS, no build step. Talks to /api only.
 test/         node:test suites.
+clients/      Things installed on USER machines: MCP client, installer, skill.
 docs/         PRODUCT.md (product goal) + PROTOCOL.md (wire protocol, served at /AGENT.md).
 design/       Imported claude.ai design reference (read-only).
 ```
@@ -49,6 +50,36 @@ violating this direction is wrong regardless of convenience.
 | PATCH | `/api/projects/:p/bugs/:id` | `bugPatch` |
 | GET | `/api/projects/:p/state` | — (ProjectState) |
 | GET | `/api/projects/:p/check` | query: `sessionId,files,components,task,intent` |
+| POST | `/api/auth/request` | `authRequest` → `{ requestId, expiresAt }` (code visible only in dashboard) |
+| POST | `/api/auth/redeem` | `authRedeem` → `{ token, agent, developer }` (one-time; 404 wrong/expired code) |
+| GET | `/api/auth/me` | Bearer token → identity, 401 if invalid |
+| GET | `/api/auth/pending` | — dashboard: pending pairing requests incl. `code` |
+| GET | `/api/auth/credentials` | — dashboard: approved credentials (no token value) |
+| DELETE | `/api/auth/credentials/:id` | revoke |
+| GET | `/install.sh` | installer script, `__MEDIATION_URL__` templated from request proto+host |
+| GET | `/install/mediation-mcp.mjs` | dependency-free MCP client (stdio), served from `clients/` |
+| GET | `/install/SKILL.md` | agent skill file, served from `clients/skills/mediation/` |
+
+## Pairing (MVP auth)
+
+Device-flow-lite so a credential identifies agent+developer persistently:
+agent POSTs `/api/auth/request` → dashboard (#/agents) shows the pending
+request with a 6-char one-time code (15 min TTL) → the human relays the code
+to the agent → agent POSTs `/api/auth/redeem` → durable bearer token.
+MVP keeps other endpoints open; if an `Authorization: Bearer` header IS sent,
+it must be valid (401 otherwise). Enforcement becomes strict in the production
+identity phase — don't scatter permission checks beyond this.
+
+## Clients (`clients/`)
+
+- `clients/mediation-mcp.mjs` — single-file, dependency-free MCP stdio server
+  (plain JS, Node ≥ 20, no TS, no imports beyond node builtins). Downloaded to
+  user machines by the installer; must stay self-contained.
+- `clients/install.sh` — installer template; server serves it with
+  `__MEDIATION_URL__` replaced. Detects claude-code + codex, registers the MCP
+  server, installs the skill. Idempotent.
+- `clients/skills/mediation/SKILL.md` — teaches agents the workflow
+  (init → check → claim → update findings → complete).
 
 ## Conventions
 

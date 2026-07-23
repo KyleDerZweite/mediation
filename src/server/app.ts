@@ -18,6 +18,7 @@ const WEB_DIR = path.join(ROOT, 'web');
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.png': 'image/png',
   '.svg': 'image/svg+xml',
@@ -61,9 +62,42 @@ export function buildApp(store: Store): Hono {
     return c.json(body, status);
   });
 
+  // If a Bearer token is sent it must be valid; absent stays allowed (MVP open
+  // API). This is the single enforcement point — production tightens it here.
+  app.use('/api/*', async (c, next) => {
+    const auth = c.req.header('authorization');
+    if (auth?.startsWith('Bearer ')) {
+      const cred = store.getCredentialByToken(auth.slice(7));
+      if (!cred) return c.json({ error: 'invalid or revoked credential' }, 401);
+      c.set('credential' as never, cred as never);
+    }
+    await next();
+  });
+
   // ---- api ----
 
   app.get('/api/health', (c) => c.json({ ok: true, now: Date.now() }));
+
+  // ---- pairing (device-flow-lite; see AGENTS.md "Pairing") ----
+
+  app.post('/api/auth/request', async (c) =>
+    c.json(store.createPairRequest(await parseBody(c, schemas.authRequest))));
+
+  app.post('/api/auth/redeem', async (c) =>
+    c.json(store.redeemPairCode((await parseBody(c, schemas.authRedeem)).code)));
+
+  app.get('/api/auth/me', (c) => {
+    const auth = c.req.header('authorization');
+    const cred = auth?.startsWith('Bearer ') ? store.getCredentialByToken(auth.slice(7)) : null;
+    return cred ? c.json(cred) : c.json({ error: 'missing or invalid credential' }, 401);
+  });
+
+  app.get('/api/auth/pending', (c) => c.json(store.listPendingPairRequests()));
+
+  app.get('/api/auth/credentials', (c) => c.json(store.listCredentials()));
+
+  app.delete('/api/auth/credentials/:id', (c) =>
+    c.json(store.revokeCredential(c.req.param('id'))));
 
   app.get('/api/projects', (c) => c.json(store.listProjects()));
 
@@ -116,6 +150,30 @@ export function buildApp(store: Store): Hono {
   // The protocol doc lives at docs/PROTOCOL.md but stays served at /AGENT.md —
   // that URL is the discovery convention agents are told to fetch.
   app.get('/AGENT.md', (c) => serveFile(c, path.join(ROOT, 'docs', 'PROTOCOL.md')));
+
+  // ---- installer + agent-machine clients (see AGENTS.md "Clients") ----
+
+  // Origin baked into the script so `curl <server>/install.sh | bash` needs no
+  // other configuration. Proxy headers win over the raw Host.
+  app.get('/install.sh', (c) => {
+    let script: string;
+    try {
+      script = fs.readFileSync(path.join(ROOT, 'clients', 'install.sh'), 'utf8');
+    } catch {
+      return c.text('installer not available on this server build', 503);
+    }
+    const proto = c.req.header('x-forwarded-proto') ?? 'http';
+    const host = c.req.header('x-forwarded-host') ?? c.req.header('host') ?? 'localhost:4100';
+    return c.text(script.replaceAll('__MEDIATION_URL__', `${proto}://${host}`), 200, {
+      'content-type': 'text/x-shellscript; charset=utf-8',
+    });
+  });
+
+  app.get('/install/mediation-mcp.mjs', (c) =>
+    serveFile(c, path.join(ROOT, 'clients', 'mediation-mcp.mjs')));
+
+  app.get('/install/SKILL.md', (c) =>
+    serveFile(c, path.join(ROOT, 'clients', 'skills', 'mediation', 'SKILL.md')));
 
   app.get('/web/*', (c) => {
     const rel = decodeURIComponent(c.req.path.slice('/web/'.length));

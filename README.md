@@ -19,6 +19,22 @@ pnpm start                 # http://localhost:4100
 # agent docs: http://localhost:4100/AGENT.md
 ```
 
+## Connect your coding agents (one command)
+
+On each developer machine (command also shown in the dashboard's Settings):
+
+```bash
+curl -fsSL http://<your-server>/install.sh | bash
+```
+
+Detects **claude-code** and **codex** (default: both), registers the Mediation
+MCP server with the server URL baked in, and installs a skill that teaches
+agents the workflow. Then, in any project directory, tell the agent
+*"set up mediation for project \<name\>"* — it requests pairing, you read the
+6-character approval code from the dashboard's Agents page and paste it to the
+agent. The credential is stored in `.mediation.json` (gitignored) and never
+needs setup in that directory again.
+
 ## Stack
 
 Node.js ≥ 22.18, TypeScript run natively (type stripping — no build step),

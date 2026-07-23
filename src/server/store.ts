@@ -2,7 +2,7 @@
 // columns; rows are hydrated back into the core domain types. All domain rules
 // (overlap, tokenize, normalizePath) come from src/core/overlap.ts.
 
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { checkOverlap, normalizePath, pairConflicts } from '../core/overlap.ts';
 import type {
@@ -19,6 +19,11 @@ export const DEFAULT_CLAIM_IDLE_TTL_MS = 30 * 60_000;
 
 const EVENTS_CAP = 200;
 
+// Pairing codes: short-lived, human-relayed. Unambiguous alphabet (no I/O/0/1);
+// 32 chars divides 256 evenly, so byte % 32 is unbiased.
+const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const PAIR_REQUEST_TTL_MS = 15 * 60_000;
+
 interface StoreOptions {
   dbPath: string;
   sessionTtlMs?: number;
@@ -32,6 +37,33 @@ function notFound(message: string): never {
 }
 
 type Row = Record<string, unknown>;
+
+// Pairing/credential shapes are server-local (not part of the wire protocol
+// in core): the dashboard and /api/auth routes are their only consumers.
+export interface PairRequest {
+  id: string;
+  code: string;
+  agent: string;
+  machine: string | null;
+  developer: string | null;
+  createdAt: number;
+  expiresAt: number;
+}
+
+export interface CredentialInfo {
+  id: string;
+  agent: string;
+  machine: string | null;
+  developer: string | null;
+  createdAt: number;
+  lastUsedAt: number;
+}
+
+interface PairRequestInput {
+  agent: string;
+  machine?: string | null;
+  developer?: string | null;
+}
 
 function sessionFromRow(r: Row): Session {
   return {
@@ -127,6 +159,16 @@ export class Store {
       CREATE TABLE IF NOT EXISTS events (
         id TEXT PRIMARY KEY, projectId TEXT NOT NULL, type TEXT NOT NULL,
         message TEXT NOT NULL, at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS pair_requests (
+        id TEXT PRIMARY KEY, code TEXT NOT NULL UNIQUE, agent TEXT NOT NULL,
+        machine TEXT, developer TEXT,
+        created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS credentials (
+        id TEXT PRIMARY KEY, token TEXT NOT NULL UNIQUE, agent TEXT NOT NULL,
+        machine TEXT, developer TEXT,
+        created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(projectId);
       CREATE INDEX IF NOT EXISTS idx_claims_project ON claims(projectId);
@@ -350,6 +392,93 @@ export class Store {
     this.db.prepare('UPDATE bugs SET status = ?, severity = ? WHERE id = ?')
       .run(bug.status, bug.severity, bug.id);
     return bug;
+  }
+
+  // ---- pairing (device-flow-lite; see AGENTS.md "Pairing") ----
+
+  private prunePairRequests(): void {
+    this.db.prepare('DELETE FROM pair_requests WHERE expires_at < ?').run(Date.now());
+  }
+
+  createPairRequest(input: PairRequestInput): { requestId: string; expiresAt: number } {
+    this.prunePairRequests();
+    const t = Date.now();
+    const id = randomUUID();
+    const expiresAt = t + PAIR_REQUEST_TTL_MS;
+    // code is UNIQUE; retry on the (vanishingly rare) collision
+    for (let attempt = 0; ; attempt++) {
+      const code = [...randomBytes(6)].map((b) => CODE_ALPHABET[b % CODE_ALPHABET.length]).join('');
+      try {
+        this.db.prepare(`INSERT INTO pair_requests (id, code, agent, machine, developer, created_at, expires_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?)`)
+          .run(id, code, input.agent, input.machine ?? null, input.developer ?? null, t, expiresAt);
+        return { requestId: id, expiresAt };
+      } catch (err) {
+        if (attempt >= 5) throw err;
+      }
+    }
+  }
+
+  listPendingPairRequests(): PairRequest[] {
+    this.prunePairRequests();
+    // code included: the dashboard is trusted in the MVP and relays it to the human
+    return (this.db.prepare('SELECT * FROM pair_requests ORDER BY created_at').all() as Row[]).map((r) => ({
+      id: r.id as string,
+      code: r.code as string,
+      agent: r.agent as string,
+      machine: (r.machine as string) ?? null,
+      developer: (r.developer as string) ?? null,
+      createdAt: Number(r.created_at),
+      expiresAt: Number(r.expires_at),
+    }));
+  }
+
+  redeemPairCode(code: string): { token: string; agent: string; developer: string | null } {
+    this.prunePairRequests();
+    const row = this.db.prepare('SELECT * FROM pair_requests WHERE code = ?').get(code) as Row | undefined;
+    if (!row) notFound('invalid or expired pairing code');
+    this.db.prepare('DELETE FROM pair_requests WHERE id = ?').run(row.id as string); // one-time
+    const t = Date.now();
+    const token = randomBytes(32).toString('base64url');
+    this.db.prepare(`INSERT INTO credentials (id, token, agent, machine, developer, created_at, last_used_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(randomUUID(), token, row.agent as string, (row.machine as string) ?? null,
+        (row.developer as string) ?? null, t, t);
+    return { token, agent: row.agent as string, developer: (row.developer as string) ?? null };
+  }
+
+  getCredentialByToken(token: string): CredentialInfo | null {
+    const row = this.db.prepare('SELECT * FROM credentials WHERE token = ?').get(token) as Row | undefined;
+    if (!row) return null;
+    const t = Date.now();
+    this.db.prepare('UPDATE credentials SET last_used_at = ? WHERE id = ?').run(t, row.id as string);
+    return {
+      id: row.id as string,
+      agent: row.agent as string,
+      machine: (row.machine as string) ?? null,
+      developer: (row.developer as string) ?? null,
+      createdAt: Number(row.created_at),
+      lastUsedAt: t,
+    };
+  }
+
+  listCredentials(): CredentialInfo[] {
+    // token values are never returned — a credential is only ever shown by id
+    return (this.db.prepare('SELECT id, agent, machine, developer, created_at, last_used_at FROM credentials ORDER BY created_at')
+      .all() as Row[]).map((r) => ({
+        id: r.id as string,
+        agent: r.agent as string,
+        machine: (r.machine as string) ?? null,
+        developer: (r.developer as string) ?? null,
+        createdAt: Number(r.created_at),
+        lastUsedAt: Number(r.last_used_at),
+      }));
+  }
+
+  revokeCredential(id: string): { ok: true } {
+    const res = this.db.prepare('DELETE FROM credentials WHERE id = ?').run(id);
+    if (res.changes === 0) notFound('credential not found');
+    return { ok: true };
   }
 
   // ---- queries ----

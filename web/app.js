@@ -141,6 +141,10 @@ const state = {
   route: { view: 'overview', pid: null, tab: 'now' },
   projects: [],            // ProjectSummary[]
   states: new Map(),       // pid -> ProjectState
+  authPending: [],         // pending pairing requests (incl. code)
+  authCredentials: [],     // approved credentials (no token values)
+  copied: null,            // key of the element that just copied, for feedback
+  revokeArm: null,         // credential id armed for two-step revoke
   lastSyncAt: null,
   misses: 0,
   everSynced: false,
@@ -192,6 +196,13 @@ async function refresh() {
       )));
     for (const [pid, s] of results) if (s) state.states.set(pid, s);
 
+    // pairing state: pending always (feeds the Agents nav badge), credentials
+    // only where shown. Tolerate older servers without these endpoints.
+    state.authPending = await getJSON('/api/auth/pending').catch(() => []);
+    if (r.view === 'agents' || r.view === 'settings') {
+      state.authCredentials = await getJSON('/api/auth/credentials').catch(() => []);
+    }
+
     state.misses = 0;
     state.lastSyncAt = Date.now();
     state.everSynced = true;
@@ -231,8 +242,10 @@ function renderSidebar() {
   const r = state.route;
   morph($('sideNav'), NAV.map(([key, label, ic, href]) => {
     const active = r.view === key;
+    const badge = key === 'agents' && state.authPending.length
+      ? `<span class="nav-badge">${state.authPending.length}</span>` : '';
     return `<a class="side-nav-item${active ? ' active' : ''}" href="${href}">
-      ${icon(ic, active ? '#8fc0ff' : '#7b8496', 18)}<span>${label}</span></a>`;
+      ${icon(ic, active ? '#8fc0ff' : '#7b8496', 18)}<span>${label}</span>${badge}</a>`;
   }).join(''));
 
   const liveTotal = state.projects.reduce((n, p) => n + p.sessions, 0);
@@ -613,6 +626,46 @@ function renderInstanceActivity() {
   </div>`;
 }
 
+function renderPairingPanels() {
+  const now = Date.now();
+  const pending = state.authPending.length
+    ? state.authPending.map((q) => `<div class="pair-row">
+        <span class="avatar" style="background:${AVATAR_FALLBACK}">${esc(initials(q.agent))}</span>
+        <div class="pair-who">
+          <div class="pair-agent">${esc(q.agent)}</div>
+          <div class="pair-meta">${q.machine ? esc(q.machine) + ' · ' : ''}requested ${ago(q.createdAt, now)} ago · expires in ${Math.max(0, Math.round((q.expiresAt - now) / 60000))}m</div>
+        </div>
+        <button class="pair-code" type="button" data-copy="${esc(q.code)}" data-copy-key="pair-${esc(q.id)}"
+          title="Click to copy, then paste this code to the agent">
+          ${state.copied === `pair-${q.id}` ? 'copied' : esc(q.code)}
+        </button>
+      </div>`).join('')
+    : `<div class="empty-note">No pending requests. An agent asking to connect (via <span class="mono">mediation_init</span>) appears here with its approval code.</div>`;
+
+  const creds = state.authCredentials.length
+    ? state.authCredentials.map((cr) => `<div class="pair-row">
+        <span class="avatar" style="background:${AVATAR_FALLBACK}">${esc(initials(cr.agent))}</span>
+        <div class="pair-who">
+          <div class="pair-agent">${esc(cr.agent)}${cr.developer ? ` <span class="pair-dev">for ${esc(cr.developer)}</span>` : ''}</div>
+          <div class="pair-meta">${cr.machine ? esc(cr.machine) + ' · ' : ''}paired ${ago(cr.createdAt, now)} ago · last used ${ago(cr.lastUsedAt, now)} ago</div>
+        </div>
+        <button class="revoke-btn${state.revokeArm === cr.id ? ' armed' : ''}" type="button" data-revoke="${esc(cr.id)}">
+          ${state.revokeArm === cr.id ? 'Confirm revoke' : 'Revoke'}
+        </button>
+      </div>`).join('')
+    : `<div class="empty-note">No paired agent credentials yet.</div>`;
+
+  return `<div class="settings-section" style="margin-bottom:22px">
+      <h3>Pending pairing requests${state.authPending.length ? ` <span class="count-tag">${state.authPending.length}</span>` : ''}</h3>
+      <div class="pair-note">Read the code to your agent (or paste it into the chat) to approve the connection.</div>
+      ${pending}
+    </div>
+    <div class="settings-section" style="margin-bottom:22px">
+      <h3>Approved agent credentials</h3>
+      ${creds}
+    </div>`;
+}
+
 function renderInstanceAgents() {
   const now = Date.now();
   const sections = state.projects.map((p) => {
@@ -625,7 +678,9 @@ function renderInstanceAgents() {
     </div>`;
   }).join('');
   return `<div class="view-activity" style="max-width:960px">
-    <div class="view-note">Every live agent session across the instance, grouped by project.</div>
+    <div class="view-note">Agent pairing and every live session across the instance.</div>
+    ${renderPairingPanels()}
+    <div class="settings-section" style="margin-bottom:12px"><h3>Live sessions</h3></div>
     ${sections || emptyCard('No live agent sessions anywhere. See <a href="#/settings">Settings</a> for how to connect one.')}
   </div>`;
 }
@@ -647,7 +702,26 @@ function renderSettings() {
   ].join('\n');
   const stale = !state.everSynced || state.misses >= 2;
 
+  const installCmd = `curl -fsSL ${origin}/install.sh | bash`;
+
   return `<div class="view-settings">
+    <div class="dark-panel">
+      <div class="dark-panel-head">
+        <span class="dp-icon">${icon('bot', '#8fc0ff', 18)}</span>
+        <span class="dp-title">Install for your agents</span>
+      </div>
+      <div class="dp-note" style="margin:0 0 8px">One command on each developer machine. Detects and registers the
+        Mediation MCP server for <b>claude-code</b> and <b>codex</b> (default: both) and installs a skill that
+        teaches agents the workflow.</div>
+      <div class="snippet-wrap">
+        <pre class="snippet" id="installSnippet">${esc(installCmd)}</pre>
+        <button class="copy-btn" type="button" data-copy="${esc(installCmd)}" data-copy-key="install">${state.copied === 'install' ? 'Copied' : 'Copy'}</button>
+      </div>
+      <div class="dp-note">Then, in a project directory, ask the agent to <i>“set up mediation for project
+        &lt;name&gt;”</i> — it requests pairing, you read the 6-char code from the
+        <a href="#/agents">Agents page</a> and paste it to the agent. Persistent per project directory.</div>
+    </div>
+
     <div class="dark-panel">
       <div class="dark-panel-head">
         <span class="dp-icon">${icon('plug', '#8fc0ff', 18)}</span>
@@ -661,7 +735,7 @@ function renderSettings() {
       <div class="dp-key" style="margin-bottom:6px">CLI</div>
       <div class="snippet-wrap">
         <pre class="snippet" id="cliSnippet">${esc(snippet)}</pre>
-        <button class="copy-btn" id="copyBtn" type="button">Copy</button>
+        <button class="copy-btn" id="copyBtn" type="button">${state.copied === 'cli' ? 'Copied' : 'Copy'}</button>
       </div>
       <div class="dp-note">Agents talk to the open REST API under <span class="mono">/api</span> — no auth in the MVP.
         Full protocol reference for agents: <a href="/AGENT.md" target="_blank" rel="noopener">/AGENT.md</a>.</div>
@@ -716,16 +790,48 @@ function render() {
 
 $('searchIcon').innerHTML = icon('search', '#98a2b3', 15);
 
-// Delegated: the button is re-created/morphed with the settings view.
+// Delegated listeners: elements are re-created/morphed on every poll, so all
+// feedback goes through `state` + render(), never direct DOM mutation.
+let copiedTimer = null;
 document.addEventListener('click', async (e) => {
-  const btn = e.target.closest('#copyBtn');
-  if (!btn) return;
-  try {
-    await navigator.clipboard.writeText($('cliSnippet').textContent);
-    btn.textContent = 'Copied';
-    setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
-  } catch {
-    btn.textContent = 'Select & copy';
+  const legacyCopy = e.target.closest('#copyBtn');
+  if (legacyCopy) {
+    try {
+      await navigator.clipboard.writeText($('cliSnippet').textContent);
+      state.copied = 'cli';
+    } catch { /* leave as-is */ }
+    render();
+    clearTimeout(copiedTimer);
+    copiedTimer = setTimeout(() => { state.copied = null; render(); }, 1500);
+    return;
+  }
+
+  const copyEl = e.target.closest('[data-copy]');
+  if (copyEl) {
+    try {
+      await navigator.clipboard.writeText(copyEl.dataset.copy);
+      state.copied = copyEl.dataset.copyKey || 'copied';
+    } catch { /* clipboard denied — text is visible to select manually */ }
+    render();
+    clearTimeout(copiedTimer);
+    copiedTimer = setTimeout(() => { state.copied = null; render(); }, 1500);
+    return;
+  }
+
+  const revokeEl = e.target.closest('[data-revoke]');
+  if (revokeEl) {
+    const id = revokeEl.dataset.revoke;
+    if (state.revokeArm !== id) {
+      state.revokeArm = id; // first click arms, second confirms
+      render();
+      setTimeout(() => { if (state.revokeArm === id) { state.revokeArm = null; render(); } }, 4000);
+      return;
+    }
+    state.revokeArm = null;
+    try {
+      await fetch(`/api/auth/credentials/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    } catch { /* refresh() below re-syncs either way */ }
+    refresh();
   }
 });
 

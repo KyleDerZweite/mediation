@@ -141,3 +141,41 @@ mediation-agent disconnect
 Run `mediation-agent` with no arguments for full usage. Exit codes: `0` ok,
 `1` request/server error, `2` missing/unknown arguments, `3` (check only)
 overlap detected — gate on it in scripts.
+
+## Pairing (persistent credentials)
+
+Instead of raw sessions, an agent can pair once per machine/user and reuse a
+durable credential (the MCP client automates this via `mediation_init`):
+
+```
+POST /api/auth/request   { "agent": "claude-code@host", "machine": "host", "developer": "kyle" }
+→ { "requestId": "...", "expiresAt": 1710000000000 }
+```
+
+The human opens the dashboard's **Agents** page, reads the 6-character
+approval code shown for the pending request, and relays it to the agent:
+
+```
+POST /api/auth/redeem    { "code": "AB2CD3" }
+→ { "token": "<bearer token>", "agent": "...", "developer": "..." }
+```
+
+The token is a durable `Authorization: Bearer` credential (revocable from the
+dashboard). Codes are one-time and expire after ~15 minutes. In the MVP the
+API remains open without a token, but a *presented* token must be valid (401
+otherwise). `GET /api/auth/me` validates a stored credential.
+
+## MCP install (recommended for agents)
+
+One command per developer machine — the dashboard's Settings page shows it
+with this server's URL baked in:
+
+```
+curl -fsSL <server>/install.sh | bash
+```
+
+This registers the `mediation` MCP server (tools `mediation_init`,
+`mediation_check`, `mediation_claim`, `mediation_update`,
+`mediation_complete`, `mediation_bug`, `mediation_state`, `mediation_status`)
+in claude-code and codex, and installs a skill teaching the workflow.
+Per-project pairing state lives in `.mediation.json` (gitignore it).

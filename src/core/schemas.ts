@@ -69,6 +69,18 @@ export const bugPatch = z.object({
   severity: bugSeverity.optional(),
 });
 
+// ---- agent pairing (device-flow-lite; see AGENTS.md "Pairing") ----
+
+export const authRequest = z.object({
+  agent: str,
+  machine: optStr,
+  developer: optStr,
+});
+
+export const authRedeem = z.object({
+  code: z.string().min(4).max(12),
+});
+
 export type SessionCreate = z.infer<typeof sessionCreate>;
 export type Heartbeat = z.infer<typeof heartbeat>;
 export type RepoReport = z.infer<typeof repoReport>;
