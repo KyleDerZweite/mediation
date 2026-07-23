@@ -8,10 +8,10 @@ Agent-facing protocol docs: `AGENT.md` (served at `/AGENT.md`).
 
 - Node ≥ 22.18, TypeScript run natively (type stripping — erasable syntax only:
   no enums, no namespaces, relative imports use explicit `.ts` extensions).
-  No build step. `npm run typecheck` must pass.
+  No build step. `pnpm run typecheck` must pass.
 - Runtime deps (keep this list short and mainstream): `hono` + `@hono/node-server`
   (HTTP), `zod` (protocol validation). Persistence: built-in `node:sqlite`.
-- Tests: `node:test` in `test/*.test.ts` (`npm test`). Must pass before done.
+- Tests: `node:test` in `test/*.test.ts` (`pnpm test`). Must pass before done.
 
 ## Structure & boundaries
 
@@ -64,5 +64,5 @@ violating this direction is wrong regardless of convenience.
 
 ## Commands
 
-- `npm start` — run server (env: `PORT`=4100, `HOST`, `DB_PATH`=./data/mediation.db, `SESSION_TTL_MS`)
-- `npm test` — tests. `npm run typecheck` — TS check. Both gate "done".
+- `pnpm start` — run server (env: `PORT`=4100, `HOST`, `DB_PATH`=./data/mediation.db, `SESSION_TTL_MS`)
+- `pnpm test` — tests. `pnpm run typecheck` — TS check. Both gate "done".

@@ -13,8 +13,8 @@ unknowingly solve the same problem twice.
 ## Quick start
 
 ```bash
-npm install
-npm start                 # http://localhost:4100
+pnpm install
+pnpm start                 # http://localhost:4100
 # dashboard:  http://localhost:4100/?project=demo
 # agent docs: http://localhost:4100/AGENT.md
 ```
@@ -94,8 +94,8 @@ Idle claims expire after 30 minutes; completed claims are kept.
 ## Tests
 
 ```bash
-npm test            # node:test suites
-npm run typecheck   # tsc --noEmit
+pnpm test            # node:test suites
+pnpm run typecheck   # tsc --noEmit
 ```
 
 ## Scope

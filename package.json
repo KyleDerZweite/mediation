@@ -15,6 +15,7 @@
   "engines": {
     "node": ">=22.18"
   },
+  "packageManager": "pnpm@10.29.2",
   "license": "MIT",
   "dependencies": {
     "@hono/node-server": "^1.14.0",
