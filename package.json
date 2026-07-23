@@ -1,0 +1,18 @@
+{
+  "name": "mediation",
+  "version": "0.1.0",
+  "description": "Live coordination service for developers and coding agents — see overlapping work before Git makes it visible.",
+  "type": "module",
+  "main": "server.js",
+  "bin": {
+    "mediation-agent": "bin/mediation-agent.js"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}
