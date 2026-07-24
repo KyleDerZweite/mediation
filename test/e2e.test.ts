@@ -71,11 +71,12 @@ after(() => {
   if (tmp) rmSync(tmp, { recursive: true, force: true });
 });
 
-test('health responds ok', async () => {
+test('health responds ok and reports the version', async () => {
   const r = await json('GET', `${BASE}/api/health`);
   assert.equal(r.status, 200);
   const body = await jb(r);
   assert.equal(body.ok, true);
+  assert.match(body.version, /^\d+\.\d+\.\d+/);
 });
 
 // Shared across the ordered flow below.
@@ -119,19 +120,29 @@ test('user auth: bootstrap admin, pending approval, login/me/logout over TCP', a
   assert.equal((await json('GET', `${BASE}/api/users/me`, undefined, undefined, bobCookie)).status, 401);
 });
 
-test('pairing: request -> pending -> redeem -> me; bogus bearer 401', async () => {
+test('pairing: request -> approve -> redeem -> me; bogus bearer 401', async () => {
   const { requestId } = await jb(await json('POST', `${BASE}/api/auth/request`, {
     agent: 'e2e-agent@box', machine: 'box', developer: 'kyle',
   }));
   assert.ok(requestId);
 
   const pending = await jb(await json('GET', `${BASE}/api/auth/pending`, undefined, undefined, adminCookie));
-  const mine = pending.find((p: { id: string }) => p.id === requestId);
-  assert.ok(mine, 'request appears in pending');
+  const listed = pending.find((p: { id: string }) => p.id === requestId);
+  assert.ok(listed, 'request appears in pending');
+  assert.equal(listed.code, null, 'code withheld until approval');
 
-  const redeemed = await jb(await json('POST', `${BASE}/api/auth/redeem`, { code: mine.code }));
+  // unapproved codes cannot be redeemed even if guessed
+  assert.equal((await json('POST', `${BASE}/api/auth/redeem`, { code: 'AAAAAAAA' })).status, 404);
+
+  const approved = await jb(await json('POST', `${BASE}/api/auth/pending/${requestId}/approve`,
+    undefined, undefined, adminCookie));
+  assert.match(approved.code, /^[A-HJ-NP-Z2-9]{8}$/);
+  assert.equal(approved.approvedBy, 'admin');
+
+  const redeemed = await jb(await json('POST', `${BASE}/api/auth/redeem`, { code: approved.code }));
   token = redeemed.token;
   assert.ok(token.length > 30);
+  assert.equal(redeemed.ownerUsername, 'admin');
 
   const me = await json('GET', `${BASE}/api/auth/me`, undefined, token);
   assert.equal(me.status, 200);
@@ -180,6 +191,47 @@ test('complete claim then state shows it done', async () => {
   assert.ok(!state.claims.some((c: { id: string }) => c.id === firstClaimId));
 });
 
+test('projects: dashboard create, member gate, add-by-username over TCP', async () => {
+  const created = await json('POST', `${BASE}/api/projects`, { id: 'e2e-private' }, undefined, adminCookie);
+  assert.equal(created.status, 200);
+  assert.equal((await json('POST', `${BASE}/api/projects`, { id: 'e2e-private' }, undefined, adminCookie)).status, 409);
+  assert.equal((await json('POST', `${BASE}/api/projects`, { id: 'agent-made' }, token)).status, 403); // human-only
+
+  // A second human: register → admin approves → login.
+  const carol = (await jb(await json('POST', `${BASE}/api/users/register`,
+    { username: 'carol', password: 'password123' }))).user;
+  await json('PATCH', `${BASE}/api/users/${carol.id}`, { status: 'active' }, undefined, adminCookie);
+  const carolCookie = cookieOf(await json('POST', `${BASE}/api/users/login`,
+    { username: 'carol', password: 'password123' }));
+  assert.ok(carolCookie);
+
+  // Not a member yet: 403 with a hint, and the project is invisible in her list.
+  const denied = await json('GET', `${BASE}/api/projects/e2e-private/state`, undefined, undefined, carolCookie);
+  assert.equal(denied.status, 403);
+  const deniedBody = await jb(denied);
+  assert.match(deniedBody.error, /not a member/);
+  assert.ok(deniedBody.hint);
+  assert.deepEqual(await jb(await json('GET', `${BASE}/api/projects`, undefined, undefined, carolCookie)), []);
+
+  // Owner adds her by username → access flips to 200.
+  assert.equal((await json('POST', `${BASE}/api/projects/e2e-private/members`,
+    { username: 'carol' }, undefined, adminCookie)).status, 200);
+  assert.equal((await json('GET', `${BASE}/api/projects/e2e-private/state`,
+    undefined, undefined, carolCookie)).status, 200);
+  const mine = await jb(await json('GET', `${BASE}/api/projects`, undefined, undefined, carolCookie));
+  assert.deepEqual(mine.map((p: { id: string; role: string }) => [p.id, p.role]), [['e2e-private', 'member']]);
+});
+
+test('agent auto-creates an unknown project and attribution is the credential owner', async () => {
+  const s = await jb(await json('POST', `${BASE}/api/projects/e2e-fresh/sessions`,
+    { agent: 'auto-agent', developer: 'someone-else' }, token));
+  assert.ok(s.id);
+  assert.equal(s.developer, 'admin'); // self-declared value overridden by the verified owner
+
+  const projects = await jb(await json('GET', `${BASE}/api/projects`, undefined, token));
+  assert.equal(projects.find((p: { id: string }) => p.id === 'e2e-fresh').role, 'owner');
+});
+
 test('static assets serve over http', async () => {
   const dash = await json('GET', `${BASE}/`);
   assert.equal(dash.status, 200);
@@ -192,6 +244,19 @@ test('static assets serve over http', async () => {
   const installer = await json('GET', `${BASE}/install.sh`);
   assert.equal(installer.status, 200);
   assert.match(await installer.text(), new RegExp(`${HOST}:${PORT}`));
+});
+
+// Served verbatim (no URL templating) — the uninstaller only touches local paths.
+test('uninstaller serves over http', async () => {
+  const res = await json('GET', `${BASE}/uninstall.sh`);
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type') ?? '', /shellscript/);
+  const script = await res.text();
+  assert.match(script, /^#!\/usr\/bin\/env bash/);
+  // it must know about every harness install.sh writes to
+  for (const marker of ['.claude/skills/mediation', '.codex/config.toml', '.kimi-code', '.kimi']) {
+    assert.ok(script.includes(marker), `uninstaller misses ${marker}`);
+  }
 });
 
 test('revoking the credential invalidates the token', async () => {

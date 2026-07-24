@@ -138,7 +138,7 @@ test('listProjects summarizes sessions, claims, bugs, conflicts', () => {
   store.createClaim(Q, mkClaim({ sessionId: a.id, intent: 'Fix search index rebuild', files: ['src/search.js'] }));
   store.createClaim(Q, mkClaim({ sessionId: b.id, intent: 'Debug search index', files: ['src/search.js'] }));
   store.reportBug(Q, bugCreate.parse({ sessionId: a.id, title: 'search broken' }));
-  const summary = store.listProjects().find((p) => p.id === Q);
+  const summary = store.listProjects(null, true).find((p) => p.id === Q); // instance-admin view
   assert.ok(summary);
   assert.equal(summary.sessions, 2);
   assert.equal(summary.claims, 2);

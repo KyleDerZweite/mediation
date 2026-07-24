@@ -27,13 +27,18 @@ On each developer machine (command also shown in the dashboard's Settings):
 curl -fsSL http://<your-server>/install.sh | bash
 ```
 
-Detects **claude-code** and **codex** (default: both), registers the Mediation
-MCP server with the server URL baked in, and installs a skill that teaches
-agents the workflow. Then, in any project directory, tell the agent
-*"set up mediation for project \<name\>"* — it requests pairing, you read the
-6-character approval code from the dashboard's Agents page and paste it to the
-agent. The credential is stored in `.mediation.json` (gitignored) and never
-needs setup in that directory again.
+Detects **claude-code**, **codex** and **kimi** (default: all found), registers
+the Mediation MCP server with the server URL baked in, and installs a skill
+that teaches agents the workflow. Then, in any project directory, tell the
+agent *"set up mediation"* — it derives the project id from the git remote (one
+project per repository) and tells you which id it picked, then requests
+pairing. Click **Approve** on the dashboard's Agents page, read the revealed
+8-character code to the agent, and the credential is stored in
+`.mediation.json` (gitignored) — that directory never needs setup again.
+
+To remove it all again: `curl -fsSL http://<your-server>/uninstall.sh | bash`
+(your per-project `.mediation.json` files are left in place — they hold
+credentials; `find ~ -name .mediation.json` lists them).
 
 ## Stack
 
@@ -58,8 +63,11 @@ Product spec: [`docs/PRODUCT.md`](docs/PRODUCT.md).
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/api/health` | liveness check |
-| GET | `/api/projects` | list projects with live counts |
+| GET | `/api/health` | liveness check + server version |
+| GET | `/api/projects` | your projects with live counts (admins see all) |
+| POST | `/api/projects` | create a project you own (dashboard/human only) |
+| GET/POST/PATCH/DELETE | `/api/projects/:p/members[/:uid]` | membership (owners; humans only) |
+| DELETE | `/api/projects/:p` | delete a project and everything in it (owner) |
 | POST | `/api/projects/:p/sessions` | start a session |
 | POST | `/api/projects/:p/sessions/:id/heartbeat` | keep alive / report activity |
 | DELETE | `/api/projects/:p/sessions/:id` | end session, release claims |
@@ -121,6 +129,23 @@ cp .env.example .env          # then fill the NEWT_* / PANGOLIN_ENDPOINT values
 podman-compose up -d --build  # starts mediation on :4100 (+ the Newt tunnel)
 ```
 
+### Upgrading
+
+The database migrates itself on start (additive schema + one-shot backfill), so
+an upgrade is: back up, pull, rebuild.
+
+```bash
+podman-compose stop mediation && cp data/mediation.db data/mediation.db.bak && podman-compose up -d --build mediation
+git pull                       # (before the rebuild, if you deploy from source)
+```
+
+Keep a rolling backup — SQLite is a single file:
+
+```
+# crontab -e   → nightly copy, keeps the last 7 by date
+0 3 * * * cp /path/to/mediation/data/mediation.db /path/to/backups/mediation-$(date +\%F).db
+```
+
 Newt values come from your Pangolin dashboard (Sites → Add Site → Newt); point
 the Pangolin site at `mediation:4100`. SQLite data persists in `./data`.
 Mediation runs standalone: without Newt credentials the tunnel container just
@@ -134,7 +159,16 @@ The API requires an identity. Two credential kinds (details:
 
 - **Agents** pair once and send `Authorization: Bearer <token>` on every
   `/api/projects/*` call (see [Connect your coding agents](#connect-your-coding-agents-one-command)).
+  A pairing request must be **approved** by a human in the dashboard before its
+  8-character code appears; the resulting credential belongs to that user and
+  can only reach the projects that user is a member of.
 - **Humans** register an account and use the dashboard with a session cookie.
+
+**Projects are private.** A project has members (`owner` / `member`). Owners add
+people by username on the project's **Members** tab; nobody else can see the
+project at all. An agent that starts a session on an unknown project id creates
+that project and its owner becomes the credential's owner. Agents never manage
+membership — that is human-only.
 
 **Bootstrap (first run):** deploy, open the dashboard, and register the first
 account. Because the user table is empty, that account becomes an **active
@@ -147,10 +181,12 @@ Roles: `admin` (user administration) and `user`. What needs what:
 
 | Access | Requirement |
 | --- | --- |
-| `/api/projects/*` (the mediation API) | a paired agent Bearer token **or** an active user session |
+| `/api/projects/:p/*` (the mediation API) | membership of that project (agent token or user session) |
+| Create a project, manage its members | human session; owner for changes |
 | Dashboard + pairing approval | active user session |
 | Approve / disable / role / delete users | `admin` session |
 
-The last active admin cannot be demoted, disabled, or deleted. The production
-identity model (project membership, invitations, audit trail) remains specified
-in [`docs/PRODUCT.md`](docs/PRODUCT.md).
+The last active admin cannot be demoted, disabled, or deleted, and neither can
+a project's last owner. Invitations and an audit trail remain specified in
+[`docs/PRODUCT.md`](docs/PRODUCT.md). Release notes and known limitations:
+[`CHANGELOG.md`](CHANGELOG.md).

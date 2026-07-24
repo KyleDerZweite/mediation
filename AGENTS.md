@@ -37,24 +37,33 @@ violating this direction is wrong regardless of convenience.
 
 Enforcement is strict (single point in `src/server/app.ts`; matrix in
 `docs/auth.md`, served at `/auth.md`). Identity is a paired **agent Bearer
-credential** and/or a **human user session cookie**. Levels below: PUBLIC (none),
-A|U (agent bearer OR active user), USER (active user), ADMIN (active admin user).
+credential** (bound to the user who approved it) and/or a **human user session
+cookie**. Levels below: PUBLIC (none), A|U (agent bearer OR active user),
+MEMBER (member of the project, or instance-admin cookie), OWNER (project owner
+or instance-admin cookie, human only), USER (active user, human only), ADMIN
+(active admin user).
 
 | Level | Method | Path | Body schema (`src/core/schemas.ts`) |
 | --- | --- | --- | --- |
 | PUBLIC | GET | `/api/health` | — |
-| A\|U | GET | `/api/projects` | — (ProjectSummary[]) |
-| A\|U | POST | `/api/projects/:p/sessions` | `sessionCreate` |
-| A\|U | POST | `/api/projects/:p/sessions/:id/heartbeat` | `heartbeat` |
-| A\|U | DELETE | `/api/projects/:p/sessions/:id` | — |
-| A\|U | POST | `/api/projects/:p/sessions/:id/repo` | `repoReport` |
-| A\|U | POST | `/api/projects/:p/claims` | `claimCreate` → `{ claim, conflicts }` |
-| A\|U | PATCH | `/api/projects/:p/claims/:id` | `claimPatch` |
-| A\|U | POST | `/api/projects/:p/claims/:id/complete` | `claimComplete` |
-| A\|U | POST | `/api/projects/:p/bugs` | `bugCreate` |
-| A\|U | PATCH | `/api/projects/:p/bugs/:id` | `bugPatch` |
-| A\|U | GET | `/api/projects/:p/state` | — (ProjectState) |
-| A\|U | GET | `/api/projects/:p/check` | query: `sessionId,files,components,task,intent` |
+| A\|U | GET | `/api/projects` | — (ProjectSummary[], filtered to the actor; `role` per row) |
+| USER | POST | `/api/projects` | `projectCreate` → creates + owner membership (409 taken, 400 bad slug) |
+| MEMBER | POST | `/api/projects/:p/sessions` | `sessionCreate` (auto-creates an unknown project; `developer` forced to the credential owner) |
+| MEMBER | POST | `/api/projects/:p/sessions/:id/heartbeat` | `heartbeat` |
+| MEMBER | DELETE | `/api/projects/:p/sessions/:id` | — |
+| MEMBER | POST | `/api/projects/:p/sessions/:id/repo` | `repoReport` |
+| MEMBER | POST | `/api/projects/:p/claims` | `claimCreate` → `{ claim, conflicts }` |
+| MEMBER | PATCH | `/api/projects/:p/claims/:id` | `claimPatch` |
+| MEMBER | POST | `/api/projects/:p/claims/:id/complete` | `claimComplete` |
+| MEMBER | POST | `/api/projects/:p/bugs` | `bugCreate` |
+| MEMBER | PATCH | `/api/projects/:p/bugs/:id` | `bugPatch` |
+| MEMBER | GET | `/api/projects/:p/state` | — (ProjectState) |
+| MEMBER | GET | `/api/projects/:p/check` | query: `sessionId,files,components,task,intent` |
+| MEMBER | GET | `/api/projects/:p/members` | — (ProjectMember[]) |
+| OWNER | POST | `/api/projects/:p/members` | `memberAdd` (404 unknown user, 409 dup) |
+| OWNER | PATCH | `/api/projects/:p/members/:uid` | `memberPatch` (409 last owner) |
+| OWNER | DELETE | `/api/projects/:p/members/:uid` | — (a member may remove themselves; 409 last owner) |
+| OWNER | DELETE | `/api/projects/:p` | — cascades sessions/claims/bugs/events/members |
 | PUBLIC | POST | `/api/users/register` | `userRegister` → `{ user, bootstrap }` (first ever = active admin, else pending) |
 | PUBLIC | POST | `/api/users/login` | `userLogin` → `{ user }` + cookie \| 401 \| 403 pending/disabled |
 | PUBLIC | POST | `/api/users/logout` | — clears cookie |
@@ -65,38 +74,70 @@ A|U (agent bearer OR active user), USER (active user), ADMIN (active admin user)
 | PUBLIC | POST | `/api/auth/request` | `authRequest` → `{ requestId, expiresAt }` (code visible only in dashboard) |
 | PUBLIC | POST | `/api/auth/redeem` | `authRedeem` → `{ token, agent, developer }` (one-time; 404 wrong/expired code) |
 | PUBLIC | GET | `/api/auth/me` | Bearer token → identity, 401 if invalid |
-| USER | GET | `/api/auth/pending` | — dashboard: pending pairing requests incl. `code` |
-| USER | GET | `/api/auth/credentials` | — dashboard: approved credentials (no token value) |
-| USER | DELETE | `/api/auth/credentials/:id` | revoke |
+| USER | GET | `/api/auth/pending` | — pending pairing requests; `code` is null until approved |
+| USER | POST | `/api/auth/pending/:id/approve` | — → `{ code, approvedBy }` (first approver wins, 409 otherwise) |
+| USER | DELETE | `/api/auth/pending/:id` | deny/remove a pending request |
+| USER | GET | `/api/auth/credentials` | — own credentials (all, for an admin), incl. `ownerUsername` |
+| USER | DELETE | `/api/auth/credentials/:id` | revoke (owner or admin, else 403) |
 | PUBLIC | GET | `/install.sh` | installer script, `__MEDIATION_URL__` templated from request proto+host |
 | PUBLIC | GET | `/install/mediation-mcp.mjs` | dependency-free MCP client (stdio), served from `clients/` |
 | PUBLIC | GET | `/install/SKILL.md` | agent skill file, served from `clients/skills/mediation/` |
 
 User accounts + sessions live in the same SQLite store (`users`,
-`user_sessions`); scrypt password hashing and session cookies are handled in
+`user_sessions`), as do projects and membership (`projects`,
+`project_members`); scrypt password hashing and session cookies are handled in
 `src/server/store.ts`. Full auth contract: `docs/auth.md`.
+
+Schema changes are **additive and self-migrating**: new tables use
+`CREATE TABLE IF NOT EXISTS`, new columns go in the `ADD_COLUMNS` list in
+`store.ts` (guarded by a `PRAGMA table_info` check — node:sqlite throws on a
+duplicate `ADD COLUMN`). A live database must upgrade by restarting the
+container, never by hand.
 
 ## Pairing + enforcement
 
-Device-flow-lite so a credential identifies agent+developer persistently:
-agent POSTs `/api/auth/request` → dashboard (#/agents) shows the pending
-request with a 6-char one-time code (15 min TTL) → the human relays the code
-to the agent → agent POSTs `/api/auth/redeem` → durable bearer token.
-Enforcement is strict: project endpoints require a valid Bearer credential OR an
-active user session cookie (unauthenticated → 401 with a
-`WWW-Authenticate: Bearer resource_metadata="/auth.md"` hint). A *presented*
-Bearer must always be valid (401 otherwise). This is the single enforcement
-point — the `/api/*` middleware in `src/server/app.ts`. Don't scatter permission
-checks beyond it.
+Device-flow-lite, approve-to-reveal: agent POSTs `/api/auth/request` →
+dashboard (#/agents) shows the pending request **without** a code → a human
+clicks Approve (`POST /api/auth/pending/:id/approve`), which reveals an 8-char
+one-time code (15 min TTL) and stamps the approver → the human relays the code
+→ agent POSTs `/api/auth/redeem` → durable bearer token **owned by the
+approver**. A credential without an active owning user never authenticates
+(401 `credential must be re-paired`).
+
+Enforcement summary (all of it in the one `/api/*` middleware in
+`src/server/app.ts` — don't scatter permission checks beyond it):
+
+- Actor for project authorization = cookie user ?? the credential's owner.
+  Instance-admin power comes from the **cookie** only, never a credential.
+- The project id is validated on the raw path **segment**
+  (`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`) before anything else — `%2F`, `%00`,
+  spaces and traversal all 404 there, so the middleware and the handler's
+  decoded param can never disagree.
+- Deny by default: **any** future route under `/api/projects/:p/` is
+  member-gated by construction. Adding a route needs no new check; making one
+  *less* restricted is the change that needs thought.
+- Human-only surfaces (members, project create/delete, pairing approval) reject
+  agents explicitly instead of falling through to a tier that might allow them.
+- 403 = exists but you are not a member (with a `hint` for the human); 404 =
+  unknown project (with the list of projects the actor can access).
 
 ## Clients (`clients/`)
 
 - `clients/mediation-mcp.mjs` — single-file, dependency-free MCP stdio server
   (plain JS, Node ≥ 20, no TS, no imports beyond node builtins). Downloaded to
-  user machines by the installer; must stay self-contained.
+  user machines by the installer; must stay self-contained. All state I/O and
+  git calls resolve against one base directory (`directory` argument >
+  `MEDIATION_DIR` > git toplevel of cwd > cwd) — never bare `process.cwd()`.
 - `clients/install.sh` — installer template; server serves it with
-  `__MEDIATION_URL__` replaced. Detects claude-code + codex, registers the MCP
+  `__MEDIATION_URL__` replaced. Detects claude-code + codex + kimi (Kimi Code
+  CLI `~/.kimi-code`, legacy Kimi CLI `~/.kimi`; both take an `mcpServers`
+  JSON at `<dir>/mcp.json` and a skill at `<dir>/skills/`), registers the MCP
   server, installs the skill. Idempotent.
+- `clients/uninstall.sh` — reverses install.sh for every harness; served
+  verbatim at `/uninstall.sh` (no URL templating needed). Blocks appended to
+  harness config files carry `>>> mediation >>>` / `<<< mediation <<<` markers
+  so they can be removed surgically — keep them in sync with install.sh.
+  Never deletes per-project `.mediation.json` (they hold credentials).
 - `clients/skills/mediation/SKILL.md` — teaches agents the workflow
   (init → check → claim → update findings → complete).
 
@@ -113,9 +154,12 @@ checks beyond it.
 - Errors: JSON `{ error }` with proper status; validation failures are 400 with
   Zod issue details.
 - Auth is a single module: agent Bearer credentials (pairing) + human user
-  accounts/sessions (`docs/auth.md`), enforced once in the `/api/*` middleware.
-  The fuller identity model (project membership, invitations, audit trail) in
-  `docs/PRODUCT.md` is still later work — don't scatter permission checks around.
+  accounts/sessions + project membership (`docs/auth.md`), enforced once in the
+  `/api/*` middleware. Invitations and an audit trail from `docs/PRODUCT.md`
+  are still later work — don't scatter permission checks around.
+- Project ids identify a **repository** (derived from the git remote by the
+  clients), one project per repo. The slug rule applies to newly created ids
+  only; pre-Alpha ids are grandfathered.
 
 ## Commands
 

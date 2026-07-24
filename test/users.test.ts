@@ -2,44 +2,11 @@
 // Each test gets a fresh store/app so admin-count state stays isolated.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Store } from '../src/server/store.ts';
-import { buildApp } from '../src/server/app.ts';
-
-const PW = 'password123';
-
-interface Opts { token?: string; cookie?: string }
-
-function ctx() {
-  const store = new Store({ dbPath: ':memory:' });
-  const app = buildApp(store);
-  const req = (method: string, path: string, body?: unknown, { token, cookie }: Opts = {}) =>
-    app.request(path, {
-      method,
-      headers: {
-        'content-type': 'application/json',
-        ...(token ? { authorization: `Bearer ${token}` } : {}),
-        ...(cookie ? { cookie } : {}),
-      },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-  return { store, app, req };
-}
-
-const cookieOf = (res: Response): string =>
-  (res.headers.get('set-cookie') ?? '').match(/mediation_user=[^;]+/)?.[0] ?? '';
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const jb = async (r: Response): Promise<any> => r.json();
+import { bootstrap, cookieOf, ctx, jb, pair, PW, type Req } from './helpers.ts';
 
 // Register a user and return the public user object.
-async function register(req: ReturnType<typeof ctx>['req'], username: string) {
+async function register(req: Req, username: string) {
   return (await jb(await req('POST', '/api/users/register', { username, password: PW }))).user;
-}
-
-// Bootstrap the first (admin) account and return its session cookie.
-async function bootstrap(req: ReturnType<typeof ctx>['req']) {
-  await req('POST', '/api/users/register', { username: 'admin', password: PW });
-  return cookieOf(await req('POST', '/api/users/login', { username: 'admin', password: PW }));
 }
 
 test('bootstrap: first register is active admin, later ones are pending users', async () => {
@@ -161,10 +128,8 @@ test('project route: 401 with WWW-Authenticate when unauthenticated', async () =
 });
 
 test('project route works with a paired agent bearer token', async () => {
-  const { req, store } = ctx();
-  const { requestId } = store.createPairRequest({ agent: 'claude' });
-  const code = store.listPendingPairRequests().find((r) => r.id === requestId)!.code;
-  const token = store.redeemPairCode(code).token;
+  const { req } = ctx();
+  const token = await pair(req, await bootstrap(req), 'claude');
   assert.equal((await req('GET', '/api/projects', undefined, { token })).status, 200);
 });
 
@@ -189,18 +154,12 @@ test('expired user session → 401 (backdated expires_at)', async () => {
   assert.equal((await req('GET', '/api/users/me', undefined, { cookie })).status, 401);
 });
 
-// Mint a paired agent bearer token.
-function agentToken(store: ReturnType<typeof ctx>['store']): string {
-  const { requestId } = store.createPairRequest({ agent: 'claude' });
-  const code = store.listPendingPairRequests().find((r) => r.id === requestId)!.code;
-  return store.redeemPairCode(code).token;
-}
-
 test('agent bearer never grants user/admin surfaces: GET /api/users and /api/auth/pending → 401', async () => {
-  const { req, store } = ctx();
-  const token = agentToken(store);
+  const { req } = ctx();
+  const token = await pair(req, await bootstrap(req), 'claude');
   assert.equal((await req('GET', '/api/users', undefined, { token })).status, 401);
   assert.equal((await req('GET', '/api/auth/pending', undefined, { token })).status, 401);
+  assert.equal((await req('POST', '/api/projects', { id: 'agent-made' }, { token })).status, 403); // human-only
 });
 
 test('anonymous GET /api/auth/pending → 401 (pairing-code leak guard)', async () => {

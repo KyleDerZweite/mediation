@@ -29,7 +29,7 @@ before(async () => {
   adminCookie = (res.headers.get('set-cookie') ?? '').match(/mediation_user=[^;]+/)?.[0] ?? '';
 });
 
-test('pairing: request -> pending shows code -> redeem -> me', async () => {
+test('pairing: request -> approve reveals code -> redeem -> me', async () => {
   const req = await json('POST', '/api/auth/request', { agent: 'claude-code@box', machine: 'box', developer: 'kyle' });
   assert.equal(req.status, 200);
   const { requestId, expiresAt } = await jb(req);
@@ -37,9 +37,16 @@ test('pairing: request -> pending shows code -> redeem -> me', async () => {
   assert.ok(expiresAt > Date.now());
 
   const pending = await jb(await json('GET', '/api/auth/pending', undefined, undefined, adminCookie));
-  const mine = pending.find((p: { id: string }) => p.id === requestId);
-  assert.ok(mine, 'request appears in pending list');
-  assert.match(mine.code, /^[A-HJ-NP-Z2-9]{6}$/);
+  const listed = pending.find((p: { id: string }) => p.id === requestId);
+  assert.ok(listed, 'request appears in pending list');
+  assert.equal(listed.code, null, 'code is withheld until a human approves');
+  assert.equal(listed.approvedBy, null);
+
+  const approved = await json('POST', `/api/auth/pending/${requestId}/approve`, undefined, undefined, adminCookie);
+  assert.equal(approved.status, 200);
+  const mine = await jb(approved);
+  assert.match(mine.code, /^[A-HJ-NP-Z2-9]{8}$/);
+  assert.equal(mine.approvedBy, 'admin');
 
   const redeem = await json('POST', '/api/auth/redeem', { code: mine.code });
   assert.equal(redeem.status, 200);
@@ -56,13 +63,12 @@ test('pairing: request -> pending shows code -> redeem -> me', async () => {
 });
 
 test('redeem: wrong code is 404', async () => {
-  assert.equal((await json('POST', '/api/auth/redeem', { code: 'ZZZZZZ' })).status, 404);
+  assert.equal((await json('POST', '/api/auth/redeem', { code: 'ZZZZZZZZ' })).status, 404);
 });
 
 test('expired requests are pruned and not redeemable', async () => {
   const { requestId } = await jb(await json('POST', '/api/auth/request', { agent: 'stale-agent' }));
-  const pending = await jb(await json('GET', '/api/auth/pending', undefined, undefined, adminCookie));
-  const code = pending.find((p: { id: string }) => p.id === requestId).code;
+  const { code } = await jb(await json('POST', `/api/auth/pending/${requestId}/approve`, undefined, undefined, adminCookie));
   // reach into the store to expire it — TTL is not configurable by design
   (store as unknown as { db: { prepare(sql: string): { run(...a: unknown[]): unknown } } })
     .db.prepare('UPDATE pair_requests SET expires_at = ? WHERE id = ?').run(Date.now() - 1, requestId);
@@ -80,14 +86,14 @@ test('enforcement: invalid token 401; absent identity 401 on project routes', as
 
 test('credentials: list hides tokens; revoke invalidates', async () => {
   const { requestId } = await jb(await json('POST', '/api/auth/request', { agent: 'revoke-me' }));
-  const pending = await jb(await json('GET', '/api/auth/pending', undefined, undefined, adminCookie));
-  const code = pending.find((p: { id: string }) => p.id === requestId).code;
+  const { code } = await jb(await json('POST', `/api/auth/pending/${requestId}/approve`, undefined, undefined, adminCookie));
   const { token } = await jb(await json('POST', '/api/auth/redeem', { code }));
 
   const creds = await jb(await json('GET', '/api/auth/credentials', undefined, undefined, adminCookie));
   const cred = creds.find((c: { agent: string }) => c.agent === 'revoke-me');
   assert.ok(cred);
   assert.equal(cred.token, undefined, 'token value never exposed');
+  assert.equal(cred.ownerUsername, 'admin'); // credentials are bound to their approver
 
   assert.equal((await json('DELETE', `/api/auth/credentials/${cred.id}`, undefined, undefined, adminCookie)).status, 200);
   assert.equal((await json('GET', '/api/auth/me', undefined, token)).status, 401);

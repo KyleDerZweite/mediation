@@ -88,6 +88,25 @@ export const userPatch = z.object({
   status: z.enum(['active', 'disabled']).optional(), // approving = 'active'; 'pending' is never settable
 });
 
+// ---- projects + membership (see docs/auth.md) ----
+// The project id slug rule (`^[a-z0-9][a-z0-9._-]{0,63}$`, creation only) and
+// username normalization live in the Store; here we only validate types.
+
+export const memberRole = z.enum(['owner', 'member']);
+
+export const projectCreate = z.object({
+  id: str,
+});
+
+export const memberAdd = z.object({
+  username: str,
+  role: memberRole.default('member'),
+});
+
+export const memberPatch = z.object({
+  role: memberRole,
+});
+
 // ---- agent pairing (device-flow-lite; see AGENTS.md "Pairing") ----
 
 export const authRequest = z.object({
@@ -111,3 +130,6 @@ export type BugPatch = z.infer<typeof bugPatch>;
 export type UserRegister = z.infer<typeof userRegister>;
 export type UserLogin = z.infer<typeof userLogin>;
 export type UserPatch = z.infer<typeof userPatch>;
+export type ProjectCreate = z.infer<typeof projectCreate>;
+export type MemberAdd = z.infer<typeof memberAdd>;
+export type MemberPatch = z.infer<typeof memberPatch>;

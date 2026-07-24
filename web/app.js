@@ -141,14 +141,17 @@ const state = {
   route: { view: 'overview', pid: null, tab: 'now' },
   projects: [],            // ProjectSummary[]
   states: new Map(),       // pid -> ProjectState
-  authPending: [],         // pending pairing requests (incl. code)
+  stateErrors: new Map(),  // pid -> HTTP status of the last failed state fetch (403 = not a member)
+  members: new Map(),      // pid -> ProjectMember[]
+  authPending: [],         // pending pairing requests (code only once approved)
   authCredentials: [],     // approved credentials (no token values)
   me: null,                // logged-in user { id, username, role, status } or null
   users: [],               // admin Users view: PublicUser[]
   authMode: 'login',       // login | register (logged-out view)
   authMsg: '',             // message shown on the login/register card
   copied: null,            // key of the element that just copied, for feedback
-  revokeArm: null,         // credential id armed for two-step revoke
+  armed: null,             // key of a destructive button armed for its second click
+  version: '',             // server version, shown in the sidebar footer
   lastSyncAt: null,
   misses: 0,
   everSynced: false,
@@ -162,7 +165,7 @@ function parseRoute() {
   const h = location.hash.replace(/^#\/?/, '');
   const parts = h.split('/').filter(Boolean);
   if (parts[0] === 'p' && parts[1]) {
-    const tab = parts[2] === 'agents' || parts[2] === 'activity' ? parts[2] : 'now';
+    const tab = ['agents', 'activity', 'members'].includes(parts[2]) ? parts[2] : 'now';
     return { view: 'project', pid: decodeURIComponent(parts[1]), tab };
   }
   if (parts[0] === 'activity') return { view: 'activity', pid: null, tab: null };
@@ -176,8 +179,14 @@ function parseRoute() {
 
 async function getJSON(path) {
   const res = await fetch(path, { headers: { Accept: 'application/json' } });
+  // Only 401 means "logged out" — a 403 (not a member) must never bounce the
+  // user back to the login screen.
   if (res.status === 401) { state.me = null; throw new Error('unauthenticated'); }
-  if (!res.ok) throw new Error(`${res.status} ${path}`);
+  if (!res.ok) {
+    const err = new Error(`${res.status} ${path}`);
+    err.status = res.status;
+    throw err;
+  }
   return res.json();
 }
 
@@ -185,10 +194,11 @@ async function refresh() {
   if (!state.me) return; // logged out: dashboard polling is paused
   const r = state.route;
   try {
-    const [, projects] = await Promise.all([
+    const [health, projects] = await Promise.all([
       getJSON('/api/health'),
       getJSON('/api/projects'),
     ]);
+    state.version = health?.version || '';
     state.projects = Array.isArray(projects) ? projects : [];
 
     const need = [];
@@ -198,10 +208,17 @@ async function refresh() {
     }
     const results = await Promise.all(need.map((pid) =>
       getJSON(`/api/projects/${encodeURIComponent(pid)}/state`).then(
-        (s) => [pid, s],
-        () => [pid, null],
+        (s) => [pid, s, 0],
+        (e) => [pid, null, e.status || 0],
       )));
-    for (const [pid, s] of results) if (s) state.states.set(pid, s);
+    for (const [pid, s, status] of results) {
+      if (s) { state.states.set(pid, s); state.stateErrors.delete(pid); }
+      else { state.states.delete(pid); state.stateErrors.set(pid, status); }
+    }
+    if (r.view === 'project' && r.tab === 'members' && r.pid) {
+      state.members.set(r.pid,
+        await getJSON(`/api/projects/${encodeURIComponent(r.pid)}/members`).catch(() => []));
+    }
 
     // pairing state: pending always (feeds the Agents nav badge), credentials
     // only where shown. Tolerate older servers without these endpoints.
@@ -342,6 +359,7 @@ function renderOverview() {
       <div class="proj-card-top">
         <span class="dot ${p.sessions > 0 ? 'dot-ok pulse' : 'dot-idle'}"></span>
         <span class="proj-card-name">${esc(p.id)}</span>
+        <span class="you-tag">${p.role ? esc(p.role) : 'not a member'}</span>
         <span class="proj-card-chev">${icon('chevron', '#c0c7d1', 18)}</span>
       </div>
       <div class="proj-card-desc">${agentsPreview}</div>
@@ -365,9 +383,14 @@ function renderOverview() {
       <h2>Projects</h2>
       <span class="section-sub">Live state before Git makes it visible</span>
     </div>
+    <div class="create-row">
+      <input class="auth-input create-input" id="newProjectId" placeholder="new-project-id" autocomplete="off">
+      <button class="user-act-btn" type="button" data-newproject>Create project</button>
+      <span class="section-sub">You become its owner; only members you add can see it.</span>
+    </div>
     ${ps.length
       ? `<div class="proj-grid">${cards}</div>`
-      : emptyCard(`No projects yet. Connect an agent to create one:<br><span class="mono">mediation-agent connect --project my-project --agent claude-code</span><br>See <a href="#/settings">Settings</a> for the full snippet.`)}
+      : emptyCard(`No projects yet. Create one above, or let an agent create it on its first session (<span class="mono">mediation_init</span>).`)}
   </div>`;
 }
 
@@ -486,7 +509,7 @@ function renderProject() {
   const summary = state.projects.find((p) => p.id === pid);
   const now = ps?.now && Math.abs(ps.now - Date.now()) < 60_000 ? Date.now() : Date.now();
 
-  const tabs = [['now', 'Now'], ['agents', 'Agents'], ['activity', 'Activity']].map(([key, label]) => {
+  const tabs = [['now', 'Now'], ['agents', 'Agents'], ['activity', 'Activity'], ['members', 'Members']].map(([key, label]) => {
     const href = key === 'now' ? `#/p/${encodeURIComponent(pid)}` : `#/p/${encodeURIComponent(pid)}/${key}`;
     return `<a class="tab${tab === key ? ' active' : ''}" href="${href}">${label}</a>`;
   }).join('');
@@ -512,7 +535,16 @@ function renderProject() {
   </div>`;
 
   let body;
-  if (!ps) {
+  const failure = state.stateErrors.get(pid);
+  if (tab === 'members') {
+    body = renderMembersTab(pid);
+  } else if (failure === 403) {
+    body = emptyCard(`You are not a member of <span class="mono">${esc(pid)}</span> — ask one of its
+      owners to add you (dashboard → project → Members). Retrying will not help until they do.`);
+  } else if (failure === 404) {
+    body = emptyCard(`No project <span class="mono">${esc(pid)}</span> on this server.
+      <a href="#/">Back to the overview</a>.`);
+  } else if (!ps) {
     body = emptyCard(state.everSynced
       ? `Nothing recorded for <span class="mono">${esc(pid)}</span> yet. It will appear as soon as an agent connects.`
       : `Waiting for the Mediation API…`);
@@ -600,6 +632,64 @@ function renderNowTab(ps, now) {
   </div>`;
 }
 
+/* ---------------- members tab ----------------
+   TRAP: the 3s poll morphs this DOM. morph() syncs attributes, not input value
+   properties — so every input lives in a STATIC row (never inside the mapped
+   list), has a stable id, is never rendered with a value="…" attribute, and is
+   read with .value at click time. */
+
+const mBtn = (act, pid, uid, label, danger) =>
+  `<button class="user-act-btn${danger ? ' danger' : ''}" type="button" data-maction="${act}"
+    data-pid="${esc(pid)}" data-uid="${esc(uid)}">${label}</button>`;
+
+function renderMembersTab(pid) {
+  const members = state.members.get(pid) || [];
+  const summary = state.projects.find((p) => p.id === pid);
+  const canAdmin = summary?.role === 'owner' || state.me?.role === 'admin';
+
+  const addRow = canAdmin ? `<div class="table-row users-row">
+    <span><input class="create-input" id="newMemberUser" placeholder="username" autocomplete="off"></span>
+    <span><select class="create-input" id="newMemberRole">
+      <option value="member">member</option><option value="owner">owner</option></select></span>
+    <span></span><span></span>
+    <span class="user-actions">${mBtn('add', pid, '', 'Add member')}</span>
+  </div>` : '';
+
+  const rows = members.map((m) => {
+    const you = state.me && m.userId === state.me.id;
+    const armKey = `rm-${pid}-${m.userId}`;
+    const acts = [];
+    if (canAdmin) {
+      acts.push(m.role === 'owner'
+        ? mBtn('makemember', pid, m.userId, 'Make member')
+        : mBtn('makeowner', pid, m.userId, 'Make owner'));
+    }
+    if (canAdmin && !you) {
+      acts.push(`<button class="user-act-btn danger${state.armed === armKey ? ' armed' : ''}" type="button"
+        data-maction="remove" data-pid="${esc(pid)}" data-uid="${esc(m.userId)}"
+        >${state.armed === armKey ? 'Confirm remove' : 'Remove'}</button>`);
+    }
+    if (you) acts.push(mBtn('leave', pid, m.userId, 'Leave', true));
+    return `<div class="table-row users-row">
+      <span class="cell-agent">${esc(m.username)}${you ? ' <span class="you-tag">you</span>' : ''}</span>
+      <span>${esc(m.role)}</span>
+      <span>${ago(m.createdAt)} ago</span>
+      <span></span>
+      <span class="user-actions">${acts.join('')}</span>
+    </div>`;
+  }).join('');
+
+  return `<div class="view-activity" style="max-width:1000px">
+    <div class="view-note">Only members see this project. Owners add and remove people;
+      anyone can leave. The last owner cannot be removed.</div>
+    <div class="table users-table" style="max-width:1000px">
+      <div class="table-head users-row"><span>User</span><span>Role</span><span>Member since</span><span></span><span>Actions</span></div>
+      ${addRow}
+      ${members.length ? rows : '<div class="empty-inline" style="padding:16px">No members yet.</div>'}
+    </div>
+  </div>`;
+}
+
 function renderSessionsTable(sessions, now) {
   if (!sessions.length) {
     return emptyCard('No live sessions. An agent joins with <span class="mono">mediation-agent connect</span> and stays listed while it heartbeats.');
@@ -647,33 +737,40 @@ function renderPairingPanels() {
           <div class="pair-agent">${esc(q.agent)}</div>
           <div class="pair-meta">${q.machine ? esc(q.machine) + ' · ' : ''}requested ${ago(q.createdAt, now)} ago · expires in ${Math.max(0, Math.round((q.expiresAt - now) / 60000))}m</div>
         </div>
-        <button class="pair-code" type="button" data-copy="${esc(q.code)}" data-copy-key="pair-${esc(q.id)}"
-          title="Click to copy, then paste this code to the agent">
-          ${state.copied === `pair-${q.id}` ? 'copied' : esc(q.code)}
-        </button>
+        ${q.code
+          ? `<span class="pair-approved">approved by ${esc(q.approvedBy || '—')}</span>
+             <button class="pair-code" type="button" data-copy="${esc(q.code)}" data-copy-key="pair-${esc(q.id)}"
+               title="Click to copy, then read this code to the agent">
+               ${state.copied === `pair-${q.id}` ? 'copied' : esc(q.code)}
+             </button>`
+          : `<button class="user-act-btn" type="button" data-approve="${esc(q.id)}">Approve</button>
+             <button class="user-act-btn danger" type="button" data-deny="${esc(q.id)}">Deny</button>`}
       </div>`).join('')
-    : `<div class="empty-note">No pending requests. An agent asking to connect (via <span class="mono">mediation_init</span>) appears here with its approval code.</div>`;
+    : `<div class="empty-note">No pending requests. An agent asking to connect (via <span class="mono">mediation_init</span>) appears here — approve it to reveal its code.</div>`;
 
   const creds = state.authCredentials.length
     ? state.authCredentials.map((cr) => `<div class="pair-row">
         <span class="avatar" style="background:${AVATAR_FALLBACK}">${esc(initials(cr.agent))}</span>
         <div class="pair-who">
           <div class="pair-agent">${esc(cr.agent)}${cr.developer ? ` <span class="pair-dev">for ${esc(cr.developer)}</span>` : ''}</div>
-          <div class="pair-meta">${cr.machine ? esc(cr.machine) + ' · ' : ''}paired ${ago(cr.createdAt, now)} ago · last used ${ago(cr.lastUsedAt, now)} ago</div>
+          <div class="pair-meta">owner ${esc(cr.ownerUsername || 'unbound')}${cr.machine ? ' · ' + esc(cr.machine) : ''} · paired ${ago(cr.createdAt, now)} ago · last used ${ago(cr.lastUsedAt, now)} ago</div>
         </div>
-        <button class="revoke-btn${state.revokeArm === cr.id ? ' armed' : ''}" type="button" data-revoke="${esc(cr.id)}">
-          ${state.revokeArm === cr.id ? 'Confirm revoke' : 'Revoke'}
-        </button>
+        ${cr.ownerUsername === state.me?.username || state.me?.role === 'admin'
+          ? `<button class="revoke-btn${state.armed === `rv-${cr.id}` ? ' armed' : ''}" type="button" data-revoke="${esc(cr.id)}">
+              ${state.armed === `rv-${cr.id}` ? 'Confirm revoke' : 'Revoke'}
+            </button>`
+          : ''}
       </div>`).join('')
     : `<div class="empty-note">No paired agent credentials yet.</div>`;
 
   return `<div class="settings-section" style="margin-bottom:22px">
       <h3>Pending pairing requests${state.authPending.length ? ` <span class="count-tag">${state.authPending.length}</span>` : ''}</h3>
-      <div class="pair-note">Read the code to your agent (or paste it into the chat) to approve the connection.</div>
+      <div class="pair-note">Approve a request to reveal its 8-character code, then read the code to the
+        agent. The credential is bound to you — the agent acts as you on the projects you belong to.</div>
       ${pending}
     </div>
     <div class="settings-section" style="margin-bottom:22px">
-      <h3>Approved agent credentials</h3>
+      <h3>${state.me?.role === 'admin' ? 'All agents' : 'My agents'}</h3>
       ${creds}
     </div>`;
 }
@@ -703,7 +800,7 @@ function renderSettings() {
   const origin = location.origin && location.origin !== 'null' ? location.origin : 'http://localhost:4100';
   const pid = state.projects[0]?.id || 'my-project';
   const snippet = [
-    '# start a session for this project',
+    '# start a session for this project (creates it if the id is new — you become its owner)',
     `mediation-agent connect --project ${pid} --agent claude-code`,
     '',
     '# before touching files: check who else is there',
@@ -729,9 +826,10 @@ function renderSettings() {
         <pre class="snippet" id="installSnippet">${esc(installCmd)}</pre>
         <button class="copy-btn" type="button" data-copy="${esc(installCmd)}" data-copy-key="install">${state.copied === 'install' ? 'Copied' : 'Copy'}</button>
       </div>
-      <div class="dp-note">Then, in a project directory, ask the agent to <i>“set up mediation for project
-        &lt;name&gt;”</i> — it requests pairing, you read the 6-char code from the
-        <a href="#/agents">Agents page</a> and paste it to the agent. Persistent per project directory.</div>
+      <div class="dp-note">Then, in a project directory, ask the agent to <i>“set up mediation”</i> — it
+        derives the project id from the git remote and tells you which one it picked (correct it if it is
+        wrong), then requests pairing. Click <b>Approve</b> on the <a href="#/agents">Agents page</a>, read
+        the revealed 8-character code to the agent, and it is paired for that directory for good.</div>
     </div>
 
     <div class="dark-panel">
@@ -884,6 +982,7 @@ function render() {
     '<button class="logout-btn" type="button" data-logout>Logout</button>';
   $('footerName').textContent = state.me.username;
   $('footerRole').textContent = state.me.role === 'admin' ? 'Administrator' : 'Member';
+  $('footerVersion').textContent = state.version ? `v${state.version}` : '';
   const main = $('main');
   const r = state.route;
   const html =
@@ -987,19 +1086,85 @@ document.addEventListener('click', async (e) => {
   const revokeEl = e.target.closest('[data-revoke]');
   if (revokeEl) {
     const id = revokeEl.dataset.revoke;
-    if (state.revokeArm !== id) {
-      state.revokeArm = id; // first click arms, second confirms
-      render();
-      setTimeout(() => { if (state.revokeArm === id) { state.revokeArm = null; render(); } }, 4000);
-      return;
+    if (!arm(`rv-${id}`)) return; // first click arms, second confirms
+    await send('DELETE', `/api/auth/credentials/${encodeURIComponent(id)}`);
+    refresh();
+    return;
+  }
+
+  const approveEl = e.target.closest('[data-approve]');
+  if (approveEl) {
+    await send('POST', `/api/auth/pending/${encodeURIComponent(approveEl.dataset.approve)}/approve`);
+    refresh();
+    return;
+  }
+
+  const denyEl = e.target.closest('[data-deny]');
+  if (denyEl) {
+    if (!confirm('Deny this pairing request? The agent has to ask again.')) return;
+    await send('DELETE', `/api/auth/pending/${encodeURIComponent(denyEl.dataset.deny)}`);
+    refresh();
+    return;
+  }
+
+  if (e.target.closest('[data-newproject]')) {
+    const id = ($('newProjectId')?.value || '').trim();
+    if (!id) { alert('Enter a project id first.'); return; }
+    if (await send('POST', '/api/projects', { id })) {
+      $('newProjectId').value = '';
+      location.hash = `#/p/${encodeURIComponent(id.toLowerCase())}`;
     }
-    state.revokeArm = null;
-    try {
-      await fetch(`/api/auth/credentials/${encodeURIComponent(id)}`, { method: 'DELETE' });
-    } catch { /* refresh() below re-syncs either way */ }
+    refresh();
+    return;
+  }
+
+  const ma = e.target.closest('[data-maction]');
+  if (ma) {
+    const { maction: act, pid, uid } = ma.dataset;
+    const base = `/api/projects/${encodeURIComponent(pid)}/members`;
+    if (act === 'add') {
+      const username = ($('newMemberUser')?.value || '').trim();
+      if (!username) { alert('Enter a username first.'); return; }
+      if (await send('POST', base, { username, role: $('newMemberRole')?.value || 'member' })) {
+        $('newMemberUser').value = '';
+      }
+    } else if (act === 'makeowner' || act === 'makemember') {
+      await send('PATCH', `${base}/${encodeURIComponent(uid)}`, { role: act === 'makeowner' ? 'owner' : 'member' });
+    } else if (act === 'remove') {
+      if (!arm(`rm-${pid}-${uid}`)) return;
+      await send('DELETE', `${base}/${encodeURIComponent(uid)}`);
+    } else if (act === 'leave') {
+      if (!confirm(`Leave "${pid}"? You lose access until an owner adds you back.`)) return;
+      if (await send('DELETE', `${base}/${encodeURIComponent(uid)}`)) location.hash = '#/';
+    }
     refresh();
   }
 });
+
+// Two-step confirmation shared by every destructive button: first click arms
+// (and auto-disarms after 4s), second click returns true.
+function arm(key) {
+  if (state.armed === key) { state.armed = null; return true; }
+  state.armed = key;
+  render();
+  setTimeout(() => { if (state.armed === key) { state.armed = null; render(); } }, 4000);
+  return false;
+}
+
+// Fire a mutation and surface the server's error text (409s, hints) as an alert.
+async function send(method, path, body) {
+  try {
+    const res = await fetch(path, {
+      method,
+      headers: { 'content-type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    if (res.ok) return true;
+    const b = await res.json().catch(() => ({}));
+    alert([b.error || `Request failed (${res.status})`, b.hint].filter(Boolean).join('\n\n'));
+  } catch { alert('Request failed — is the server reachable?'); }
+  return false;
+}
 
 function onRoute() {
   if (!state.me) return; // logged out: hash changes are inert

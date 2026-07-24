@@ -13,14 +13,44 @@ the full auth contract is at `/auth.md`. Requests are keyed by a shared project
 identifier. All bodies are JSON; errors come back as `{ "error": "..." }` with a
 proper HTTP status (validation failures are 400 with Zod issue details).
 
-`GET /api/health` → `{ "ok": true }` — use it to verify the server is up.
-`GET /api/projects` → list of all projects with live counts:
+`GET /api/health` → `{ "ok": true, "now": ..., "version": "0.3.0-alpha" }` — use
+it to verify the server is up.
+`GET /api/projects` → the projects **you** may see, with live counts:
 
 ```
 GET /api/projects
-→ [ { "id": "demo", "sessions": 2, "claims": 3, "openBugs": 1,
+→ [ { "id": "demo", "role": "owner", "sessions": 2, "claims": 3, "openBugs": 1,
       "conflicts": 0, "agents": ["claude", "codex"], "lastActivityAt": 1753257600000 } ]
 ```
+
+## Projects
+
+A project id is a real object, not a free-text label, and it is **private**:
+only its members (and instance admins) can read or write anything under
+`/api/projects/{project}/`.
+
+- **One project per repository.** The id is the repository name from the git
+  remote — `git config --get remote.origin.url`, take the last path component,
+  strip `.git`, lowercase, replace anything outside `[a-z0-9._-]` with `-`.
+  Never derive it from the directory name (stale, renamed, generic). With no
+  git remote, **ask your human** which project this is.
+- **Ids created from now on** must match `^[a-z0-9][a-z0-9._-]{0,63}$`
+  (trimmed + lowercased); older ids are grandfathered.
+- **Auto-create:** `POST /api/projects/{project}/sessions` on an id that does
+  not exist creates it, with the user owning your credential as its owner.
+  That is the only creation path an agent has — everything else answers `404`.
+- **Membership is human-managed.** Agents cannot add members, remove members,
+  create projects through `POST /api/projects`, or delete a project: those
+  answer `403 { "error": "project administration is human-only" }`.
+- **Not a member** of an existing project → `403`:
+  `{ "error": "not a member of project \"x\"", "project", "hint", "docs": "/auth.md" }`.
+  Relay the `hint` to your human verbatim and **stop**: do not retry, do not
+  switch ids, do not create another project. Only an owner can add you.
+- **Unknown project** → `404`:
+  `{ "error": "project not found", "project", "hint": "... Projects you can access: a, b", "docs": "/auth.md" }`.
+  That usually means a typo — compare with the list in the hint.
+- Your session's `developer` is overwritten with the username that owns your
+  credential: attribution is verified, not self-declared.
 
 ## Workflow
 
@@ -156,13 +186,17 @@ POST /api/auth/request   { "agent": "claude-code@host", "machine": "host", "deve
 → { "requestId": "...", "expiresAt": 1710000000000 }
 ```
 
-The human opens the dashboard's **Agents** page, reads the 6-character
-approval code shown for the pending request, and relays it to the agent:
+The human opens the dashboard's **Agents** page and clicks **Approve** on the
+pending request. Only then does an 8-character code appear, which they relay:
 
 ```
-POST /api/auth/redeem    { "code": "AB2CD3" }
-→ { "token": "<bearer token>", "agent": "...", "developer": "..." }
+POST /api/auth/redeem    { "code": "AB2CD3EF" }
+→ { "token": "<bearer token>", "agent": "...", "developer": "...", "ownerUsername": "kyle" }
 ```
+
+Redeeming before approval is `403 { "error": "pairing request not approved yet" }`
+— ask the human to click Approve; do not spin. The credential belongs to the
+approving user and acts as them.
 
 The token is a durable `Authorization: Bearer` credential (revocable from the
 dashboard). Codes are one-time and expire after ~15 minutes. Send this token on
@@ -182,5 +216,15 @@ curl -fsSL <server>/install.sh | bash
 This registers the `mediation` MCP server (tools `mediation_init`,
 `mediation_check`, `mediation_claim`, `mediation_update`,
 `mediation_complete`, `mediation_bug`, `mediation_state`, `mediation_status`)
-in claude-code and codex, and installs a skill teaching the workflow.
-Per-project pairing state lives in `.mediation.json` (gitignore it).
+in claude-code, codex and kimi, and installs a skill teaching the workflow.
+`<server>/uninstall.sh` reverses all of it (per-project `.mediation.json`
+files are left alone — they hold credentials).
+Per-project pairing state lives in `.mediation.json` (gitignore it —
+`mediation_confirm` checks with `git check-ignore` and tells you). It is read
+and written in the project directory: the git toplevel of wherever the client
+was started, or the `directory` argument / `MEDIATION_DIR` env var if the
+harness starts the MCP server somewhere else.
+`mediation_init` takes the project id as an *optional* argument: by default it
+derives it from the git remote and reports which id and which source it used —
+state that to your human before they approve, so a wrong id is corrected
+before it becomes a project nobody else can see.

@@ -111,8 +111,11 @@ export interface WorkScope {
 
 // ---- API read models ----
 
+export type MemberRole = 'owner' | 'member';
+
 export interface ProjectSummary {
   id: string;
+  role: MemberRole | null; // the requesting actor's role; null = instance admin viewing a project they are not a member of
   sessions: number;
   claims: number;
   openBugs: number;

@@ -8,7 +8,7 @@ import { promisify } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
 import { checkOverlap, normalizePath, pairConflicts } from '../core/overlap.ts';
 import type {
-  Bug, Claim, ConflictWarning, EventEntry, EventType, ProjectState,
+  Bug, Claim, ConflictWarning, EventEntry, EventType, MemberRole, ProjectState,
   ProjectSummary, RecentFile, RepoState, Session, WorkScope,
 } from '../core/types.ts';
 import type {
@@ -24,7 +24,21 @@ const EVENTS_CAP = 200;
 // Pairing codes: short-lived, human-relayed. Unambiguous alphabet (no I/O/0/1);
 // 32 chars divides 256 evenly, so byte % 32 is unbiased.
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const CODE_LENGTH = 8;
 const PAIR_REQUEST_TTL_MS = 15 * 60_000;
+
+// Project ids are slugs. Enforced on CREATION only — ids created before the
+// Alpha milestone are grandfathered and keep working.
+const PROJECT_ID_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+
+// Additive column migrations for live databases. node:sqlite throws on a
+// duplicate ADD COLUMN, so each is guarded by a PRAGMA table_info check.
+// Future columns are one line here.
+const ADD_COLUMNS: [table: string, column: string, decl: string][] = [
+  ['credentials', 'user_id', 'TEXT'],
+  ['pair_requests', 'approved_by', 'TEXT'],
+  ['pair_requests', 'approved_at', 'INTEGER'],
+];
 
 interface StoreOptions {
   dbPath: string;
@@ -106,10 +120,11 @@ export type LoginResult =
 // in core): the dashboard and /api/auth routes are their only consumers.
 export interface PairRequest {
   id: string;
-  code: string;
+  code: string | null; // null until a human approves the request (approve-to-reveal)
   agent: string;
   machine: string | null;
   developer: string | null;
+  approvedBy: string | null; // username of the approver
   createdAt: number;
   expiresAt: number;
 }
@@ -119,8 +134,17 @@ export interface CredentialInfo {
   agent: string;
   machine: string | null;
   developer: string | null;
+  userId: string; // owning user — a credential without an ACTIVE owner never resolves
+  ownerUsername: string;
   createdAt: number;
   lastUsedAt: number;
+}
+
+export interface ProjectMember {
+  userId: string;
+  username: string;
+  role: MemberRole;
+  createdAt: number;
 }
 
 interface PairRequestInput {
@@ -243,12 +267,82 @@ export class Store {
         token TEXT PRIMARY KEY, user_id TEXT NOT NULL,
         created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS projects (
+        id TEXT PRIMARY KEY, created_by TEXT, created_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS project_members (
+        project_id TEXT NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL,
+        created_at INTEGER NOT NULL, PRIMARY KEY (project_id, user_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_members_user ON project_members(user_id);
       CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id);
       CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(projectId);
       CREATE INDEX IF NOT EXISTS idx_claims_project ON claims(projectId);
       CREATE INDEX IF NOT EXISTS idx_bugs_project ON bugs(projectId);
       CREATE INDEX IF NOT EXISTS idx_events_project ON events(projectId, at);
     `);
+    for (const [table, column, decl] of ADD_COLUMNS) {
+      const cols = this.db.prepare(`PRAGMA table_info(${table})`).all() as Row[];
+      if (!cols.some((c) => c.name === column)) {
+        this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
+      }
+    }
+    this.backfillAlpha();
+  }
+
+  // ---- one-shot pre-Alpha backfill (idempotent) ----
+  // Runs only while `projects` is empty AND an active admin exists: a fresh
+  // instance has nothing to adopt, and a legacy instance with no admin yet is
+  // adopted later by the first admin that registers (see registerUser).
+  private backfillAlpha(): void {
+    if (Number((this.db.prepare('SELECT COUNT(*) AS n FROM projects').get() as Row).n) > 0) return;
+    const admin = this.db.prepare(
+      "SELECT id FROM users WHERE role = 'admin' AND status = 'active' ORDER BY created_at, rowid LIMIT 1")
+      .get() as Row | undefined;
+    if (!admin) return;
+    const adminId = admin.id as string;
+    const t = Date.now();
+
+    // 1. every project id that legacy activity refers to becomes a real project
+    //    owned by the admin, dated at its earliest known activity.
+    const ids = this.db.prepare(`
+      SELECT projectId, MIN(at) AS at FROM (
+        SELECT projectId, createdAt AS at FROM sessions
+        UNION ALL SELECT projectId, createdAt FROM claims
+        UNION ALL SELECT projectId, createdAt FROM bugs
+        UNION ALL SELECT projectId, at FROM events
+      ) GROUP BY projectId`).all() as Row[];
+    for (const row of ids) {
+      this.db.prepare('INSERT OR IGNORE INTO projects (id, created_by, created_at) VALUES (?, ?, ?)')
+        .run(row.projectId as string, adminId, row.at == null ? t : Number(row.at));
+      this.addMemberRow(row.projectId as string, adminId, 'owner', t);
+    }
+
+    // 2. bind legacy credentials to users: by developer/username match first,
+    //    everything left over to the admin (never leave an orphan → those 401).
+    this.db.exec(`UPDATE credentials SET user_id = (
+        SELECT id FROM users WHERE username = credentials.developer AND status = 'active')
+      WHERE user_id IS NULL AND EXISTS (
+        SELECT 1 FROM users WHERE username = credentials.developer AND status = 'active')`);
+    this.db.prepare('UPDATE credentials SET user_id = ? WHERE user_id IS NULL').run(adminId);
+
+    // 3. grandfather membership so already-paired directories keep working:
+    //    any developer name that matches a username becomes a project member.
+    const seen = this.db.prepare(`
+      SELECT DISTINCT projectId, developer FROM (
+        SELECT projectId, developer FROM sessions
+        UNION SELECT projectId, developer FROM claims
+      ) WHERE developer IS NOT NULL`).all() as Row[];
+    for (const row of seen) {
+      const user = this.db.prepare('SELECT id FROM users WHERE username = ?')
+        .get(row.developer as string) as Row | undefined;
+      if (user) this.addMemberRow(row.projectId as string, user.id as string, 'member', t);
+    }
+  }
+
+  private addMemberRow(projectId: string, userId: string, role: MemberRole, at: number): void {
+    this.db.prepare(`INSERT OR IGNORE INTO project_members (project_id, user_id, role, created_at)
+      VALUES (?, ?, ?, ?)`).run(projectId, userId, role, at);
   }
 
   private emit(projectId: string, type: EventType, message: string): void {
@@ -296,6 +390,7 @@ export class Store {
   // ---- sessions ----
 
   startSession(projectId: string, input: SessionCreate): Session {
+    this.ensureProject(projectId, null); // no-op for the API (the middleware already created/authorized it)
     const t = Date.now();
     const session: Session = {
       id: randomUUID(),
@@ -468,6 +563,109 @@ export class Store {
     return bug;
   }
 
+  // ---- projects + membership (see docs/auth.md) ----
+
+  projectExists(id: string): boolean {
+    return this.db.prepare('SELECT 1 FROM projects WHERE id = ?').get(id) !== undefined;
+  }
+
+  memberRole(projectId: string, userId: string | null): MemberRole | null {
+    if (!userId) return null;
+    const row = this.db.prepare('SELECT role FROM project_members WHERE project_id = ? AND user_id = ?')
+      .get(projectId, userId) as Row | undefined;
+    return row ? (row.role as MemberRole) : null;
+  }
+
+  memberProjectIds(userId: string | null): string[] {
+    if (!userId) return [];
+    return (this.db.prepare('SELECT project_id FROM project_members WHERE user_id = ? ORDER BY project_id')
+      .all(userId) as Row[]).map((r) => r.project_id as string);
+  }
+
+  // Creation-time slug rule; legacy ids keep working but no new one can be odd.
+  createProject(rawId: string, userId: string): { id: string; createdAt: number } {
+    const id = rawId.trim().toLowerCase();
+    if (!PROJECT_ID_RE.test(id)) {
+      fail('invalid project id: 1-64 chars, lowercase letters/digits/._- and must start with a letter or digit', 400);
+    }
+    if (this.projectExists(id)) fail('project id already taken', 409);
+    const t = Date.now();
+    this.db.prepare('INSERT INTO projects (id, created_by, created_at) VALUES (?, ?, ?)').run(id, userId, t);
+    this.addMemberRow(id, userId, 'owner', t);
+    return { id, createdAt: t };
+  }
+
+  // Auto-creation path for agents: first session on an unknown id creates it
+  // with the acting user as owner. Never validates the slug — the id already
+  // came from a client that may predate the rule.
+  ensureProject(id: string, userId: string | null): void {
+    if (this.projectExists(id)) return;
+    const t = Date.now();
+    this.db.prepare('INSERT INTO projects (id, created_by, created_at) VALUES (?, ?, ?)').run(id, userId, t);
+    if (userId) this.addMemberRow(id, userId, 'owner', t);
+  }
+
+  listMembers(projectId: string): ProjectMember[] {
+    return (this.db.prepare(`SELECT m.user_id, m.role, m.created_at, u.username
+      FROM project_members m JOIN users u ON u.id = m.user_id
+      WHERE m.project_id = ? ORDER BY m.role, u.username`).all(projectId) as Row[]).map((r) => ({
+        userId: r.user_id as string,
+        username: r.username as string,
+        role: r.role as MemberRole,
+        createdAt: Number(r.created_at),
+      }));
+  }
+
+  addMember(projectId: string, rawUsername: string, role: MemberRole): ProjectMember {
+    let username = '';
+    try { username = normalizeUsername(rawUsername); } catch { notFound('user not found'); }
+    const user = this.db.prepare("SELECT id, username FROM users WHERE username = ? AND status = 'active'")
+      .get(username) as Row | undefined;
+    if (!user) notFound('user not found'); // only active users can be added
+    if (this.memberRole(projectId, user.id as string)) fail('user is already a member', 409);
+    const t = Date.now();
+    this.addMemberRow(projectId, user.id as string, role, t);
+    return { userId: user.id as string, username: user.username as string, role, createdAt: t };
+  }
+
+  // The last remaining owner may not be demoted or removed — same shape as the
+  // final-admin guard. An instance admin does not bypass it either.
+  private isLastOwner(projectId: string, userId: string): boolean {
+    if (this.memberRole(projectId, userId) !== 'owner') return false;
+    const n = (this.db.prepare("SELECT COUNT(*) AS n FROM project_members WHERE project_id = ? AND role = 'owner'")
+      .get(projectId) as Row).n;
+    return Number(n) === 1;
+  }
+
+  setMemberRole(projectId: string, userId: string, role: MemberRole): ProjectMember {
+    const current = this.memberRole(projectId, userId);
+    if (!current) notFound('member not found');
+    if (role !== 'owner' && this.isLastOwner(projectId, userId)) {
+      fail('cannot remove the last owner of the project', 409);
+    }
+    this.db.prepare('UPDATE project_members SET role = ? WHERE project_id = ? AND user_id = ?')
+      .run(role, projectId, userId);
+    const username = (this.db.prepare('SELECT username FROM users WHERE id = ?').get(userId) as Row | undefined)
+      ?.username as string ?? userId;
+    return { userId, username, role, createdAt: Date.now() };
+  }
+
+  removeMember(projectId: string, userId: string): { ok: true } {
+    if (!this.memberRole(projectId, userId)) notFound('member not found');
+    if (this.isLastOwner(projectId, userId)) fail('cannot remove the last owner of the project', 409);
+    this.db.prepare('DELETE FROM project_members WHERE project_id = ? AND user_id = ?').run(projectId, userId);
+    return { ok: true };
+  }
+
+  deleteProject(projectId: string): { ok: true } {
+    for (const sql of [
+      'DELETE FROM sessions WHERE projectId = ?', 'DELETE FROM claims WHERE projectId = ?',
+      'DELETE FROM bugs WHERE projectId = ?', 'DELETE FROM events WHERE projectId = ?',
+      'DELETE FROM project_members WHERE project_id = ?', 'DELETE FROM projects WHERE id = ?',
+    ]) this.db.prepare(sql).run(projectId);
+    return { ok: true };
+  }
+
   // ---- pairing (device-flow-lite; see AGENTS.md "Pairing") ----
 
   private prunePairRequests(): void {
@@ -481,7 +679,7 @@ export class Store {
     const expiresAt = t + PAIR_REQUEST_TTL_MS;
     // code is UNIQUE; retry on the (vanishingly rare) collision
     for (let attempt = 0; ; attempt++) {
-      const code = [...randomBytes(6)].map((b) => CODE_ALPHABET[b % CODE_ALPHABET.length]).join('');
+      const code = [...randomBytes(CODE_LENGTH)].map((b) => CODE_ALPHABET[b % CODE_ALPHABET.length]).join('');
       try {
         this.db.prepare(`INSERT INTO pair_requests (id, code, agent, machine, developer, created_at, expires_at)
           VALUES (?, ?, ?, ?, ?, ?, ?)`)
@@ -493,36 +691,74 @@ export class Store {
     }
   }
 
+  // Approve-to-reveal: the code is withheld until a human approves, so a rogue
+  // agent that can read this list still cannot pair itself.
   listPendingPairRequests(): PairRequest[] {
     this.prunePairRequests();
-    // code included: the dashboard is trusted in the MVP and relays it to the human
-    return (this.db.prepare('SELECT * FROM pair_requests ORDER BY created_at').all() as Row[]).map((r) => ({
-      id: r.id as string,
-      code: r.code as string,
-      agent: r.agent as string,
-      machine: (r.machine as string) ?? null,
-      developer: (r.developer as string) ?? null,
-      createdAt: Number(r.created_at),
-      expiresAt: Number(r.expires_at),
-    }));
+    return (this.db.prepare(`SELECT p.*, u.username AS approver FROM pair_requests p
+      LEFT JOIN users u ON u.id = p.approved_by ORDER BY p.created_at`).all() as Row[]).map((r) => ({
+        id: r.id as string,
+        code: r.approved_by == null ? null : (r.code as string),
+        agent: r.agent as string,
+        machine: (r.machine as string) ?? null,
+        developer: (r.developer as string) ?? null,
+        approvedBy: (r.approver as string) ?? null,
+        createdAt: Number(r.created_at),
+        expiresAt: Number(r.expires_at),
+      }));
   }
 
-  redeemPairCode(code: string): { token: string; agent: string; developer: string | null } {
+  // First approver wins; the same user may re-read the code, anyone else 409s.
+  approvePairRequest(id: string, user: PublicUser): { code: string; approvedBy: string } {
+    this.prunePairRequests();
+    const row = this.db.prepare('SELECT * FROM pair_requests WHERE id = ?').get(id) as Row | undefined;
+    if (!row) notFound('pairing request not found or expired');
+    if (row.approved_by != null && row.approved_by !== user.id) {
+      const other = this.db.prepare('SELECT username FROM users WHERE id = ?').get(row.approved_by as string) as Row | undefined;
+      fail(`already approved by ${(other?.username as string) ?? 'another user'}`, 409);
+    }
+    if (row.approved_by == null) {
+      this.db.prepare('UPDATE pair_requests SET approved_by = ?, approved_at = ? WHERE id = ?')
+        .run(user.id, Date.now(), id);
+    }
+    return { code: row.code as string, approvedBy: user.username };
+  }
+
+  denyPairRequest(id: string): { ok: true } {
+    const res = this.db.prepare('DELETE FROM pair_requests WHERE id = ?').run(id);
+    if (res.changes === 0) notFound('pairing request not found or expired');
+    return { ok: true };
+  }
+
+  redeemPairCode(code: string): { token: string; agent: string; developer: string | null; ownerUsername: string } {
     this.prunePairRequests();
     const row = this.db.prepare('SELECT * FROM pair_requests WHERE code = ?').get(code) as Row | undefined;
     if (!row) notFound('invalid or expired pairing code');
+    if (row.approved_by == null) fail('pairing request not approved yet', 403);
+    const owner = this.db.prepare("SELECT id, username FROM users WHERE id = ? AND status = 'active'")
+      .get(row.approved_by as string) as Row | undefined;
+    if (!owner) fail('the approving user is no longer active — request pairing again', 403);
     this.db.prepare('DELETE FROM pair_requests WHERE id = ?').run(row.id as string); // one-time
     const t = Date.now();
     const token = randomBytes(32).toString('base64url');
-    this.db.prepare(`INSERT INTO credentials (id, token, agent, machine, developer, created_at, last_used_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)`)
+    this.db.prepare(`INSERT INTO credentials (id, token, agent, machine, developer, user_id, created_at, last_used_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(randomUUID(), token, row.agent as string, (row.machine as string) ?? null,
-        (row.developer as string) ?? null, t, t);
-    return { token, agent: row.agent as string, developer: (row.developer as string) ?? null };
+        (row.developer as string) ?? null, owner.id as string, t, t);
+    return {
+      token,
+      agent: row.agent as string,
+      developer: (row.developer as string) ?? null,
+      ownerUsername: owner.username as string,
+    };
   }
 
+  // Resolves ONLY when the credential is bound to an ACTIVE user: orphaned or
+  // disabled-owner credentials never authenticate (→ 401 "re-pair").
   getCredentialByToken(token: string): CredentialInfo | null {
-    const row = this.db.prepare('SELECT * FROM credentials WHERE token = ?').get(token) as Row | undefined;
+    const row = this.db.prepare(`SELECT c.*, u.username AS owner_username FROM credentials c
+      JOIN users u ON u.id = c.user_id AND u.status = 'active' WHERE c.token = ?`)
+      .get(token) as Row | undefined;
     if (!row) return null;
     const t = Date.now();
     this.db.prepare('UPDATE credentials SET last_used_at = ? WHERE id = ?').run(t, row.id as string);
@@ -531,27 +767,43 @@ export class Store {
       agent: row.agent as string,
       machine: (row.machine as string) ?? null,
       developer: (row.developer as string) ?? null,
+      userId: row.user_id as string,
+      ownerUsername: row.owner_username as string,
       createdAt: Number(row.created_at),
       lastUsedAt: t,
     };
   }
 
-  listCredentials(): CredentialInfo[] {
-    // token values are never returned — a credential is only ever shown by id
-    return (this.db.prepare('SELECT id, agent, machine, developer, created_at, last_used_at FROM credentials ORDER BY created_at')
-      .all() as Row[]).map((r) => ({
-        id: r.id as string,
-        agent: r.agent as string,
-        machine: (r.machine as string) ?? null,
-        developer: (r.developer as string) ?? null,
-        createdAt: Number(r.created_at),
-        lastUsedAt: Number(r.last_used_at),
-      }));
+  // Only for telling "unknown token" apart from "known but unusable" in the 401.
+  credentialTokenExists(token: string): boolean {
+    return this.db.prepare('SELECT 1 FROM credentials WHERE token = ?').get(token) !== undefined;
   }
 
-  revokeCredential(id: string): { ok: true } {
-    const res = this.db.prepare('DELETE FROM credentials WHERE id = ?').run(id);
-    if (res.changes === 0) notFound('credential not found');
+  // userId = null lists everything (instance admin); otherwise own credentials only.
+  listCredentials(userId: string | null): CredentialInfo[] {
+    // token values are never returned — a credential is only ever shown by id
+    const sql = `SELECT c.id, c.agent, c.machine, c.developer, c.user_id, c.created_at, c.last_used_at,
+        u.username AS owner_username
+      FROM credentials c LEFT JOIN users u ON u.id = c.user_id
+      ${userId ? 'WHERE c.user_id = ?' : ''} ORDER BY c.created_at`;
+    const stmt = this.db.prepare(sql);
+    return ((userId ? stmt.all(userId) : stmt.all()) as Row[]).map((r) => ({
+      id: r.id as string,
+      agent: r.agent as string,
+      machine: (r.machine as string) ?? null,
+      developer: (r.developer as string) ?? null,
+      userId: (r.user_id as string) ?? '',
+      ownerUsername: (r.owner_username as string) ?? '',
+      createdAt: Number(r.created_at),
+      lastUsedAt: Number(r.last_used_at),
+    }));
+  }
+
+  revokeCredential(id: string, actorId: string, isAdmin: boolean): { ok: true } {
+    const row = this.db.prepare('SELECT user_id FROM credentials WHERE id = ?').get(id) as Row | undefined;
+    if (!row) notFound('credential not found');
+    if (!isAdmin && row.user_id !== actorId) fail('not your credential', 403);
+    this.db.prepare('DELETE FROM credentials WHERE id = ?').run(id);
     return { ok: true };
   }
 
@@ -573,6 +825,14 @@ export class Store {
     } catch (err) {
       if (String((err as Error).message).includes('UNIQUE')) fail('username taken', 409);
       throw err;
+    }
+    if (bootstrap) {
+      // A legacy database whose users table was empty could not be backfilled at
+      // open time; the first admin adopts its projects (and any ownerless one).
+      this.backfillAlpha();
+      this.db.prepare(`INSERT OR IGNORE INTO project_members (project_id, user_id, role, created_at)
+        SELECT p.id, ?, 'owner', ? FROM projects p WHERE NOT EXISTS (
+          SELECT 1 FROM project_members m WHERE m.project_id = p.id AND m.role = 'owner')`).run(id, t);
     }
     return { user: { id, username, role, status, createdAt: t }, bootstrap };
   }
@@ -701,12 +961,13 @@ export class Store {
     };
   }
 
-  listProjects(): ProjectSummary[] {
+  // Scoped to what the actor may see: their memberships, or everything for an
+  // instance admin (rows they are not a member of come back with role: null).
+  listProjects(userId: string | null, isAdmin: boolean): ProjectSummary[] {
     this.sweep();
-    const ids = (this.db.prepare(`
-      SELECT projectId FROM sessions UNION SELECT projectId FROM claims
-      UNION SELECT projectId FROM bugs UNION SELECT projectId FROM events
-      ORDER BY projectId`).all() as Row[]).map((r) => r.projectId as string);
+    const ids = isAdmin
+      ? (this.db.prepare('SELECT id FROM projects ORDER BY id').all() as Row[]).map((r) => r.id as string)
+      : this.memberProjectIds(userId);
     return ids.map((id) => {
       const sessions = (this.db.prepare('SELECT agent FROM sessions WHERE projectId = ?').all(id) as Row[]);
       const claims = this.activeClaims(id);
@@ -715,6 +976,7 @@ export class Store {
       const lastEvent = this.db.prepare('SELECT MAX(at) AS at FROM events WHERE projectId = ?').get(id) as Row;
       return {
         id,
+        role: this.memberRole(id, userId),
         sessions: sessions.length,
         claims: claims.length,
         openBugs: Number(openBugs.n),

@@ -28,12 +28,25 @@ Bearer token — do not drive the human login/cookie flow. If you are driving th
 | Level | Requirement | Endpoints |
 | --- | --- | --- |
 | PUBLIC | none | `GET /api/health`, `POST /api/users/{register,login,logout}`, `POST /api/auth/{request,redeem}`, `GET /api/auth/me`, all non-`/api` routes |
-| AGENT-OR-USER | valid Bearer **or** active user cookie | `GET /api/projects` and everything under `/api/projects/*` |
-| USER | active user cookie | `GET /api/users/me`, `GET /api/auth/pending`, `GET /api/auth/credentials`, `DELETE /api/auth/credentials/:id` |
+| AGENT-OR-USER | valid Bearer **or** active user cookie | `GET /api/projects` (the response is filtered to what you may see) |
+| PROJECT-MEMBER | member of `:p` (any role), **or** instance admin cookie | everything under `/api/projects/:p/` — sessions, heartbeat, repo, claims, bugs, state, check |
+| PROJECT-OWNER | `owner` of `:p` (or instance admin), human cookie only | `POST/PATCH/DELETE /api/projects/:p/members*`, `DELETE /api/projects/:p` |
+| USER | active user cookie (human only) | `POST /api/projects`, `GET /api/users/me`, `GET /api/auth/pending`, `POST /api/auth/pending/:id/approve`, `DELETE /api/auth/pending/:id`, `GET /api/auth/credentials`, `DELETE /api/auth/credentials/:id` |
 | ADMIN | active user cookie, `role=admin` | `GET /api/users`, `PATCH /api/users/:id`, `DELETE /api/users/:id` |
 
 A *presented* Bearer token that is invalid is always rejected `401`, even on
 public routes.
+
+**Agents never administer.** Creating projects, adding/removing members,
+deleting a project and approving pairing requests are human-only: with a valid
+Bearer they answer `403 { "error": "project administration is human-only" }`
+(or `401` where no identity applies). Instance-admin power applies to the
+**cookie** only — an admin's own agent credential has no admin rights.
+
+**Who is the actor?** For project authorization the actor is the cookie user
+if present, otherwise the user that owns the Bearer credential. A credential
+whose owner is missing or not `active` never authenticates:
+`401 { "error": "credential must be re-paired" }`.
 
 ## Human user accounts
 
@@ -91,33 +104,100 @@ POST /api/users/logout          → 200 { "ok": true }        (clears the cookie
 A user disabled or deleted mid-session is invalidated immediately — the next
 request returns `401`.
 
-## Agent pairing (Bearer credential)
+## Projects and membership
+
+Projects are real objects, private by default, and owned by users.
+
+```
+GET    /api/projects                     → [ { "id": "acme", "role": "owner", "sessions": 1, ... } ]
+POST   /api/projects   { "id": "acme" }  (Cookie) → 200 { "id": "acme", "createdAt": ... } | 409 taken
+GET    /api/projects/:p/members          (member)  → [ { "userId", "username", "role", "createdAt" } ]
+POST   /api/projects/:p/members  { "username": "bob", "role": "member" }   (owner) → 200 | 404 | 409
+PATCH  /api/projects/:p/members/:uid  { "role": "owner" }                  (owner) → 200 | 409 last owner
+DELETE /api/projects/:p/members/:uid                (owner, or yourself)   → 200 | 409 last owner
+DELETE /api/projects/:p                             (owner or instance admin) → 200 (cascades)
+```
+
+- New ids must match `^[a-z0-9][a-z0-9._-]{0,63}$` after trim+lowercase → else
+  `400`. Ids created before this rule keep working.
+- `GET /api/projects` lists only your memberships (`role` tells you which);
+  an instance admin sees every project, with `role: null` where they are not a
+  member.
+- Only **active** users can be added, by username → unknown/inactive is `404`.
+- The last `owner` of a project cannot be demoted or removed → `409`. An
+  instance admin does not bypass this.
+- Agents create projects one way only: `POST /api/projects/:p/sessions` on an
+  unknown id creates it and makes the credential's owner its owner.
+
+### The two project errors
+
+Not a member of an existing project — **403**:
+
+```json
+{ "error": "not a member of project \"acme\"", "project": "acme",
+  "hint": "Ask a project owner (or instance admin) to add your user in the dashboard Members tab. Retrying will not help until they act.",
+  "docs": "/auth.md" }
+```
+
+Unknown project — **404**:
+
+```json
+{ "error": "project not found", "project": "ghost",
+  "hint": "Check the spelling, or start a session to create it. Projects you can access: acme, demo",
+  "docs": "/auth.md" }
+```
+
+Project existence is **not** treated as a secret on this instance: the two
+statuses are distinguishable on purpose, so an agent can tell "typo" from
+"ask for access". Nothing about a project's contents leaks either way.
+
+## Agent pairing (Bearer credential) — approve, then code
 
 ```
 POST /api/auth/request   { "agent": "claude-code@host", "machine": "host", "developer": "kyle" }
 → 200 { "requestId": "...", "expiresAt": 1710000000000 }
 ```
 
-A human opens the dashboard **Agents** page (`#/agents`), reads the 6-character
-code, and relays it:
+The request now appears in the dashboard **without** a code. A human opens the
+**Agents** page (`#/agents`) and clicks **Approve** — only then does the
+8-character code exist for them to relay:
 
 ```
-POST /api/auth/redeem    { "code": "AB2CD3" }
-→ 200 { "token": "<bearer token>", "agent": "...", "developer": "..." }
+GET  /api/auth/pending                       (Cookie)
+→ [ { "id": "...", "code": null, "agent": "claude-code@host", "approvedBy": null, ... } ]
+
+POST /api/auth/pending/<requestId>/approve   (Cookie)
+→ 200 { "code": "AB2CD3EF", "approvedBy": "kyle" }
+
+DELETE /api/auth/pending/<requestId>         (Cookie)  → 200 { "ok": true }   # deny
 ```
 
-Codes are one-time and expire after ~15 minutes. Use the token on every
-mediation call:
+Approval is first-come: the same user may re-approve to re-read the code,
+anyone else gets `409`. Redeeming an unapproved request is
+`403 { "error": "pairing request not approved yet" }`.
+
+```
+POST /api/auth/redeem    { "code": "AB2CD3EF" }
+→ 200 { "token": "<bearer token>", "agent": "...", "developer": "...", "ownerUsername": "kyle" }
+```
+
+The credential belongs to the approver: the agent acts **as that user** on the
+projects that user belongs to, and sessions it creates are attributed to that
+username no matter what the request body claims. Codes are one-time and expire
+after ~15 minutes. Use the token on every mediation call:
 
 ```
 curl -H "Authorization: Bearer <token>" http://localhost:4100/api/projects
 ```
 
-`GET /api/auth/me` with the Bearer token validates the credential (`401` if
-invalid/revoked). Revoke a credential (admin/user, via cookie):
+`GET /api/auth/me` with the Bearer token validates the credential and reports
+`ownerUsername` (`401` if invalid, revoked, or the owner is gone/disabled).
+Credentials are scoped: `GET /api/auth/credentials` returns **your own**
+credentials (an admin sees all), each with `ownerUsername`. Revoking is allowed
+for the owner or an admin, else `403`:
 
 ```
-DELETE /api/auth/credentials/:id   (Cookie)  → 200 { "ok": true }
+DELETE /api/auth/credentials/:id   (Cookie)  → 200 { "ok": true } | 403 | 404
 ```
 
 ## Detecting approval state (agents)
@@ -155,6 +235,13 @@ DELETE /api/users/:id                            → 200 { "ok": true }
 | `403` | `{ error: "account pending approval", status: "pending" }` | not yet approved |
 | `403` | `{ error: "account disabled", status: "disabled" }` | disabled account |
 | `403` | `{ error: "admin required" }` | user cookie present but not an admin |
+| `403` | `{ error: 'not a member of project "x"', hint, docs }` | valid identity, no membership |
+| `403` | `{ error: "project administration is human-only" }` | agent credential on a members/create/delete route |
+| `403` | `{ error: "project owner required" }` | member but not owner |
+| `403` | `{ error: "pairing request not approved yet" }` | redeem before a human approved |
+| `404` | `{ error: "project not found", hint, docs }` | unknown or malformed project id |
+| `401` | `{ error: "credential must be re-paired" }` | credential with no active owning user |
+| `409` | `{ error: "cannot remove the last owner of the project" }` | last-owner protection |
 | `409` | `{ error: "username taken" }` | registration duplicate |
 | `409` | `{ error: "cannot remove the last active admin" }` | final-admin protection |
 
@@ -164,3 +251,9 @@ If you receive `401`, `403 status:pending`, or `403 admin required` on a route
 you need, **STOP** and tell your human: an administrator must approve or
 authorize your account in the Mediation dashboard at **`#/users`** (the Users
 page). Retrying will not help until they act.
+
+On `403 not a member of project "x"` or `404 project not found`, relay the
+response's `hint` to your human **verbatim** and stop. Do not retry, do not
+switch project ids, and do not create a different project to get around it —
+only an owner (or instance admin) can grant access, from the project's
+**Members** tab.

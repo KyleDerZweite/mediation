@@ -11,7 +11,8 @@ import type { Context } from 'hono';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import type { z } from 'zod';
 import * as schemas from '../core/schemas.ts';
-import type { Store } from './store.ts';
+import pkg from '../../package.json' with { type: 'json' };
+import type { CredentialInfo, PublicUser, Store } from './store.ts';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const WEB_DIR = path.join(ROOT, 'web');
@@ -24,6 +25,7 @@ const MIME: Record<string, string> = {
   '.png': 'image/png',
   '.svg': 'image/svg+xml',
   '.md': 'text/markdown; charset=utf-8',
+  '.sh': 'text/x-shellscript; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
 };
 
@@ -49,6 +51,21 @@ function unauthorized(c: Context, message = 'authentication required'): Response
     'WWW-Authenticate': `Bearer resource_metadata="${AUTH_MD}"`,
   });
 }
+
+// Project ids as they may appear in a path SEGMENT. Deliberately checked on the
+// raw (still-encoded) segment: anything containing %2F, %00, spaces or path
+// traversal fails this test, so the middleware can never disagree with the
+// decoded value the handler sees. Wider than the creation slug rule because
+// pre-Alpha ids are grandfathered.
+const PROJECT_SEG_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+const NOT_A_MEMBER_HINT = 'Ask a project owner (or instance admin) to add your user in the dashboard Members tab. '
+  + 'Retrying will not help until they act.';
+
+// Convenience accessors for the identity the middleware resolved.
+const getUser = (c: Context): PublicUser | null => (c.get('user' as never) as PublicUser) ?? null;
+const getCred = (c: Context): CredentialInfo | null => (c.get('credential' as never) as CredentialInfo) ?? null;
+const actorId = (c: Context): string | null => getUser(c)?.id ?? getCred(c)?.userId ?? null;
 
 async function parseBody<S extends z.ZodTypeAny>(c: Context, schema: S): Promise<z.infer<S>> {
   const raw = await c.req.json().catch(() => ({}));
@@ -83,8 +100,13 @@ export function buildApp(store: Store): Hono {
     const auth = c.req.header('authorization');
     let cred = null;
     if (auth?.startsWith('Bearer ')) {
-      cred = store.getCredentialByToken(auth.slice(7));
-      if (!cred) return unauthorized(c, 'invalid or revoked credential');
+      const token = auth.slice(7);
+      cred = store.getCredentialByToken(token); // only resolves with an ACTIVE owning user
+      if (!cred) {
+        return unauthorized(c, store.credentialTokenExists(token)
+          ? 'credential must be re-paired' // orphaned or owner disabled/deleted
+          : 'invalid or revoked credential');
+      }
       c.set('credential' as never, cred as never);
     }
     const cookie = getCookie(c, USER_COOKIE);
@@ -109,24 +131,85 @@ export function buildApp(store: Store): Hono {
       return next();
     }
 
-    // USER — any active session.
+    // USER — any active session, human only. Pairing approval MUST live here:
+    // in the agent-or-user bucket an agent could approve its own request.
     if (
       (m === 'GET' && p === '/api/users/me') ||
       (m === 'GET' && (p === '/api/auth/pending' || p === '/api/auth/credentials')) ||
-      (m === 'DELETE' && p.startsWith('/api/auth/credentials/'))
+      (m === 'DELETE' && p.startsWith('/api/auth/credentials/')) ||
+      ((m === 'POST' || m === 'DELETE') && p.startsWith('/api/auth/pending/'))
     ) {
       if (!user) return unauthorized(c);
       return next();
     }
 
-    // AGENT-OR-USER — everything else under /api (all project routes).
+    // Creating a project is a human act; a valid agent gets a 403 that says so.
+    if (m === 'POST' && p === '/api/projects') {
+      if (user) return next();
+      return cred
+        ? c.json({ error: 'project administration is human-only', docs: AUTH_MD }, 403)
+        : unauthorized(c);
+    }
+
+    // PROJECT-MEMBER — everything under /api/projects/:p/. Deny by default:
+    // any future route below this prefix is member-gated by construction.
+    if (p.startsWith('/api/projects/')) {
+      const seg = p.split('/'); // ['', 'api', 'projects', '<pid>', ...]
+      const pid = seg[3] ?? '';
+      if (!PROJECT_SEG_RE.test(pid)) return c.json({ error: 'project not found', project: pid }, 404);
+      if (!cred && !user) return unauthorized(c);
+
+      // Project administration (members, deletion) is never available to agents.
+      const isAdminSurface = seg[4] === 'members' || (m === 'DELETE' && seg.length === 4);
+      if (isAdminSurface && !user) {
+        return c.json({ error: 'project administration is human-only', docs: AUTH_MD }, 403);
+      }
+      const actor = user?.id ?? cred!.userId;
+      const instanceAdmin = user?.role === 'admin';
+
+      if (!store.projectExists(pid)) {
+        // The one creation path agents have: first session on an unknown id.
+        if (m === 'POST' && seg.length === 5 && seg[4] === 'sessions') {
+          store.ensureProject(pid, actor);
+          return next();
+        }
+        const mine = store.memberProjectIds(actor).join(', ') || 'none yet';
+        return c.json({
+          error: 'project not found',
+          project: pid,
+          hint: `Check the spelling, or start a session to create it. Projects you can access: ${mine}`,
+          docs: AUTH_MD,
+        }, 404);
+      }
+
+      const role = store.memberRole(pid, actor);
+      if (!role && !instanceAdmin) {
+        return c.json({
+          error: `not a member of project "${pid}"`, project: pid, hint: NOT_A_MEMBER_HINT, docs: AUTH_MD,
+        }, 403);
+      }
+      // Members may read the member list; changing it is owner-only, except
+      // that anyone may remove themselves (leave).
+      if (seg[4] === 'members' && m !== 'GET') {
+        const selfLeave = m === 'DELETE' && seg[5] === actor;
+        if (!selfLeave && role !== 'owner' && !instanceAdmin) {
+          return c.json({ error: 'project owner required', project: pid, docs: AUTH_MD }, 403);
+        }
+      }
+      if (m === 'DELETE' && seg.length === 4 && role !== 'owner' && !instanceAdmin) {
+        return c.json({ error: 'project owner required', project: pid, docs: AUTH_MD }, 403);
+      }
+      return next();
+    }
+
+    // AGENT-OR-USER — the rest under /api (GET /api/projects; handler filters).
     if (cred || user) return next();
     return unauthorized(c);
   });
 
   // ---- api ----
 
-  app.get('/api/health', (c) => c.json({ ok: true, now: Date.now() }));
+  app.get('/api/health', (c) => c.json({ ok: true, now: Date.now(), version: pkg.version }));
 
   // ---- users (see docs/auth.md) ----
 
@@ -171,15 +254,54 @@ export function buildApp(store: Store): Hono {
 
   app.get('/api/auth/pending', (c) => c.json(store.listPendingPairRequests()));
 
-  app.get('/api/auth/credentials', (c) => c.json(store.listCredentials()));
+  // Approve-to-reveal: the code only exists for the human who approves.
+  app.post('/api/auth/pending/:id/approve', (c) =>
+    c.json(store.approvePairRequest(c.req.param('id'), getUser(c)!)));
 
-  app.delete('/api/auth/credentials/:id', (c) =>
-    c.json(store.revokeCredential(c.req.param('id'))));
+  app.delete('/api/auth/pending/:id', (c) => c.json(store.denyPairRequest(c.req.param('id'))));
 
-  app.get('/api/projects', (c) => c.json(store.listProjects()));
+  app.get('/api/auth/credentials', (c) => {
+    const user = getUser(c)!;
+    return c.json(store.listCredentials(user.role === 'admin' ? null : user.id));
+  });
 
-  app.post('/api/projects/:p/sessions', async (c) =>
-    c.json(store.startSession(c.req.param('p'), await parseBody(c, schemas.sessionCreate))));
+  app.delete('/api/auth/credentials/:id', (c) => {
+    const user = getUser(c)!;
+    return c.json(store.revokeCredential(c.req.param('id'), user.id, user.role === 'admin'));
+  });
+
+  // ---- projects + membership ----
+
+  app.get('/api/projects', (c) =>
+    c.json(store.listProjects(actorId(c), getUser(c)?.role === 'admin')));
+
+  app.post('/api/projects', async (c) =>
+    c.json(store.createProject((await parseBody(c, schemas.projectCreate)).id, getUser(c)!.id)));
+
+  app.delete('/api/projects/:p', (c) => c.json(store.deleteProject(c.req.param('p'))));
+
+  app.get('/api/projects/:p/members', (c) => c.json(store.listMembers(c.req.param('p'))));
+
+  app.post('/api/projects/:p/members', async (c) => {
+    const { username, role } = await parseBody(c, schemas.memberAdd);
+    return c.json(store.addMember(c.req.param('p'), username, role));
+  });
+
+  app.patch('/api/projects/:p/members/:uid', async (c) =>
+    c.json(store.setMemberRole(c.req.param('p'), c.req.param('uid'),
+      (await parseBody(c, schemas.memberPatch)).role)));
+
+  app.delete('/api/projects/:p/members/:uid', (c) =>
+    c.json(store.removeMember(c.req.param('p'), c.req.param('uid'))));
+
+  // Attribution: with an agent credential the developer is the credential's
+  // owner (verified), not the self-declared value in the body.
+  app.post('/api/projects/:p/sessions', async (c) => {
+    const body = await parseBody(c, schemas.sessionCreate);
+    const cred = getCred(c);
+    return c.json(store.startSession(c.req.param('p'),
+      cred ? { ...body, developer: cred.ownerUsername } : body));
+  });
 
   app.post('/api/projects/:p/sessions/:id/heartbeat', async (c) =>
     c.json(store.heartbeat(c.req.param('p'), c.req.param('id'), await parseBody(c, schemas.heartbeat))));
@@ -248,6 +370,10 @@ export function buildApp(store: Store): Hono {
       'content-type': 'text/x-shellscript; charset=utf-8',
     });
   });
+
+  // No templating: the uninstaller only touches local paths, so it needs no URL.
+  app.get('/uninstall.sh', (c) =>
+    serveFile(c, path.join(ROOT, 'clients', 'uninstall.sh')));
 
   app.get('/install/mediation-mcp.mjs', (c) =>
     serveFile(c, path.join(ROOT, 'clients', 'mediation-mcp.mjs')));

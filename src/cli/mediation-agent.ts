@@ -2,7 +2,7 @@
 // mediation-agent — CLI client for coding agents. Global fetch, no deps.
 // Imports core only for types (see AGENTS.md boundaries).
 
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { hostname } from 'node:os';
 import type {
   SessionCreate,
@@ -17,7 +17,7 @@ import type {
 const USAGE = `usage: mediation-agent <command> [options]
 
 commands:
-  connect     --project P --agent NAME [--developer D] [--machine M]
+  connect     [--project P] --agent NAME [--developer D] [--machine M]
   heartbeat   --project P --session ID [--activity "text"] [--watch N]   (N = seconds, loop)
   repo        --project P --session ID [--branch B] [--revision R] [--dirty a,b]
               (branch/revision/dirty auto-detected from git when omitted)
@@ -35,8 +35,13 @@ commands:
 
 global flags / env:
   --server URL     MEDIATION_SERVER   (default http://localhost:4100)
-  --project P      MEDIATION_PROJECT
+  --token TOKEN    MEDIATION_TOKEN    (paired agent bearer credential; required)
+  --project P      MEDIATION_PROJECT  (default: the git remote's repo name)
   --session ID     MEDIATION_SESSION
+
+Projects are private: you must be a member (403 otherwise) — an owner adds you
+in the dashboard. An unknown project id is created by the first session you
+start on it, and you become its owner.
 
 claim status values: investigating | in-progress | testing | blocked
 bug severity values: low | medium | high | critical | unknown`;
@@ -63,8 +68,55 @@ function need(name: string, value: string | null | undefined): string {
 }
 
 const SERVER = arg('--server') || process.env.MEDIATION_SERVER || 'http://localhost:4100';
-const project = (): string =>
-  encodeURIComponent(need('--project (or MEDIATION_PROJECT)', arg('--project') || process.env.MEDIATION_PROJECT));
+const TOKEN = arg('--token') || process.env.MEDIATION_TOKEN || '';
+
+// ---- git helpers ----
+
+function git(...args: string[]): string | null {
+  try {
+    return execFileSync('git', args, {
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 2000,
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
+// Deliberate duplicate of parseRemoteSlug/derivedProject in
+// clients/mediation-mcp.mjs — that client ships to user machines as a single
+// standalone file and cannot import from here. Keep the two in sync.
+function parseRemoteSlug(url: string): string | null {
+  const last = String(url || '').trim().replace(/\/+$/, '').split(/[/:]/).pop() || '';
+  const slug = last.replace(/\.git$/i, '').toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64);
+  return /^[a-z0-9][a-z0-9._-]{0,63}$/.test(slug) ? slug : null;
+}
+
+function derivedProject(): { id: string; source: string } | null {
+  const origin = git('config', '--get', 'remote.origin.url');
+  const fromOrigin = origin ? parseRemoteSlug(origin) : null;
+  if (fromOrigin) return { id: fromOrigin, source: `git remote origin: ${origin}` };
+  for (const line of (git('remote', '-v') || '').split('\n')) {
+    const url = line.split(/\s+/)[1];
+    const id = url ? parseRemoteSlug(url) : null;
+    if (id) return { id, source: `git remote: ${url}` };
+  }
+  return null;
+}
+
+// --project → MEDIATION_PROJECT → the git remote's repo name (never the
+// directory name). The chosen id is echoed so a wrong guess is obvious.
+const project = (): string => {
+  const explicit = arg('--project') || process.env.MEDIATION_PROJECT;
+  if (explicit) return encodeURIComponent(explicit);
+  const derived = derivedProject();
+  if (derived) {
+    console.error(`# project: ${derived.id} (${derived.source})`);
+    return encodeURIComponent(derived.id);
+  }
+  return encodeURIComponent(need('--project (or MEDIATION_PROJECT, or a git remote)', null));
+};
+
 const session = (): string =>
   encodeURIComponent(need('--session (or MEDIATION_SESSION)', arg('--session') || process.env.MEDIATION_SESSION));
 
@@ -75,7 +127,11 @@ async function call<T = any>(method: string, path: string, body?: unknown): Prom
   try {
     res = await fetch(`${SERVER}${path}`, {
       method,
-      headers: { 'content-type': 'application/json' },
+      headers: {
+        'content-type': 'application/json',
+        // Project routes require an identity; pair once and export the token.
+        ...(TOKEN ? { authorization: `Bearer ${TOKEN}` } : {}),
+      },
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
   } catch {
@@ -86,22 +142,13 @@ async function call<T = any>(method: string, path: string, body?: unknown): Prom
   if (!res.ok) {
     const detail = data.issues ? ` ${JSON.stringify(data.issues)}` : '';
     console.error(`error ${res.status}: ${data.error || res.statusText}${detail}`);
+    if (data.hint) console.error(`hint: ${data.hint}`); // membership/spelling guidance from the server
     process.exit(1);
   }
   return data as T;
 }
 
 const out = (d: unknown): void => console.log(JSON.stringify(d, null, 2));
-
-// ---- git auto-detection ----
-
-function git(cmd: string): string | null {
-  try {
-    return execSync(cmd, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-  } catch {
-    return null;
-  }
-}
 
 // ---- commands ----
 
@@ -135,11 +182,11 @@ const commands: Record<string, () => Promise<void>> = {
   },
 
   async repo() {
-    const branch = arg('--branch') ?? git('git rev-parse --abbrev-ref HEAD');
-    const revision = arg('--revision') ?? git('git rev-parse HEAD');
+    const branch = arg('--branch') ?? git('rev-parse', '--abbrev-ref', 'HEAD');
+    const revision = arg('--revision') ?? git('rev-parse', 'HEAD');
     const dirtyFiles =
       list('--dirty') ??
-      git('git status --porcelain')?.split('\n').filter(Boolean).map((l) => l.slice(3)) ??
+      git('status', '--porcelain')?.split('\n').filter(Boolean).map((l) => l.slice(3)) ??
       [];
     const body: RepoReport = { branch, revision, dirtyFiles };
     out(await call('POST', `/api/projects/${project()}/sessions/${session()}/repo`, body));

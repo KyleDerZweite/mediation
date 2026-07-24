@@ -14,12 +14,30 @@ let the user decide.
 
 If `mediation_status` says the directory is not initialized (no `.mediation.json`):
 
-1. Call `mediation_init` with the project id (ask the user which project if unclear).
-2. Relay its instructions verbatim: the user must open the dashboard's Agents
-   page and read you a 6-character approval code.
-3. When the user gives you the code, call `mediation_confirm`. The credential
-   is stored in `.mediation.json` — ensure it is gitignored. Setup never needs
-   repeating for this directory.
+1. Call `mediation_init` — **without** a project id unless the user gave you
+   one. It defaults to the repository name from the git remote (one project per
+   repository, so every clone of the repo shares it). Never use the directory
+   name.
+2. **State the chosen project id and its source to the user in your reply**
+   (the tool tells you both) and ask them to correct it *before* they approve —
+   after pairing, a wrong id means a project nobody else can see.
+3. Relay the rest verbatim: the user opens the dashboard's Agents page, clicks
+   **Approve** on the pending request, and reads you the 8-character code that
+   appears only after approval.
+4. When the user gives you the code, call `mediation_confirm`. The credential
+   is stored in `.mediation.json` — the tool tells you whether it is gitignored;
+   if it is not, fix that. Setup never needs repeating for this directory.
+
+`mediation_status` reports the directory it resolved. If that is not the
+project you are working in (some harnesses start MCP servers elsewhere), pass
+`directory: "<absolute path>"` to `mediation_status`, `mediation_init` and
+`mediation_confirm` — otherwise the credential lands in the wrong place, and
+the tools say so loudly when the target is not a git repository.
+
+Projects are private. If any `mediation_*` tool returns **not a member of
+project "x"**, relay the `NEXT STEP` hint to the user verbatim and **stop**:
+do not retry, do not switch project ids, do not create a new project. Only a
+project owner (or an instance admin) can add you, in the dashboard.
 
 ## Every coding task
 

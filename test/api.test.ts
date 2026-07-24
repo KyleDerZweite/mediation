@@ -2,8 +2,8 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Hono } from 'hono';
-import { Store } from '../src/server/store.ts';
-import { buildApp } from '../src/server/app.ts';
+import type { Store } from '../src/server/store.ts';
+import { bootstrap, ctx, pair } from './helpers.ts';
 
 let store: Store;
 let app: Hono;
@@ -11,13 +11,12 @@ let token = ''; // agent bearer — project routes now require an identity
 const P = '/api/projects/api-test';
 const auth = () => ({ authorization: `Bearer ${token}` });
 
-before(() => {
-  store = new Store({ dbPath: ':memory:', sessionTtlMs: 60_000 });
-  app = buildApp(store);
-  // Pair an agent directly through the store for a valid bearer credential.
-  const { requestId } = store.createPairRequest({ agent: 'api-test-agent' });
-  const code = store.listPendingPairRequests().find((r) => r.id === requestId)!.code;
-  token = store.redeemPairCode(code).token;
+before(async () => {
+  const c = ctx({ sessionTtlMs: 60_000 });
+  store = c.store;
+  app = c.app;
+  // The credential's owner is the admin, so every project it creates is his.
+  token = await pair(c.req, await bootstrap(c.req), 'api-test-agent');
 });
 after(() => store.close());
 
@@ -41,6 +40,7 @@ test('health', async () => {
   assert.equal(status, 200);
   assert.equal(body.ok, true);
   assert.ok(body.now > 0);
+  assert.match(body.version, /^\d+\.\d+\.\d+/); // from package.json
 });
 
 test('session lifecycle: create, heartbeat, repo, end', async () => {
