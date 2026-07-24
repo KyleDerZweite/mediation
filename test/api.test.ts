@@ -7,11 +7,17 @@ import { buildApp } from '../src/server/app.ts';
 
 let store: Store;
 let app: Hono;
+let token = ''; // agent bearer — project routes now require an identity
 const P = '/api/projects/api-test';
+const auth = () => ({ authorization: `Bearer ${token}` });
 
 before(() => {
   store = new Store({ dbPath: ':memory:', sessionTtlMs: 60_000 });
   app = buildApp(store);
+  // Pair an agent directly through the store for a valid bearer credential.
+  const { requestId } = store.createPairRequest({ agent: 'api-test-agent' });
+  const code = store.listPendingPairRequests().find((r) => r.id === requestId)!.code;
+  token = store.redeemPairCode(code).token;
 });
 after(() => store.close());
 
@@ -19,14 +25,14 @@ after(() => store.close());
 async function post(path: string, body: unknown, method = 'POST'): Promise<{ status: number; body: any }> {
   const res = await app.request(path, {
     method,
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...auth() },
     body: JSON.stringify(body),
   });
   return { status: res.status, body: await res.json() };
 }
 
 async function get(path: string): Promise<{ status: number; body: any }> {
-  const res = await app.request(path);
+  const res = await app.request(path, { headers: auth() });
   return { status: res.status, body: await res.json() };
 }
 
@@ -166,7 +172,7 @@ test('404s: unknown session, claim, bug, route', async () => {
   const b = await post(`${P}/bugs/nope`, { status: 'fixed' }, 'PATCH');
   assert.equal(b.status, 404);
 
-  const r = await app.request('/api/nope');
+  const r = await app.request('/api/nope', { headers: auth() });
   assert.equal(r.status, 404);
 });
 

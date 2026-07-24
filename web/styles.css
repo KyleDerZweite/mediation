@@ -419,3 +419,37 @@ input, button { font-family: inherit; }
   font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: #1f6feb;
   background: #eef4fe; border-radius: 9px; padding: 1px 7px; vertical-align: 2px;
 }
+
+/* ---- user auth + admin ---- */
+.auth-wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; }
+.auth-card {
+  width: 100%; max-width: 340px; background: #fff; border: 1px solid #e6e9ef;
+  border-radius: 14px; padding: 28px 26px; box-shadow: 0 8px 30px rgba(16,24,40,.08);
+  display: flex; flex-direction: column; gap: 12px;
+}
+.auth-brand { font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 20px; color: #1f6feb; }
+.auth-title { font-size: 15px; font-weight: 600; color: #344054; margin-bottom: 2px; }
+.auth-msg { font-size: 12.5px; color: #475467; background: #f2f6fd; border: 1px solid #dce7fb; border-radius: 8px; padding: 9px 11px; }
+.auth-input { font: inherit; font-size: 14px; padding: 10px 12px; border: 1px solid #d0d5dd; border-radius: 9px; outline: none; }
+.auth-input:focus { border-color: #1f6feb; box-shadow: 0 0 0 3px #e8f0fe; }
+.auth-btn { font: inherit; font-weight: 600; font-size: 14px; color: #fff; background: #1f6feb; border: none; border-radius: 9px; padding: 10px; cursor: pointer; }
+.auth-btn:hover { background: #1a5fd0; }
+.auth-toggle { font-size: 12.5px; color: #667085; text-align: center; }
+.auth-toggle a { color: #1f6feb; text-decoration: none; }
+
+.user-chip { display: flex; align-items: center; gap: 8px; }
+.user-name { font-size: 13px; font-weight: 600; color: #344054; }
+.user-role { font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; color: #1f6feb; background: #eef4fe; border-radius: 8px; padding: 2px 7px; }
+.logout-btn { font: inherit; font-size: 12px; color: #475467; background: #f2f4f7; border: 1px solid #e4e7ec; border-radius: 7px; padding: 5px 11px; cursor: pointer; }
+.logout-btn:hover { background: #e9ecf1; }
+
+.users-table .users-row { grid-template-columns: 2fr 1fr 1fr 1fr 2.4fr; }
+.user-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.user-act-btn { font: inherit; font-size: 11.5px; color: #344054; background: #f2f4f7; border: 1px solid #e4e7ec; border-radius: 7px; padding: 4px 9px; cursor: pointer; }
+.user-act-btn:hover { background: #e6e9ef; }
+.user-act-btn.danger { color: #98322c; background: #fdf1f0; border-color: #f2d4d1; }
+.you-tag { font-size: 10px; color: #1f6feb; background: #eef4fe; border-radius: 6px; padding: 1px 5px; }
+.ustatus { font-size: 11.5px; border-radius: 7px; padding: 2px 8px; }
+.ustatus-active { color: #027a48; background: #e7f8f0; }
+.ustatus-pending { color: #b45309; background: #fbf1e0; }
+.ustatus-disabled { color: #98a2b3; background: #eef1f6; }

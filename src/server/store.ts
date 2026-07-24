@@ -2,7 +2,9 @@
 // columns; rows are hydrated back into the core domain types. All domain rules
 // (overlap, tokenize, normalizePath) come from src/core/overlap.ts.
 
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID, scrypt, timingSafeEqual } from 'node:crypto';
+import type { ScryptOptions } from 'node:crypto';
+import { promisify } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
 import { checkOverlap, normalizePath, pairConflicts } from '../core/overlap.ts';
 import type {
@@ -11,7 +13,7 @@ import type {
 } from '../core/types.ts';
 import type {
   BugCreate, BugPatch, ClaimComplete, ClaimCreate, ClaimPatch,
-  Heartbeat, RepoReport, SessionCreate,
+  Heartbeat, RepoReport, SessionCreate, UserPatch, UserRegister,
 } from '../core/schemas.ts';
 
 export const DEFAULT_SESSION_TTL_MS = 120_000;
@@ -30,13 +32,75 @@ interface StoreOptions {
   claimIdleTtlMs?: number;
 }
 
-function notFound(message: string): never {
+function fail(message: string, statusCode: number): never {
   const err = new Error(message) as Error & { statusCode: number };
-  err.statusCode = 404;
+  err.statusCode = statusCode;
   throw err;
 }
 
+function notFound(message: string): never {
+  return fail(message, 404);
+}
+
 type Row = Record<string, unknown>;
+
+// ---- user auth (see docs/auth.md) ----
+// Passwords: async scrypt (login must not block the event loop), stored as a
+// self-describing `scrypt:N:r:p:saltB64:hashB64` string, verified constant-time.
+const scryptAsync = promisify(scrypt) as (
+  password: string | Buffer, salt: string | Buffer, keylen: number, options?: ScryptOptions,
+) => Promise<Buffer>;
+const SCRYPT_N = 16_384, SCRYPT_R = 8, SCRYPT_P = 1, SCRYPT_KEYLEN = 32;
+const USER_SESSION_TTL_MS = 7 * 24 * 60 * 60_000; // fixed 7 days
+const USERNAME_RE = /^[a-z0-9][a-z0-9_-]{2,31}$/;
+// Well-formed but wrong hash: login verifies against it for unknown users so
+// timing doesn't reveal whether a username exists.
+const DUMMY_HASH = `scrypt:${SCRYPT_N}:${SCRYPT_R}:${SCRYPT_P}:${randomBytes(16).toString('base64')}:${randomBytes(SCRYPT_KEYLEN).toString('base64')}`;
+
+async function hashPassword(password: string): Promise<string> {
+  const salt = randomBytes(16);
+  const hash = await scryptAsync(password, salt, SCRYPT_KEYLEN, { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P });
+  return `scrypt:${SCRYPT_N}:${SCRYPT_R}:${SCRYPT_P}:${salt.toString('base64')}:${hash.toString('base64')}`;
+}
+
+async function verifyPassword(password: string, stored: string): Promise<boolean> {
+  const [kind, n, r, p, saltB64, hashB64] = stored.split(':');
+  if (kind !== 'scrypt') return false;
+  const expected = Buffer.from(hashB64, 'base64');
+  const actual = await scryptAsync(password, Buffer.from(saltB64, 'base64'), expected.length,
+    { N: Number(n), r: Number(r), p: Number(p) });
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
+function normalizeUsername(raw: string): string {
+  const u = raw.trim().toLowerCase();
+  if (!USERNAME_RE.test(u)) {
+    fail('invalid username: 3-32 chars, letters/digits/_/- and must start with a letter or digit', 400);
+  }
+  return u;
+}
+
+export interface PublicUser {
+  id: string;
+  username: string;
+  role: 'user' | 'admin';
+  status: 'pending' | 'active' | 'disabled';
+  createdAt: number;
+}
+
+function publicUser(r: Row): PublicUser {
+  return {
+    id: r.id as string,
+    username: r.username as string,
+    role: r.role as PublicUser['role'],
+    status: r.status as PublicUser['status'],
+    createdAt: Number(r.created_at),
+  };
+}
+
+export type LoginResult =
+  | { ok: true; user: PublicUser; token: string }
+  | { ok: false; code: 401 | 403; error: string; status?: 'pending' | 'disabled' };
 
 // Pairing/credential shapes are server-local (not part of the wire protocol
 // in core): the dashboard and /api/auth routes are their only consumers.
@@ -170,6 +234,16 @@ export class Store {
         machine TEXT, developer TEXT,
         created_at INTEGER NOT NULL, last_used_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL,
+        role TEXT NOT NULL, status TEXT NOT NULL,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS user_sessions (
+        token TEXT PRIMARY KEY, user_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id);
       CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(projectId);
       CREATE INDEX IF NOT EXISTS idx_claims_project ON claims(projectId);
       CREATE INDEX IF NOT EXISTS idx_bugs_project ON bugs(projectId);
@@ -478,6 +552,104 @@ export class Store {
   revokeCredential(id: string): { ok: true } {
     const res = this.db.prepare('DELETE FROM credentials WHERE id = ?').run(id);
     if (res.changes === 0) notFound('credential not found');
+    return { ok: true };
+  }
+
+  // ---- users (see docs/auth.md) ----
+
+  // First account to register (users table empty) becomes the active admin;
+  // every later registration is a pending 'user' awaiting admin approval.
+  async registerUser(input: UserRegister): Promise<{ user: PublicUser; bootstrap: boolean }> {
+    const username = normalizeUsername(input.username);
+    const password_hash = await hashPassword(input.password); // hash first, then the count+insert run in one sync tick (no bootstrap race)
+    const bootstrap = Number((this.db.prepare('SELECT COUNT(*) AS n FROM users').get() as Row).n) === 0;
+    const t = Date.now();
+    const id = randomUUID();
+    const role = bootstrap ? 'admin' : 'user';
+    const status = bootstrap ? 'active' : 'pending';
+    try {
+      this.db.prepare(`INSERT INTO users (id, username, password_hash, role, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`).run(id, username, password_hash, role, status, t, t);
+    } catch (err) {
+      if (String((err as Error).message).includes('UNIQUE')) fail('username taken', 409);
+      throw err;
+    }
+    return { user: { id, username, role, status, createdAt: t }, bootstrap };
+  }
+
+  async loginUser(rawUsername: string, password: string): Promise<LoginResult> {
+    // invalid-format username can't exist → treat as unknown user (don't 400/leak)
+    let username = '';
+    try { username = normalizeUsername(rawUsername); } catch { /* falls through to dummy verify */ }
+    const row = username ? this.db.prepare('SELECT * FROM users WHERE username = ?').get(username) as Row | undefined : undefined;
+    const ok = await verifyPassword(password, (row?.password_hash as string) ?? DUMMY_HASH);
+    if (!row || !ok) return { ok: false, code: 401, error: 'invalid credentials' }; // same for unknown user vs wrong password
+    if (row.status === 'pending') return { ok: false, code: 403, error: 'account pending approval', status: 'pending' };
+    if (row.status === 'disabled') return { ok: false, code: 403, error: 'account disabled', status: 'disabled' };
+    return { ok: true, user: publicUser(row), token: this.createUserSession(row.id as string) };
+  }
+
+  private createUserSession(userId: string): string {
+    const token = randomBytes(32).toString('base64url');
+    const t = Date.now();
+    this.db.prepare('INSERT INTO user_sessions (token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)')
+      .run(token, userId, t, t + USER_SESSION_TTL_MS);
+    return token;
+  }
+
+  // Resolve an ACTIVE user from a session token; prune expired sessions first.
+  // A user disabled/deleted mid-session resolves to null (→ 401 everywhere).
+  getUserBySession(token: string): PublicUser | null {
+    this.db.prepare('DELETE FROM user_sessions WHERE expires_at < ?').run(Date.now());
+    const row = this.db.prepare(
+      'SELECT u.* FROM user_sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?')
+      .get(token) as Row | undefined;
+    if (!row || row.status !== 'active') return null;
+    return publicUser(row);
+  }
+
+  logoutSession(token: string): { ok: true } {
+    this.db.prepare('DELETE FROM user_sessions WHERE token = ?').run(token);
+    return { ok: true };
+  }
+
+  private clearUserSessions(userId: string): void {
+    this.db.prepare('DELETE FROM user_sessions WHERE user_id = ?').run(userId);
+  }
+
+  listUsers(): PublicUser[] {
+    return (this.db.prepare('SELECT id, username, role, status, created_at FROM users ORDER BY created_at')
+      .all() as Row[]).map(publicUser);
+  }
+
+  // The last user that is role=admin AND status=active may not be demoted,
+  // disabled, or deleted — self-targeting included.
+  private isLastActiveAdmin(row: Row): boolean {
+    if (row.role !== 'admin' || row.status !== 'active') return false;
+    const n = (this.db.prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'admin' AND status = 'active'").get() as Row).n;
+    return Number(n) === 1;
+  }
+
+  patchUser(id: string, patch: UserPatch): PublicUser {
+    const row = this.db.prepare('SELECT * FROM users WHERE id = ?').get(id) as Row | undefined;
+    if (!row) notFound('user not found');
+    const role = patch.role ?? (row.role as string);
+    const status = patch.status ?? (row.status as string);
+    if ((role !== 'admin' || status !== 'active') && this.isLastActiveAdmin(row)) {
+      fail('cannot remove the last active admin', 409);
+    }
+    this.db.prepare('UPDATE users SET role = ?, status = ?, updated_at = ? WHERE id = ?')
+      .run(role, status, Date.now(), id);
+    if (status !== 'active') this.clearUserSessions(id); // disabling kills existing sessions
+    return publicUser({ ...row, role, status });
+  }
+
+  deleteUser(id: string): { ok: true } {
+    const row = this.db.prepare('SELECT * FROM users WHERE id = ?').get(id) as Row | undefined;
+    if (!row) notFound('user not found');
+    if (this.isLastActiveAdmin(row)) fail('cannot remove the last active admin', 409);
+    this.clearUserSessions(id);
+    this.db.prepare('DELETE FROM users WHERE id = ?').run(id);
     return { ok: true };
   }
 

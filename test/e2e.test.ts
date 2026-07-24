@@ -21,15 +21,19 @@ let tmp: string;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const jb = async (r: Response): Promise<any> => r.json();
 
-const json = (method: string, url: string, body?: unknown, token?: string) =>
+const json = (method: string, url: string, body?: unknown, token?: string, cookie?: string) =>
   fetch(url, {
     method,
     headers: {
       'content-type': 'application/json',
       ...(token ? { authorization: `Bearer ${token}` } : {}),
+      ...(cookie ? { cookie } : {}),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
+
+const cookieOf = (r: Response): string =>
+  (r.headers.get('set-cookie') ?? '').match(/mediation_user=[^;]+/)?.[0] ?? '';
 
 before(async () => {
   tmp = mkdtempSync(path.join(tmpdir(), 'mediation-e2e-'));
@@ -78,6 +82,42 @@ test('health responds ok', async () => {
 let token = '';
 let credId = '';
 let firstClaimId = '';
+let adminCookie = '';
+
+test('user auth: bootstrap admin, pending approval, login/me/logout over TCP', async () => {
+  // First registration bootstraps an active admin.
+  const first = await jb(await json('POST', `${BASE}/api/users/register`, { username: 'admin', password: 'password123' }));
+  assert.equal(first.bootstrap, true);
+  assert.equal(first.user.role, 'admin');
+  assert.equal(first.user.status, 'active');
+
+  const adminLogin = await json('POST', `${BASE}/api/users/login`, { username: 'admin', password: 'password123' });
+  assert.equal(adminLogin.status, 200);
+  adminCookie = cookieOf(adminLogin);
+  assert.ok(adminCookie);
+
+  // Second registration is a pending user.
+  const bob = (await jb(await json('POST', `${BASE}/api/users/register`, { username: 'bob', password: 'password123' }))).user;
+  assert.equal(bob.status, 'pending');
+
+  // Pending login is rejected 403 (no cookie) — doubles as the agent status check.
+  const pending = await json('POST', `${BASE}/api/users/login`, { username: 'bob', password: 'password123' });
+  assert.equal(pending.status, 403);
+  assert.equal((await jb(pending)).status, 'pending');
+  assert.equal(cookieOf(pending), '');
+
+  // Admin approves via PATCH with the admin cookie.
+  const approve = await json('PATCH', `${BASE}/api/users/${bob.id}`, { status: 'active' }, undefined, adminCookie);
+  assert.equal(approve.status, 200);
+
+  // Bob can now log in, hit /me, then log out.
+  const bobLogin = await json('POST', `${BASE}/api/users/login`, { username: 'bob', password: 'password123' });
+  assert.equal(bobLogin.status, 200);
+  const bobCookie = cookieOf(bobLogin);
+  assert.equal((await jb(await json('GET', `${BASE}/api/users/me`, undefined, undefined, bobCookie))).user.username, 'bob');
+  assert.equal((await json('POST', `${BASE}/api/users/logout`, undefined, undefined, bobCookie)).status, 200);
+  assert.equal((await json('GET', `${BASE}/api/users/me`, undefined, undefined, bobCookie)).status, 401);
+});
 
 test('pairing: request -> pending -> redeem -> me; bogus bearer 401', async () => {
   const { requestId } = await jb(await json('POST', `${BASE}/api/auth/request`, {
@@ -85,7 +125,7 @@ test('pairing: request -> pending -> redeem -> me; bogus bearer 401', async () =
   }));
   assert.ok(requestId);
 
-  const pending = await jb(await json('GET', `${BASE}/api/auth/pending`));
+  const pending = await jb(await json('GET', `${BASE}/api/auth/pending`, undefined, undefined, adminCookie));
   const mine = pending.find((p: { id: string }) => p.id === requestId);
   assert.ok(mine, 'request appears in pending');
 
@@ -114,16 +154,16 @@ test('session + claim flow surfaces overlap conflicts', async () => {
   firstClaimId = first.claim.id;
   assert.equal(first.conflicts.length, 0);
 
-  const b = await jb(await json('POST', `${P}/sessions`, { agent: 'agent-b' }));
+  const b = await jb(await json('POST', `${P}/sessions`, { agent: 'agent-b' }, token));
   const second = await jb(await json('POST', `${P}/claims`, {
     sessionId: b.id, intent: 'Investigate tokenizer crash', files: ['src/tokenizer.ts'],
-  }));
+  }, token));
   assert.ok(second.conflicts.length >= 1, 'overlapping claim warns');
   assert.equal(second.conflicts[0].claimId, firstClaimId);
 });
 
 test('check endpoint reports overlap', async () => {
-  const r = await json('GET', `${P}/check?files=src/tokenizer.ts`);
+  const r = await json('GET', `${P}/check?files=src/tokenizer.ts`, undefined, token);
   assert.equal(r.status, 200);
   const body = await jb(r);
   assert.ok(body.conflicts.length >= 1);
@@ -135,7 +175,7 @@ test('complete claim then state shows it done', async () => {
   }, token));
   assert.equal(done.status, 'done');
 
-  const state = await jb(await json('GET', `${P}/state`));
+  const state = await jb(await json('GET', `${P}/state`, undefined, token));
   assert.ok(state.completed.some((c: { id: string }) => c.id === firstClaimId));
   assert.ok(!state.claims.some((c: { id: string }) => c.id === firstClaimId));
 });
@@ -155,11 +195,11 @@ test('static assets serve over http', async () => {
 });
 
 test('revoking the credential invalidates the token', async () => {
-  const creds = await jb(await json('GET', `${BASE}/api/auth/credentials`));
+  const creds = await jb(await json('GET', `${BASE}/api/auth/credentials`, undefined, undefined, adminCookie));
   const cred = creds.find((c: { agent: string }) => c.agent === 'e2e-agent@box');
   assert.ok(cred);
   credId = cred.id;
 
-  assert.equal((await json('DELETE', `${BASE}/api/auth/credentials/${credId}`)).status, 200);
+  assert.equal((await json('DELETE', `${BASE}/api/auth/credentials/${credId}`, undefined, undefined, adminCookie)).status, 200);
   assert.equal((await json('GET', `${BASE}/api/auth/me`, undefined, token)).status, 401);
 });

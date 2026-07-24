@@ -4,10 +4,14 @@ You are a coding agent. This service tells you what other developers and agents
 are working on **right now**, before their work reaches Git. Check it before you
 start work so you never duplicate effort.
 
-Base URL: the server root, e.g. `http://localhost:4100`. All endpoints are open
-and keyed by a shared project identifier (MVP — no auth). All bodies are JSON;
-errors come back as `{ "error": "..." }` with a proper HTTP status (validation
-failures are 400 with Zod issue details).
+Base URL: the server root, e.g. `http://localhost:4100`. Project endpoints
+(`/api/projects/*`) require an identity: send a paired **Bearer credential**
+(`Authorization: Bearer <token>`, see Pairing below) — or, if a human is driving
+the dashboard, an active user session cookie works too. Unauthenticated requests
+get `401` with a `WWW-Authenticate: Bearer resource_metadata="/auth.md"` hint;
+the full auth contract is at `/auth.md`. Requests are keyed by a shared project
+identifier. All bodies are JSON; errors come back as `{ "error": "..." }` with a
+proper HTTP status (validation failures are 400 with Zod issue details).
 
 `GET /api/health` → `{ "ok": true }` — use it to verify the server is up.
 `GET /api/projects` → list of all projects with live counts:
@@ -161,9 +165,10 @@ POST /api/auth/redeem    { "code": "AB2CD3" }
 ```
 
 The token is a durable `Authorization: Bearer` credential (revocable from the
-dashboard). Codes are one-time and expire after ~15 minutes. In the MVP the
-API remains open without a token, but a *presented* token must be valid (401
-otherwise). `GET /api/auth/me` validates a stored credential.
+dashboard). Codes are one-time and expire after ~15 minutes. Send this token on
+every project request — it is now required (unauthenticated project calls get
+401). `GET /api/auth/me` validates a stored credential. Full auth reference,
+including the human user-account flow and the authorization matrix: `/auth.md`.
 
 ## MCP install (recommended for agents)
 

@@ -143,6 +143,10 @@ const state = {
   states: new Map(),       // pid -> ProjectState
   authPending: [],         // pending pairing requests (incl. code)
   authCredentials: [],     // approved credentials (no token values)
+  me: null,                // logged-in user { id, username, role, status } or null
+  users: [],               // admin Users view: PublicUser[]
+  authMode: 'login',       // login | register (logged-out view)
+  authMsg: '',             // message shown on the login/register card
   copied: null,            // key of the element that just copied, for feedback
   revokeArm: null,         // credential id armed for two-step revoke
   lastSyncAt: null,
@@ -164,6 +168,7 @@ function parseRoute() {
   if (parts[0] === 'activity') return { view: 'activity', pid: null, tab: null };
   if (parts[0] === 'agents') return { view: 'agents', pid: null, tab: null };
   if (parts[0] === 'settings') return { view: 'settings', pid: null, tab: null };
+  if (parts[0] === 'users') return { view: 'users', pid: null, tab: null };
   return { view: 'overview', pid: null, tab: null };
 }
 
@@ -171,11 +176,13 @@ function parseRoute() {
 
 async function getJSON(path) {
   const res = await fetch(path, { headers: { Accept: 'application/json' } });
+  if (res.status === 401) { state.me = null; throw new Error('unauthenticated'); }
   if (!res.ok) throw new Error(`${res.status} ${path}`);
   return res.json();
 }
 
 async function refresh() {
+  if (!state.me) return; // logged out: dashboard polling is paused
   const r = state.route;
   try {
     const [, projects] = await Promise.all([
@@ -202,11 +209,15 @@ async function refresh() {
     if (r.view === 'agents' || r.view === 'settings') {
       state.authCredentials = await getJSON('/api/auth/credentials').catch(() => []);
     }
+    if (r.view === 'users' && state.me.role === 'admin') {
+      state.users = await getJSON('/api/users').catch(() => []);
+    }
 
     state.misses = 0;
     state.lastSyncAt = Date.now();
     state.everSynced = true;
   } catch {
+    if (!state.me) { showAuth(); return; } // session expired mid-poll
     state.misses += 1;
   }
   render();
@@ -240,7 +251,8 @@ const NAV = [
 
 function renderSidebar() {
   const r = state.route;
-  morph($('sideNav'), NAV.map(([key, label, ic, href]) => {
+  const nav = state.me?.role === 'admin' ? [...NAV, ['users', 'Users', 'shield', '#/users']] : NAV;
+  morph($('sideNav'), nav.map(([key, label, ic, href]) => {
     const active = r.view === key;
     const badge = key === 'agents' && state.authPending.length
       ? `<span class="nav-badge">${state.authPending.length}</span>` : '';
@@ -737,8 +749,9 @@ function renderSettings() {
         <pre class="snippet" id="cliSnippet">${esc(snippet)}</pre>
         <button class="copy-btn" id="copyBtn" type="button">${state.copied === 'cli' ? 'Copied' : 'Copy'}</button>
       </div>
-      <div class="dp-note">Agents talk to the open REST API under <span class="mono">/api</span> — no auth in the MVP.
-        Full protocol reference for agents: <a href="/AGENT.md" target="_blank" rel="noopener">/AGENT.md</a>.</div>
+      <div class="dp-note">Agents authenticate to <span class="mono">/api</span> with a paired Bearer credential; the
+        dashboard uses your user session. Protocol reference: <a href="/AGENT.md" target="_blank" rel="noopener">/AGENT.md</a> ·
+        auth: <a href="/auth.md" target="_blank" rel="noopener">/auth.md</a>.</div>
     </div>
 
     <div class="settings-section">
@@ -758,14 +771,119 @@ function renderSettings() {
   </div>`;
 }
 
+/* ---------------- users (admin) ---------------- */
+
+const uBtn = (act, id, label, danger) =>
+  `<button class="user-act-btn${danger ? ' danger' : ''}" type="button" data-uaction="${act}" data-uid="${esc(id)}">${label}</button>`;
+
+function renderUsers() {
+  const rows = state.users.map((u) => {
+    const you = state.me && u.id === state.me.id;
+    const acts = [];
+    if (u.status === 'pending') acts.push(uBtn('approve', u.id, 'Approve'));
+    if (u.status === 'active') acts.push(uBtn('disable', u.id, 'Disable'));
+    if (u.status === 'disabled') acts.push(uBtn('activate', u.id, 'Reactivate'));
+    acts.push(u.role === 'admin' ? uBtn('makeuser', u.id, 'Make user') : uBtn('makeadmin', u.id, 'Make admin'));
+    acts.push(uBtn('delete', u.id, 'Delete', true));
+    return `<div class="table-row users-row">
+      <span class="cell-agent">${esc(u.username)}${you ? ' <span class="you-tag">you</span>' : ''}</span>
+      <span>${esc(u.role)}</span>
+      <span><span class="ustatus ustatus-${esc(u.status)}">${esc(u.status)}</span></span>
+      <span>${ago(u.createdAt)} ago</span>
+      <span class="user-actions">${acts.join('')}</span>
+    </div>`;
+  }).join('');
+  return `<div class="view-activity" style="max-width:1000px">
+    <div class="view-note">Approve, disable, promote or remove accounts. The last active admin cannot be demoted, disabled or deleted.</div>
+    <div class="table users-table" style="max-width:1000px">
+      <div class="table-head users-row"><span>Username</span><span>Role</span><span>Status</span><span>Created</span><span>Actions</span></div>
+      ${state.users.length ? rows : '<div class="empty-inline" style="padding:16px">No users yet.</div>'}
+    </div>
+  </div>`;
+}
+
+/* ---------------- auth (logged-out) ---------------- */
+
+function renderAuth() {
+  const reg = state.authMode === 'register';
+  return `<div class="auth-wrap">
+    <div class="auth-card">
+      <div class="auth-brand">Mediation</div>
+      <div class="auth-title">${reg ? 'Create account' : 'Sign in'}</div>
+      ${state.authMsg ? `<div class="auth-msg">${esc(state.authMsg)}</div>` : ''}
+      <input class="auth-input" id="authUser" placeholder="username" autocomplete="username">
+      <input class="auth-input" id="authPass" type="password" placeholder="password"
+        autocomplete="${reg ? 'new-password' : 'current-password'}">
+      <button class="auth-btn" type="button" data-auth="${reg ? 'register' : 'login'}">${reg ? 'Register' : 'Login'}</button>
+      <div class="auth-toggle">${reg
+        ? 'Have an account? <a href="#" data-auth="toggle">Sign in</a>'
+        : 'Need an account? <a href="#" data-auth="toggle">Register</a>'}</div>
+    </div>
+  </div>`;
+}
+
+function showAuth() {
+  document.querySelector('.sidebar').style.display = 'none';
+  document.querySelector('.topbar').style.display = 'none';
+  $('main').innerHTML = renderAuth();
+  const u = $('authUser');
+  if (u) u.focus();
+}
+
+function enterDashboard() {
+  document.querySelector('.sidebar').style.display = '';
+  document.querySelector('.topbar').style.display = '';
+  state.route = parseRoute();
+  render();
+  refresh();
+}
+
+async function doLogin(username, password) {
+  try {
+    const res = await fetch('/api/users/login', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (res.ok) { state.me = body.user; state.authMsg = ''; enterDashboard(); return; }
+    state.authMsg = body.error || `Login failed (${res.status})`;
+  } catch { state.authMsg = 'Request failed — is the server reachable?'; }
+  showAuth();
+}
+
+async function doRegister(username, password) {
+  try {
+    const res = await fetch('/api/users/register', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (res.ok) {
+      if (body.bootstrap) { await doLogin(username, password); return; } // first account: active admin, log straight in
+      state.authMode = 'login';
+      state.authMsg = 'Account created — an administrator must approve it before you can sign in.';
+    } else {
+      state.authMsg = (body.issues ? 'Check username (3-32 chars) and password (min 8).' : body.error) || `Registration failed (${res.status})`;
+    }
+  } catch { state.authMsg = 'Request failed — is the server reachable?'; }
+  showAuth();
+}
+
 /* ---------------- render root ---------------- */
 
 let lastRouteKey = null;
 
 function render() {
+  if (!state.me) return; // logged out: managed by showAuth()
   renderConnection();
   renderSidebar();
   renderHeader();
+  $('userChip').innerHTML =
+    `<span class="user-name">${esc(state.me.username)}</span>` +
+    `<span class="user-role">${esc(state.me.role)}</span>` +
+    '<button class="logout-btn" type="button" data-logout>Logout</button>';
+  $('footerName').textContent = state.me.username;
+  $('footerRole').textContent = state.me.role === 'admin' ? 'Administrator' : 'Member';
   const main = $('main');
   const r = state.route;
   const html =
@@ -773,6 +891,7 @@ function render() {
     : r.view === 'activity' ? renderInstanceActivity()
     : r.view === 'agents' ? renderInstanceAgents()
     : r.view === 'settings' ? renderSettings()
+    : r.view === 'users' ? renderUsers()
     : renderOverview();
 
   // Fresh DOM on navigation (entry animation plays once); in-place patch on
@@ -794,6 +913,53 @@ $('searchIcon').innerHTML = icon('search', '#98a2b3', 15);
 // feedback goes through `state` + render(), never direct DOM mutation.
 let copiedTimer = null;
 document.addEventListener('click', async (e) => {
+  const authEl = e.target.closest('[data-auth]');
+  if (authEl) {
+    e.preventDefault();
+    const act = authEl.dataset.auth;
+    if (act === 'toggle') {
+      state.authMode = state.authMode === 'register' ? 'login' : 'register';
+      state.authMsg = '';
+      showAuth();
+      return;
+    }
+    const username = ($('authUser')?.value || '').trim();
+    const password = $('authPass')?.value || '';
+    if (act === 'register') await doRegister(username, password);
+    else await doLogin(username, password);
+    return;
+  }
+
+  if (e.target.closest('[data-logout]')) {
+    try { await fetch('/api/users/logout', { method: 'POST' }); } catch { /* ignore */ }
+    state.me = null;
+    state.authMode = 'login';
+    state.authMsg = 'Signed out.';
+    showAuth();
+    return;
+  }
+
+  const ua = e.target.closest('[data-uaction]');
+  if (ua) {
+    const id = ua.dataset.uid;
+    const act = ua.dataset.uaction;
+    if (act === 'delete' && !confirm('Delete this user? This cannot be undone.')) return;
+    const bodies = {
+      approve: { status: 'active' }, disable: { status: 'disabled' }, activate: { status: 'active' },
+      makeadmin: { role: 'admin' }, makeuser: { role: 'user' },
+    };
+    try {
+      const res = act === 'delete'
+        ? await fetch(`/api/users/${encodeURIComponent(id)}`, { method: 'DELETE' })
+        : await fetch(`/api/users/${encodeURIComponent(id)}`, {
+          method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(bodies[act]),
+        });
+      if (!res.ok) { const b = await res.json().catch(() => ({})); alert(b.error || `Action failed (${res.status})`); }
+    } catch { alert('Request failed'); }
+    refresh();
+    return;
+  }
+
   const legacyCopy = e.target.closest('#copyBtn');
   if (legacyCopy) {
     try {
@@ -836,12 +1002,22 @@ document.addEventListener('click', async (e) => {
 });
 
 function onRoute() {
+  if (!state.me) return; // logged out: hash changes are inert
   state.route = parseRoute();
   render();
   refresh();
 }
 
+async function checkAuth() {
+  try {
+    const res = await fetch('/api/users/me', { headers: { Accept: 'application/json' } });
+    if (res.ok) { state.me = (await res.json()).user; return; }
+  } catch { /* server unreachable — treat as logged out */ }
+  state.me = null;
+}
+
 window.addEventListener('hashchange', onRoute);
-onRoute();
-setInterval(refresh, 3000);
-setInterval(renderConnection, 1000); // keep "Synced Ns ago" ticking
+setInterval(() => { if (state.me) refresh(); }, 3000);
+setInterval(() => { if (state.me) renderConnection(); }, 1000); // keep "Synced Ns ago" ticking
+
+checkAuth().then(() => { if (state.me) enterDashboard(); else showAuth(); });

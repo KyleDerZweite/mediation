@@ -69,6 +69,25 @@ export const bugPatch = z.object({
   severity: bugSeverity.optional(),
 });
 
+// ---- user accounts (see docs/auth.md) ----
+// Username normalization (trim + lowercase) and its `^[a-z0-9][a-z0-9_-]{2,31}$`
+// shape check happen server-side in the Store; here we only validate types.
+
+export const userRegister = z.object({
+  username: str,
+  password: z.string().min(8).max(128),
+});
+
+export const userLogin = z.object({
+  username: str,
+  password: str,
+});
+
+export const userPatch = z.object({
+  role: z.enum(['user', 'admin']).optional(),
+  status: z.enum(['active', 'disabled']).optional(), // approving = 'active'; 'pending' is never settable
+});
+
 // ---- agent pairing (device-flow-lite; see AGENTS.md "Pairing") ----
 
 export const authRequest = z.object({
@@ -89,3 +108,6 @@ export type ClaimPatch = z.infer<typeof claimPatch>;
 export type ClaimComplete = z.infer<typeof claimComplete>;
 export type BugCreate = z.infer<typeof bugCreate>;
 export type BugPatch = z.infer<typeof bugPatch>;
+export type UserRegister = z.infer<typeof userRegister>;
+export type UserLogin = z.infer<typeof userLogin>;
+export type UserPatch = z.infer<typeof userPatch>;

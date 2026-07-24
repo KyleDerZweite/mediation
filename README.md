@@ -127,9 +127,30 @@ Mediation runs standalone: without Newt credentials the tunnel container just
 crash-loops while mediation keeps serving on `:4100` — or run only it with
 `podman-compose up -d mediation`.
 
-## Scope
+## Users & auth
 
-This is the development MVP: open endpoints, shared project id, no auth.
-The production identity model (human accounts, project membership, scoped
-agent credentials, invitations, audit trail) is specified in
-[`docs/PRODUCT.md`](docs/PRODUCT.md) and is intentionally out of scope here.
+The API requires an identity. Two credential kinds (details:
+[`docs/auth.md`](docs/auth.md), served at `/auth.md`):
+
+- **Agents** pair once and send `Authorization: Bearer <token>` on every
+  `/api/projects/*` call (see [Connect your coding agents](#connect-your-coding-agents-one-command)).
+- **Humans** register an account and use the dashboard with a session cookie.
+
+**Bootstrap (first run):** deploy, open the dashboard, and register the first
+account. Because the user table is empty, that account becomes an **active
+administrator** and is logged straight in. Every later registration is created
+**pending** and cannot sign in until an admin approves it on the **Users** page
+(`#/users`), where admins also disable/reactivate, change roles, and delete
+accounts. No credentials are committed or defaulted anywhere.
+
+Roles: `admin` (user administration) and `user`. What needs what:
+
+| Access | Requirement |
+| --- | --- |
+| `/api/projects/*` (the mediation API) | a paired agent Bearer token **or** an active user session |
+| Dashboard + pairing approval | active user session |
+| Approve / disable / role / delete users | `admin` session |
+
+The last active admin cannot be demoted, disabled, or deleted. The production
+identity model (project membership, invitations, audit trail) remains specified
+in [`docs/PRODUCT.md`](docs/PRODUCT.md).
