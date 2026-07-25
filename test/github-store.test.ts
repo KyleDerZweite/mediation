@@ -106,7 +106,12 @@ test('a project stays listed after its GitHub grant goes stale, hides after a we
   assert.equal(store.githubMemberRole(project.id, user.id), null);
   assert.equal(store.githubMemberRole(project.id, user.id, { fresh: false }), 'owner');
   assert.deepEqual(store.listProjects(user.id, false, { fresh: true }).map((p) => p.id), []);
-  assert.deepEqual(store.listProjects(user.id, false, { fresh: false }).map((p) => p.id), [project.id]);
+  const listed = store.listProjects(user.id, false, { fresh: false });
+  assert.deepEqual(listed.map((p) => p.id), [project.id]);
+  // The card said "not a member" because the role came from a fresh-only
+  // lookup while the row itself was listed through the stale-tolerant one.
+  assert.equal(listed[0].role, 'owner');
+  assert.equal(store.memberRole(project.id, user.id, { fresh: false }), 'owner');
 
   // Age the project and its history past the idle window (no clock injection
   // in the store, so reach into the same database file directly).

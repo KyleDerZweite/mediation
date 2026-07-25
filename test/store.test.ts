@@ -198,3 +198,20 @@ test('unknown session/claim/bug ids produce 404 errors', () => {
   assert.throws(() => store.updateBug(P, 'nope', {}), is404(/bug not found/));
   assert.throws(() => store.endSession(P, 'nope'), is404(/session not found/));
 });
+
+test('events record the agent that caused them, so a feed can be filtered by one', () => {
+  const s = new Store({ dbPath: ':memory:' });
+  const session = s.startSession('proj', { agent: 'codex', machine: 'box', developer: 'Kyle' }, 'cap');
+  const { claim } = s.createClaim('proj', mkClaim({ sessionId: session.id, intent: 'ship it', files: ['a.ts'] }));
+  s.updateClaim('proj', claim.id, claimPatch.parse({ finding: 'found a thing' }));
+  s.reportBug('proj', bugCreate.parse({ sessionId: session.id, title: 'broken', severity: 'low' }));
+
+  // The recorded agent is the session identity the feed displays,
+  // `codex-<session8>@Kyle`, not the bare harness name.
+  const byKind = new Map(s.getState('proj').events.map((e) => [e.type, e.agent]));
+  assert.match(session.agent, /^codex-[0-9a-f]{8}@Kyle$/);
+  for (const kind of ['session', 'claim', 'finding', 'bug'] as const) {
+    assert.equal(byKind.get(kind), session.agent, kind);
+  }
+  s.close();
+});

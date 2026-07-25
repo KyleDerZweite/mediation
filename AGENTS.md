@@ -54,7 +54,7 @@ or instance-admin cookie, human only), USER (active user, human only), ADMIN
 | PUBLIC | POST | `/api/github/webhook` | signed GitHub webhook |
 | A\|U | GET | `/api/projects` | none (ProjectSummary[], filtered to the actor; `role` per row) |
 | A\|U | POST | `/api/repositories/github/session` | `githubRepositorySession` → verified repository-bound session |
-| USER | POST | `/api/projects` | `projectCreate` → creates + owner membership (409 taken, 400 bad slug) |
+| USER | POST | `/api/projects` | `projectCreate` → creates + owner membership (409 taken, 400 bad slug). Manual mode only, and not offered in the dashboard: agents bootstrap projects via `mediation_init` |
 | MEMBER | POST | `/api/projects/:p/sessions` | `sessionCreate` (manual mode only; auto-creates an unknown project) |
 | MEMBER | POST | `/api/projects/:p/sessions/:id/heartbeat` | `heartbeat` |
 | MEMBER | DELETE | `/api/projects/:p/sessions/:id` | none |

@@ -2,6 +2,23 @@
 
 ## 0.4.0-alpha: names humans recognise
 
+- **Fixed: your own project showed a "not a member" badge.** The card's role
+  came from a freshness-gated lookup while the row beside it was listed
+  through the stale-tolerant one, so five minutes after the last agent
+  session an owner was labelled a stranger to their own project. `memberRole`
+  now takes the same `fresh` flag as the listing that renders it.
+- The **Activity** feed filters by event type, agent and project, plus free
+  text, with counts on the type pills and an "N of M" line when a filter is
+  on. Events now record the agent that caused them (new `events.agent`
+  column, `EventEntry.agent`); the agent picker collapses the per-session
+  identity `codex-4fd2545b@Kyle` to `codex@Kyle` so it lists people, not
+  sessions.
+- **Removed "Create project" from the dashboard.** Projects are bootstrapped
+  by agents working in a repository, never typed in by a human: the empty
+  state now points at `mediation_init` and the Agents page. The manual-mode
+  `POST /api/projects` endpoint stays for the development configuration,
+  where it is still how the test fixtures build a project; production
+  (GitHub App mode) already refuses it.
 - **GitHub denials now say what to do.** `GitHub App cannot access this
   repository` was a dead end: the fix (install the App on that repository) was
   discoverable only by reading the server source. The four distinct causes are

@@ -42,6 +42,7 @@ const ADD_COLUMNS: [table: string, column: string, decl: string][] = [
   ['users', 'github_user_id', 'TEXT'],
   ['users', 'github_login', 'TEXT'],
   ['users', 'github_authorization_status', 'TEXT'],
+  ['events', 'agent', 'TEXT'],
   ['projects', 'provider', 'TEXT'],
   ['projects', 'external_repository_id', 'TEXT'],
   ['projects', 'full_name', 'TEXT'],
@@ -274,6 +275,7 @@ function eventFromRow(r: Row): EventEntry {
     type: r.type as EventType,
     message: r.message as string,
     at: Number(r.at),
+    agent: (r.agent as string) ?? null, // null for rows written before the column
   };
 }
 
@@ -308,7 +310,7 @@ export class Store {
       );
       CREATE TABLE IF NOT EXISTS events (
         id TEXT PRIMARY KEY, projectId TEXT NOT NULL, type TEXT NOT NULL,
-        message TEXT NOT NULL, at INTEGER NOT NULL
+        message TEXT NOT NULL, at INTEGER NOT NULL, agent TEXT
       );
       CREATE TABLE IF NOT EXISTS pair_requests (
         id TEXT PRIMARY KEY, code TEXT NOT NULL UNIQUE, agent TEXT NOT NULL,
@@ -431,9 +433,9 @@ export class Store {
       .run(projectId, userId, role, at);
   }
 
-  private emit(projectId: string, type: EventType, message: string): void {
-    this.db.prepare('INSERT INTO events (id, projectId, type, message, at) VALUES (?, ?, ?, ?, ?)')
-      .run(randomUUID(), projectId, type, message, Date.now());
+  private emit(projectId: string, type: EventType, message: string, agent: string | null = null): void {
+    this.db.prepare('INSERT INTO events (id, projectId, type, message, at, agent) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(randomUUID(), projectId, type, message, Date.now(), agent);
     this.db.prepare(`
       DELETE FROM events WHERE projectId = ? AND rowid NOT IN (
         SELECT rowid FROM events WHERE projectId = ? ORDER BY at DESC, rowid DESC LIMIT ?
@@ -493,7 +495,7 @@ export class Store {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(session.id, projectId, session.agent, session.developer, session.machine, null, t, t,
         capability ? capabilityHash(capability) : null);
-    this.emit(projectId, 'session', `${session.agent} connected`);
+    this.emit(projectId, 'session', `${session.agent} connected`, session.agent);
     return session;
   }
 
@@ -569,7 +571,7 @@ export class Store {
     const session = this.requireSession(projectId, sessionId);
     session.lastSeenAt = Date.now();
     this.touchSession(sessionId);
-    if (input.activity) this.emit(projectId, 'activity', `${session.agent}: ${input.activity}`);
+    if (input.activity) this.emit(projectId, 'activity', `${session.agent}: ${input.activity}`, session.agent);
     return session;
   }
 
@@ -577,7 +579,7 @@ export class Store {
     const session = this.requireSession(projectId, sessionId);
     this.db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
     this.releaseClaims(projectId, sessionId, reason);
-    this.emit(projectId, 'session', `${session.agent} disconnected (${reason})`);
+    this.emit(projectId, 'session', `${session.agent} disconnected (${reason})`, session.agent);
     return { ok: true };
   }
 
@@ -586,7 +588,7 @@ export class Store {
       .all(projectId, sessionId) as Row[]).map(claimFromRow);
     for (const claim of claims) {
       this.db.prepare('DELETE FROM claims WHERE id = ?').run(claim.id);
-      this.emit(projectId, 'claim', `claim "${claim.intent}" released (${reason})`);
+      this.emit(projectId, 'claim', `claim "${claim.intent}" released (${reason})`, claim.agent);
     }
   }
 
@@ -600,7 +602,7 @@ export class Store {
     for (const session of sessions) {
       this.db.prepare('DELETE FROM sessions WHERE id = ?').run(session.id);
       this.releaseClaims(session.projectId, session.id, reason);
-      this.emit(session.projectId, 'session', `${session.agent} disconnected (${reason})`);
+      this.emit(session.projectId, 'session', `${session.agent} disconnected (${reason})`, session.agent);
     }
     const credentialSql = `DELETE FROM credentials WHERE authorization_source = 'github-app'
       AND (${userId ? 'user_id = ?' : '0'} OR ${githubUserId ? 'github_user_id = ?' : '0'})`;
@@ -620,7 +622,7 @@ export class Store {
     for (const session of sessions) {
       this.db.prepare('DELETE FROM sessions WHERE id = ?').run(session.id);
       this.releaseClaims(session.projectId, session.id, reason);
-      this.emit(session.projectId, 'session', `${session.agent} disconnected (${reason})`);
+      this.emit(session.projectId, 'session', `${session.agent} disconnected (${reason})`, session.agent);
     }
     const grants = this.db.prepare(`DELETE FROM project_members WHERE project_id = ?
       AND authorization_source = 'github-app'`).run(project.id).changes;
@@ -694,7 +696,7 @@ export class Store {
       .run(claim.id, projectId, claim.sessionId, claim.agent, claim.developer, claim.intent,
         claim.task, JSON.stringify(claim.files), JSON.stringify(claim.components), claim.branch,
         claim.baseRevision, claim.status, '[]', '[]', '[]', null, t, t, null);
-    this.emit(projectId, 'claim', `${session.agent} claimed: ${claim.intent}`);
+    this.emit(projectId, 'claim', `${session.agent} claimed: ${claim.intent}`, session.agent);
     return { claim, conflicts };
   }
 
@@ -711,8 +713,8 @@ export class Store {
     if (patch.finding) claim.findings.push({ text: patch.finding, at: Date.now() });
     claim.updatedAt = Date.now();
     this.saveClaim(claim);
-    if (patch.finding) this.emit(projectId, 'finding', `${claim.agent} found: ${patch.finding}`);
-    if (patch.status) this.emit(projectId, 'claim', `${claim.agent} → ${patch.status}: ${claim.intent}`);
+    if (patch.finding) this.emit(projectId, 'finding', `${claim.agent} found: ${patch.finding}`, claim.agent);
+    if (patch.status) this.emit(projectId, 'claim', `${claim.agent} → ${patch.status}: ${claim.intent}`, claim.agent);
     return claim;
   }
 
@@ -726,7 +728,8 @@ export class Store {
     claim.updatedAt = claim.completedAt;
     this.saveClaim(claim); // row is kept: completed claims survive as history
     this.emit(projectId, 'completed',
-      `${claim.agent} completed: ${claim.intent}${input.commits.length ? ` (${input.commits.join(', ')})` : ''}`);
+      `${claim.agent} completed: ${claim.intent}${input.commits.length ? ` (${input.commits.join(', ')})` : ''}`,
+      claim.agent);
     return claim;
   }
 
@@ -751,7 +754,7 @@ export class Store {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(bug.id, projectId, bug.sessionId, bug.reporter, bug.title, bug.description,
         JSON.stringify(bug.files), bug.severity, bug.status, bug.createdAt);
-    this.emit(projectId, 'bug', `${session.agent} reported bug: ${bug.title}`);
+    this.emit(projectId, 'bug', `${session.agent} reported bug: ${bug.title}`, session.agent);
     return bug;
   }
 
@@ -773,12 +776,13 @@ export class Store {
     return this.db.prepare('SELECT 1 FROM projects WHERE id = ?').get(id) !== undefined;
   }
 
-  memberRole(projectId: string, userId: string | null): MemberRole | null {
+  memberRole(projectId: string, userId: string | null, { fresh = true } = {}): MemberRole | null {
     if (!userId) return null;
+    const freshOnly = `AND (authorization_source IS NULL OR authorization_source != 'github-app'
+        OR authorization_expires_at IS NULL OR authorization_expires_at > ?)`;
     const row = this.db.prepare(`SELECT role FROM project_members WHERE project_id = ? AND user_id = ?
-      AND (authorization_source IS NULL OR authorization_source != 'github-app'
-        OR authorization_expires_at IS NULL OR authorization_expires_at > ?)`)
-      .get(projectId, userId, Date.now()) as Row | undefined;
+      ${fresh ? freshOnly : ''}`)
+      .get(...(fresh ? [projectId, userId, Date.now()] : [projectId, userId])) as Row | undefined;
     return row ? (row.role as MemberRole) : null;
   }
 
@@ -1377,7 +1381,7 @@ export class Store {
         id,
         // GitHub projects carry an opaque uuid id; humans know them by repository.
         name: (project?.full_name as string) || id,
-        role: this.memberRole(id, userId),
+        role: this.memberRole(id, userId, { fresh }),
         sessions: sessions.length,
         claims: claims.length,
         openBugs: Number(openBugs.n),
@@ -1398,14 +1402,14 @@ export class Store {
       .all(t - this.sessionTtlMs) as Row[]).map(sessionFromRow);
     for (const s of stale) {
       this.db.prepare('DELETE FROM sessions WHERE id = ?').run(s.id);
-      this.emit(s.projectId, 'session', `${s.agent} session expired (no heartbeat)`);
+      this.emit(s.projectId, 'session', `${s.agent} session expired (no heartbeat)`, s.agent);
       this.releaseClaims(s.projectId, s.id, 'session expired');
     }
     const idle = (this.db.prepare("SELECT * FROM claims WHERE status != 'done' AND updatedAt < ?")
       .all(t - this.claimIdleTtlMs) as Row[]).map(claimFromRow);
     for (const c of idle) {
       this.db.prepare('DELETE FROM claims WHERE id = ?').run(c.id);
-      this.emit(c.projectId, 'claim', `claim "${c.intent}" expired (idle)`);
+      this.emit(c.projectId, 'claim', `claim "${c.intent}" expired (idle)`, c.agent);
     }
   }
 

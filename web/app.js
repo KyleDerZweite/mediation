@@ -170,6 +170,7 @@ const state = {
   armed: null,             // key of a destructive button armed for its second click
   menu: null,              // key of the open row menu (role editor / overflow)
   userFilter: { q: '', role: 'all', status: 'all' },
+  activityFilter: { q: '', kind: 'all', agent: 'all', project: 'all' },
   version: '',             // server version, shown in the sidebar footer
   lastSyncAt: null,
   misses: 0,
@@ -404,14 +405,10 @@ function renderOverview() {
       <h2>Projects</h2>
       <span class="section-sub">Live state before Git makes it visible</span>
     </div>
-    <div class="create-row">
-      <input class="auth-input create-input" id="newProjectId" placeholder="new-project-id" autocomplete="off">
-      <button class="user-act-btn" type="button" data-newproject>Create project</button>
-      <span class="section-sub">You become its owner; only members you add can see it.</span>
-    </div>
     ${ps.length
       ? `<div class="proj-grid">${cards}</div>`
-      : emptyCard(`No projects yet. Create one above, or let an agent create it on its first session (<span class="mono">mediation_init</span>).`)}
+      : emptyCard(`No projects yet. A project appears when an agent runs <span class="mono">mediation_init</span>
+        in a repository you can push to. Install one from the <a href="#/agents">Agents page</a>.`)}
   </div>`;
 }
 
@@ -738,6 +735,52 @@ function renderSessionsTable(sessions, now) {
 
 /* ---------------- instance activity / agents ---------------- */
 
+const EVENT_KINDS = ['session', 'claim', 'finding', 'bug', 'completed', 'activity'];
+
+// A session's agent is `<harness>-<session8>@<developer>`, unique per session,
+// so filtering on it verbatim would offer one entry per session. Collapse it
+// to the identity behind the sessions: `codex@KyleDerZweite`.
+const agentStem = (name) => String(name || '').replace(/-[0-9a-f]{8}@/, '@');
+
+function eventMatchesFilter(ev) {
+  const f = state.activityFilter;
+  if (f.kind !== 'all' && ev.type !== f.kind) return false;
+  if (f.agent !== 'all' && agentStem(ev.agent) !== f.agent) return false;
+  if (f.project !== 'all' && ev.projectId !== f.project) return false;
+  const q = f.q.trim().toLowerCase();
+  return !q || `${ev.message} ${ev.agent || ''}`.toLowerCase().includes(q);
+}
+
+// Counts come from everything that is in scope for the *other* filters, so a
+// pill never claims a number the pill next to it would contradict.
+function activityFilterBar(all) {
+  const f = state.activityFilter;
+  const kinds = all.filter((e) => (f.agent === 'all' || agentStem(e.agent) === f.agent)
+    && (f.project === 'all' || e.projectId === f.project));
+  const count = (kind) => kinds.filter((e) => e.type === kind).length;
+  const agents = [...new Set(all.map((e) => agentStem(e.agent)).filter(Boolean))].sort();
+  const pill = (group, value, label, n) => `<button class="filter-pill${f[group] === value ? ' active' : ''}"
+    type="button" data-afilter="${group}" data-avalue="${esc(value)}">${esc(label)}${
+    n === undefined ? '' : `<span class="filter-count">${n}</span>`}</button>`;
+  const select = (group, label, options) => `<select class="create-input" data-aselect="${group}">
+    <option value="all">${esc(label)}</option>
+    ${options.map(([value, text]) => `<option value="${esc(value)}"${f[group] === value ? ' selected' : ''}>${esc(text)}</option>`).join('')}
+  </select>`;
+
+  return `<div class="filter-bar">
+    <div class="filter-search">
+      <span class="filter-search-icon">${icon('search', '#98a2b3', 14)}</span>
+      <input class="filter-input" type="search" placeholder="Filter events…" value="${esc(f.q)}" data-asearch>
+    </div>
+    <div class="filter-group">
+      ${pill('kind', 'all', 'All', kinds.length)}
+      ${EVENT_KINDS.filter((k) => count(k)).map((k) => pill('kind', k, k, count(k))).join('')}
+    </div>
+    ${agents.length > 1 ? select('agent', 'Any agent', agents.map((a) => [a, a])) : ''}
+    ${state.projects.length > 1 ? select('project', 'Any project', state.projects.map((p) => [p.id, p.name])) : ''}
+  </div>`;
+}
+
 function renderInstanceActivity() {
   const now = Date.now();
   const merged = [];
@@ -746,12 +789,17 @@ function renderInstanceActivity() {
     if (ps) for (const ev of ps.events) merged.push({ ...ev, projectId: p.id });
   }
   merged.sort((a, b) => b.at - a.at);
-  const events = merged.slice(0, 100);
+  const shown = merged.filter(eventMatchesFilter).slice(0, 100);
+  const filtered = shown.length !== merged.length;
   return `<div class="view-activity">
     <div class="view-note">Every event across the instance, newest first: sessions, claims, findings, bugs and completions.</div>
-    ${events.length
-      ? `<div class="feed-panel">${events.map((e) => eventRow(e, now, e.projectId)).join('')}</div>`
-      : emptyCard('Nothing has happened yet. Events appear here as agents connect, claim work and report findings.')}
+    ${merged.length ? activityFilterBar(merged) : ''}
+    ${shown.length
+      ? `<div class="feed-panel">${shown.map((e) => eventRow(e, now, e.projectId)).join('')}</div>`
+      : emptyCard(merged.length
+        ? 'No event matches these filters.'
+        : 'Nothing has happened yet. Events appear here as agents connect, claim work and report findings.')}
+    ${filtered && shown.length ? `<div class="view-note" style="margin-top:10px">Showing ${shown.length} of ${merged.length} events.</div>` : ''}
   </div>`;
 }
 
@@ -1484,6 +1532,13 @@ document.addEventListener('click', async (e) => {
   const insideMenu = e.target.closest('.menu-pop');
   if (state.menu && !insideMenu) { state.menu = null; render(); }
 
+  const af = e.target.closest('[data-afilter]');
+  if (af) {
+    state.activityFilter = { ...state.activityFilter, [af.dataset.afilter]: af.dataset.avalue };
+    render();
+    return;
+  }
+
   const uf = e.target.closest('[data-ufilter]');
   if (uf) {
     state.userFilter = { ...state.userFilter, [uf.dataset.ufilter]: uf.dataset.uvalue };
@@ -1543,17 +1598,6 @@ document.addEventListener('click', async (e) => {
     const id = revokeEl.dataset.revoke;
     if (!arm(`rv-${id}`)) return; // first click arms, second confirms
     await send('DELETE', `/api/auth/credentials/${encodeURIComponent(id)}`);
-    refresh();
-    return;
-  }
-
-  if (e.target.closest('[data-newproject]')) {
-    const id = ($('newProjectId')?.value || '').trim();
-    if (!id) { alert('Enter a project id first.'); return; }
-    if (await send('POST', '/api/projects', { id })) {
-      $('newProjectId').value = '';
-      location.hash = `#/p/${encodeURIComponent(id.toLowerCase())}`;
-    }
     refresh();
     return;
   }
@@ -1634,9 +1678,24 @@ async function checkAuth() {
 // The filter box lives inside a morphed subtree: keep the value in state so a
 // poll re-render never resets what someone is typing.
 document.addEventListener('input', (e) => {
-  const search = e.target.closest('[data-usearch]');
-  if (!search) return;
-  state.userFilter = { ...state.userFilter, q: search.value };
+  const userSearch = e.target.closest('[data-usearch]');
+  if (userSearch) {
+    state.userFilter = { ...state.userFilter, q: userSearch.value };
+    render();
+    return;
+  }
+  const activitySearch = e.target.closest('[data-asearch]');
+  if (activitySearch) {
+    state.activityFilter = { ...state.activityFilter, q: activitySearch.value };
+    render();
+  }
+});
+
+// Agent and project are dropdowns: too many values for pills.
+document.addEventListener('change', (e) => {
+  const select = e.target.closest('[data-aselect]');
+  if (!select) return;
+  state.activityFilter = { ...state.activityFilter, [select.dataset.aselect]: select.value };
   render();
 });
 

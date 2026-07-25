@@ -72,6 +72,7 @@ export interface EventEntry {
   type: EventType;
   message: string;
   at: number;
+  agent: string | null; // who caused it; null on rows written before this existed
 }
 
 // ---- overlap detection ----
