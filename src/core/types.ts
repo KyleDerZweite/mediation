@@ -115,6 +115,7 @@ export type MemberRole = 'owner' | 'member';
 
 export interface ProjectSummary {
   id: string;
+  name: string; // display name: the GitHub repository (owner/name); the opaque id for manual projects
   role: MemberRole | null; // the requesting actor's role; null = instance admin viewing a project they are not a member of
   sessions: number;
   claims: number;

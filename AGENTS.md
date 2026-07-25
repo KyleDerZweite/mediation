@@ -78,7 +78,7 @@ or instance-admin cookie, human only), USER (active user, human only), ADMIN
 | ADMIN | PATCH | `/api/users/:id` | `userPatch` (role?/status?; final-admin protected 409) |
 | ADMIN | DELETE | `/api/users/:id` | — (final-admin protected 409) |
 | PUBLIC | GET | `/api/auth/me` | Bearer token → identity, 401 if invalid |
-| USER | GET | `/api/auth/credentials` | — own credentials (all, for an admin), incl. `ownerUsername` |
+| USER | GET | `/api/auth/credentials` | — own credentials only (admins included), incl. `ownerUsername`/`ownerDisplayName` |
 | USER | DELETE | `/api/auth/credentials/:id` | revoke (owner or admin, else 403) |
 | PUBLIC | GET | `/install.sh` | installer script, `__MEDIATION_URL__` templated from request proto+host |
 | PUBLIC | GET | `/install.ps1` | Windows installer bootstrap, URL templated likewise |
@@ -159,8 +159,8 @@ Enforcement summary (all of it in the one `/api/*` middleware in
 - Overlap rules live only in `src/core/overlap.ts`: path equality or
   directory-prefix match, case-insensitive component match, ≥2 shared
   significant task/intent tokens.
-- Sessions expire after `SESSION_TTL_MS` (default 120 000) without heartbeat;
-  their claims are released. Idle claims expire after 30 min. Completed claims
+- Sessions expire after `SESSION_TTL_MS` (default 300 000) without heartbeat;
+  their claims are released. Idle claims expire after 45 min. Completed claims
   are kept (`status: 'done'`).
 - Errors: JSON `{ error }` with proper status; validation failures are 400 with
   Zod issue details.

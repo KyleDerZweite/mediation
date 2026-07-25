@@ -394,10 +394,9 @@ export function buildApp(store: Store, options: AppOptions = {}): Hono {
     return cred ? c.json(cred) : c.json({ error: 'missing or invalid credential' }, 401);
   });
 
-  app.get('/api/auth/credentials', (c) => {
-    const user = getUser(c)!;
-    return c.json(store.listCredentials(user.role === 'admin' ? null : user.id));
-  });
+  // A device credential is personal: everyone, admins included, sees only
+  // their own. Admins keep the power to revoke someone else's by id.
+  app.get('/api/auth/credentials', (c) => c.json(store.listCredentials(getUser(c)!.id)));
 
   app.delete('/api/auth/credentials/:id', (c) => {
     const user = getUser(c)!;
@@ -429,7 +428,7 @@ export function buildApp(store: Store, options: AppOptions = {}): Hono {
     store.grantGithubProjectAccess(project.id, userId, authorization.permission, authorization.expiresAt);
     const capability = randomBytes(32).toString('base64url');
     const session = store.startSession(project.id, {
-      agent: body.agent, machine: body.machine ?? null, developer: getUser(c)?.username ?? getCred(c)?.ownerUsername ?? null,
+      agent: body.agent, machine: body.machine ?? null, developer: getUser(c)?.displayName ?? getCred(c)?.ownerDisplayName ?? null,
     }, capability);
     store.setGithubSessionAuthorization(project.id, session.id, {
       userId,
@@ -502,7 +501,7 @@ export function buildApp(store: Store, options: AppOptions = {}): Hono {
     const user = getUser(c);
     const capability = randomBytes(32).toString('base64url');
     const session = store.startSession(c.req.param('p'),
-      { ...body, developer: user?.username ?? cred?.ownerUsername ?? null }, capability);
+      { ...body, developer: user?.displayName ?? cred?.ownerDisplayName ?? null }, capability);
     return c.json({ ...session, capability });
   });
 

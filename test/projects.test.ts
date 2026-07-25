@@ -229,14 +229,16 @@ test('project id slug rule applies to creation only', async () => {
   assert.equal((await jb(ok)).id, 'my.project_1'); // trimmed + lowercased
 });
 
-test('credentials are scoped: users see only their own, admin sees all, revoke is owner-or-admin', async () => {
+test('credentials are personal: everyone including an admin sees only their own; revoke is owner-or-admin', async () => {
   const { req, adminCookie, alice, bob } = await fixture();
   const mine = await jb(await req('GET', '/api/auth/credentials', undefined, { cookie: alice.cookie }));
   assert.deepEqual(mine.map((c: { agent: string }) => c.agent), ['device']);
   assert.equal(mine[0].ownerUsername, 'alice');
 
-  const all = await jb(await req('GET', '/api/auth/credentials', undefined, { cookie: adminCookie }));
-  assert.equal(all.length, 3);
+  // An admin's list is their own devices, not the instance's.
+  const adminSees = await jb(await req('GET', '/api/auth/credentials', undefined, { cookie: adminCookie }));
+  assert.equal(adminSees.every((c: { ownerUsername: string }) => c.ownerUsername === 'admin'), true);
+  assert.equal(adminSees.some((c: { id: string }) => c.id === mine[0].id), false);
 
   assert.equal((await req('DELETE', `/api/auth/credentials/${mine[0].id}`, undefined, { cookie: bob.cookie })).status, 403);
   assert.equal((await req('DELETE', `/api/auth/credentials/${mine[0].id}`, undefined, { cookie: adminCookie })).status, 200);

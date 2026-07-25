@@ -159,6 +159,9 @@ const state = {
 
 const $ = (id) => document.getElementById(id);
 
+// Projects are addressed by an opaque id but named by their GitHub repository.
+const projectName = (pid) => state.projects.find((p) => p.id === pid)?.name || pid;
+
 /* ---------------- routing ---------------- */
 
 function parseRoute() {
@@ -280,7 +283,7 @@ function renderSidebar() {
       const active = r.view === 'project' && r.pid === p.id;
       return `<a class="side-proj${active ? ' active' : ''}" href="#/p/${encodeURIComponent(p.id)}">
         <span class="dot ${p.sessions > 0 ? 'dot-ok' : 'dot-idle'}"></span>
-        <span class="side-proj-name">${esc(p.id)}</span>
+        <span class="side-proj-name">${esc(p.name)}</span>
         ${p.sessions > 0 ? `<span class="side-proj-live">${p.sessions} live</span>` : ''}
       </a>`;
     }).join('')
@@ -297,7 +300,7 @@ const HEADER_META = {
 function renderHeader() {
   const r = state.route;
   const meta = r.view === 'project'
-    ? ['Projects', r.pid, r.pid]
+    ? ['Projects', projectName(r.pid), projectName(r.pid)]
     : HEADER_META[r.view] || HEADER_META.overview;
   morph($('crumbs'), `<span>${esc(meta[0])}</span>${meta[1] ? `<span>/</span><span class="crumb-sub">${esc(meta[1])}</span>` : ''}`);
   $('pageTitle').textContent = meta[2];
@@ -353,7 +356,7 @@ function renderOverview() {
     return `<a class="proj-card" href="#/p/${encodeURIComponent(p.id)}">
       <div class="proj-card-top">
         <span class="dot ${p.sessions > 0 ? 'dot-ok pulse' : 'dot-idle'}"></span>
-        <span class="proj-card-name">${esc(p.id)}</span>
+        <span class="proj-card-name">${esc(p.name)}</span>
         <span class="you-tag">${p.role ? esc(p.role) : 'not a member'}</span>
         <span class="proj-card-chev">${icon('chevron', '#c0c7d1', 18)}</span>
       </div>
@@ -518,7 +521,7 @@ function renderProject() {
     <div class="proj-head-main">
       <div class="proj-title-row">
         <span class="dot ${live > 0 ? 'dot-ok pulse' : 'dot-idle'}"></span>
-        <h2 class="proj-title">${esc(pid)}</h2>
+        <h2 class="proj-title">${esc(projectName(pid))}</h2>
         ${branch ? `<span class="repo-chip">${icon('repo', '#98a2b3', 13)}${esc(branch)}</span>` : ''}
       </div>
       <div class="proj-sub">${plural(live, 'live session')} · ${plural(nClaims, 'active claim')} · ${plural(nBugs, 'open bug')}</div>
@@ -534,14 +537,14 @@ function renderProject() {
   if (tab === 'members') {
     body = renderMembersTab(pid);
   } else if (failure === 403) {
-    body = emptyCard(`You are not a member of <span class="mono">${esc(pid)}</span> — ask one of its
+    body = emptyCard(`You are not a member of <span class="mono">${esc(projectName(pid))}</span> — ask one of its
       owners to add you (dashboard → project → Members). Retrying will not help until they do.`);
   } else if (failure === 404) {
-    body = emptyCard(`No project <span class="mono">${esc(pid)}</span> on this server.
+    body = emptyCard(`No project <span class="mono">${esc(projectName(pid))}</span> on this server.
       <a href="#/">Back to the overview</a>.`);
   } else if (!ps) {
     body = emptyCard(state.everSynced
-      ? `Nothing recorded for <span class="mono">${esc(pid)}</span> yet. It will appear as soon as an agent connects.`
+      ? `Nothing recorded for <span class="mono">${esc(projectName(pid))}</span> yet. It will appear as soon as an agent connects.`
       : `Waiting for the Mediation API…`);
   } else if (tab === 'agents') {
     body = renderSessionsTable(ps.sessions, now);
@@ -666,7 +669,7 @@ function renderMembersTab(pid) {
     }
     if (you) acts.push(mBtn('leave', pid, m.userId, 'Leave', true));
     return `<div class="table-row users-row">
-      <span class="cell-agent">${esc(m.username)}${you ? ' <span class="you-tag">you</span>' : ''}</span>
+      <span class="cell-agent">${esc(m.displayName || m.username)}${you ? ' <span class="you-tag">you</span>' : ''}</span>
       <span>${esc(m.role)}</span>
       <span>${ago(m.createdAt)} ago</span>
       <span></span>
@@ -730,40 +733,99 @@ function renderDeviceCredentials() {
         <span class="avatar" style="background:${AVATAR_FALLBACK}">${esc(initials(cr.agent))}</span>
         <div class="pair-who">
           <div class="pair-agent">${esc(cr.agent)}${cr.developer ? ` <span class="pair-dev">for ${esc(cr.developer)}</span>` : ''}</div>
-          <div class="pair-meta">owner ${esc(cr.ownerUsername || 'unbound')}${cr.machine ? ' · ' + esc(cr.machine) : ''} · signed in ${ago(cr.createdAt, now)} ago · last used ${ago(cr.lastUsedAt, now)} ago</div>
+          <div class="pair-meta">${esc(cr.ownerDisplayName || cr.ownerUsername || 'unbound')}${cr.machine ? ' · ' + esc(cr.machine) : ''} · signed in ${ago(cr.createdAt, now)} ago · last used ${ago(cr.lastUsedAt, now)} ago</div>
         </div>
-        ${cr.ownerUsername === state.me?.username || state.me?.role === 'admin'
-          ? `<button class="revoke-btn${state.armed === `rv-${cr.id}` ? ' armed' : ''}" type="button" data-revoke="${esc(cr.id)}">
-              ${state.armed === `rv-${cr.id}` ? 'Confirm revoke' : 'Revoke'}
-            </button>`
-          : ''}
+        <button class="revoke-btn${state.armed === `rv-${cr.id}` ? ' armed' : ''}" type="button" data-revoke="${esc(cr.id)}">
+          ${state.armed === `rv-${cr.id}` ? 'Confirm revoke' : 'Revoke'}
+        </button>
       </div>`).join('')
     : `<div class="empty-note">No device credentials yet. Install Mediation, register an account, wait for admin approval, then sign in once from an agent.</div>`;
 
   return `<div class="settings-section" style="margin-bottom:22px">
-      <h3>${state.me?.role === 'admin' ? 'All device credentials' : 'My device credentials'}</h3>
+      <h3>My device credentials</h3>
       <div class="pair-note">A device credential is shared by the installed harnesses on one machine.
         Each running agent still gets its own short-lived session identity.</div>
       ${creds}
     </div>`;
 }
 
+// Everything a human needs to get one machine coordinating: the installer
+// command and a prompt they can paste into a local agent verbatim. It lives on
+// the Agents page because that is where they come looking for "how do I get an
+// agent in here".
+function renderInstallPanel() {
+  const origin = location.origin && location.origin !== 'null' ? location.origin : 'http://localhost:4100';
+  const installCmd = `curl -fsSL ${origin}/install.sh | bash`;
+  const signIn = state.serverAuthMode === 'github-app'
+    ? [
+      '3. Run mediation_login and show me the verification URL and code it prints.',
+      '   I open that link, sign in with GitHub if I am not signed in already, and',
+      '   confirm the code. Then run mediation_login again to store this machine’s',
+      '   credential. Never ask me for a GitHub token — you do not get one.',
+      '   If it says the account awaits approval, tell me and stop until I say go.',
+    ]
+    : [
+      '3. Run mediation_register with the username and password I give you, then',
+      '   mediation_login once an administrator has activated the account.',
+    ];
+  const prompt = [
+    'Set up Mediation (live work coordination) for this repository.',
+    `Server: ${origin}`,
+    '',
+    '1. If you have no mediation_* MCP tools, install the client:',
+    `   ${installCmd}`,
+    '   Then reload your MCP servers so the tools appear.',
+    '2. Run mediation_status and tell me what it reports.',
+    ...signIn,
+    '4. Run mediation_init here to bind this repository’s GitHub push target.',
+    '5. From now on follow the mediation skill: mediation_check before you touch',
+    '   files, mediation_claim when you start, mediation_complete when you finish.',
+  ].join('\n');
+
+  return `<div class="dark-panel" style="margin-bottom:22px">
+    <div class="dark-panel-head">
+      <span class="dp-icon">${icon('bot', '#8fc0ff', 18)}</span>
+      <span class="dp-title">Install for your agents</span>
+    </div>
+    <div class="dp-note" style="margin:0 0 8px">One command on each developer machine. Detects and registers the
+      Mediation MCP server for <b>Claude Code</b>, <b>Codex</b>, <b>Kimi Code</b>, and legacy <b>Kimi CLI</b>,
+      and installs a skill that teaches agents the workflow.</div>
+    <div class="snippet-wrap">
+      <pre class="snippet" id="installSnippet">${esc(installCmd)}</pre>
+      <button class="copy-btn" type="button" data-copy="${esc(installCmd)}" data-copy-key="install">${state.copied === 'install' ? 'Copied' : 'Copy'}</button>
+    </div>
+    <div class="dp-key" style="margin:16px 0 6px">Or paste this prompt into a local agent</div>
+    <div class="snippet-wrap">
+      <pre class="snippet" id="promptSnippet">${esc(prompt)}</pre>
+      <button class="copy-btn" type="button" data-copy="${esc(prompt)}" data-copy-key="prompt">${state.copied === 'prompt' ? 'Copied' : 'Copy'}</button>
+    </div>
+    <div class="dp-note">The agent installs the client, signs this machine in and maps the current
+      repository itself. Protocol reference: <a href="/AGENT.md" target="_blank" rel="noopener">/AGENT.md</a> ·
+      auth: <a href="/auth.md" target="_blank" rel="noopener">/auth.md</a>.</div>
+  </div>`;
+}
+
 function renderInstanceAgents() {
   const now = Date.now();
+  // This page is personal: your machines, your agents. A project's page is
+  // where you see everyone else's sessions in projects you belong to.
+  const mine = (s) => !!state.me && s.developer === (state.me.displayName || state.me.username);
   const sections = state.projects.map((p) => {
-    const ps = state.states.get(p.id);
-    if (!ps || !ps.sessions.length) return '';
+    const sessions = (state.states.get(p.id)?.sessions || []).filter(mine);
+    if (!sessions.length) return '';
     return `<div class="settings-section" style="margin-bottom:22px">
-      <h3><span class="mono" style="font-size:13px">${esc(p.id)}</span>
-        <span style="font-size:11px;font-weight:500;color:#98a2b3"> · ${plural(ps.sessions.length, 'session')}</span></h3>
-      ${renderSessionsTable(ps.sessions, now)}
+      <h3><span class="mono" style="font-size:13px">${esc(p.name)}</span>
+        <span style="font-size:11px;font-weight:500;color:#98a2b3"> · ${plural(sessions.length, 'session')}</span></h3>
+      ${renderSessionsTable(sessions, now)}
     </div>`;
   }).join('');
   return `<div class="view-activity" style="max-width:960px">
-    <div class="view-note">Device credentials and every live agent session across the instance.</div>
+    <div class="view-note">Install Mediation on a machine, then see its device credentials and your own live agent sessions.</div>
+    ${renderInstallPanel()}
     ${renderDeviceCredentials()}
-    <div class="settings-section" style="margin-bottom:12px"><h3>Live sessions</h3></div>
-    ${sections || emptyCard('No live agent sessions anywhere. See <a href="#/settings">Settings</a> for how to connect one.')}
+    <div class="settings-section" style="margin-bottom:12px"><h3>My live sessions</h3>
+      <div class="pair-note">Other people's sessions appear on each project's own Agents tab.</div></div>
+    ${sections || emptyCard('None of your agents are connected right now. Install Mediation with the panel above to connect one.')}
   </div>`;
 }
 
@@ -784,26 +846,7 @@ function renderSettings() {
   ].join('\n');
   const stale = !state.everSynced || state.misses >= 2;
 
-  const installCmd = `curl -fsSL ${origin}/install.sh | bash`;
-
   return `<div class="view-settings">
-    <div class="dark-panel">
-      <div class="dark-panel-head">
-        <span class="dp-icon">${icon('bot', '#8fc0ff', 18)}</span>
-        <span class="dp-title">Install for your agents</span>
-      </div>
-      <div class="dp-note" style="margin:0 0 8px">One command on each developer machine. Detects and registers the
-        Mediation MCP server for <b>Claude Code</b>, <b>Codex</b>, <b>Kimi Code</b>, and legacy <b>Kimi CLI</b>,
-        and installs a skill that teaches agents the workflow.</div>
-      <div class="snippet-wrap">
-        <pre class="snippet" id="installSnippet">${esc(installCmd)}</pre>
-        <button class="copy-btn" type="button" data-copy="${esc(installCmd)}" data-copy-key="install">${state.copied === 'install' ? 'Copied' : 'Copy'}</button>
-      </div>
-      <div class="dp-note">Then ask the agent to <i>“register and set up mediation at ${esc(origin)}”</i>.
-        It registers a user account, waits for an administrator to activate it on the
-        <a href="#/users">Users page</a>, signs in once for the machine, and maps the current repository.</div>
-    </div>
-
     <div class="dark-panel">
       <div class="dark-panel-head">
         <span class="dp-icon">${icon('plug', '#8fc0ff', 18)}</span>
@@ -829,8 +872,8 @@ function renderSettings() {
       <div class="kv-list">
         ${[
           ['Conflicts are warnings', 'Overlap never blocks an agent. Claims always succeed; overlapping work comes back as a warning to negotiate around.', 'warn, not lock'],
-          ['Session heartbeat TTL', 'A session disappears — and its claims are released — if it stops heartbeating for this long.', '120 s'],
-          ['Claim idle expiry', 'Idle work claims auto-release so overlap warnings never rely on stale locks.', '30 min'],
+          ['Session heartbeat TTL', 'A session disappears — and its claims are released — if it stops heartbeating for this long.', '5 min'],
+          ['Claim idle expiry', 'Idle work claims auto-release so overlap warnings never rely on stale locks.', '45 min'],
           ['Completed work', 'Finished claims are kept with their commits, PRs and summary so others can see what just changed.', 'kept'],
         ].map(([label, desc, value]) => `<div class="kv-row">
           <div class="kv-main"><div class="kv-label">${label}</div><div class="kv-desc">${desc}</div></div>
@@ -856,7 +899,7 @@ function renderUsers() {
     acts.push(u.role === 'admin' ? uBtn('makeuser', u.id, 'Make user') : uBtn('makeadmin', u.id, 'Make admin'));
     acts.push(uBtn('delete', u.id, 'Delete', true));
     return `<div class="table-row users-row">
-      <span class="cell-agent">${esc(u.username)}${you ? ' <span class="you-tag">you</span>' : ''}</span>
+      <span class="cell-agent">${esc(u.displayName || u.username)}${you ? ' <span class="you-tag">you</span>' : ''}</span>
       <span>${esc(u.role)}</span>
       <span><span class="ustatus ustatus-${esc(u.status)}">${esc(u.status)}</span></span>
       <span>${ago(u.createdAt)} ago</span>
@@ -958,10 +1001,10 @@ function render() {
   renderSidebar();
   renderHeader();
   $('userChip').innerHTML =
-    `<span class="user-name">${esc(state.me.username)}</span>` +
+    `<span class="user-name">${esc(state.me.displayName || state.me.username)}</span>` +
     `<span class="user-role">${esc(state.me.role)}</span>` +
     '<button class="logout-btn" type="button" data-logout>Logout</button>';
-  $('footerName').textContent = state.me.username;
+  $('footerName').textContent = state.me.displayName || state.me.username;
   $('footerRole').textContent = state.me.role === 'admin' ? 'Administrator' : 'Member';
   $('footerVersion').textContent = state.version ? `v${state.version}` : '';
   const main = $('main');

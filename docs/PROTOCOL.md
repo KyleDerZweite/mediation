@@ -14,7 +14,7 @@ binding at initialization; models never supply a project identifier to
 operational tools. All bodies are JSON; errors come back as `{ "error": "..." }` with a
 proper HTTP status (validation failures are 400 with Zod issue details).
 
-`GET /api/health` → `{ "ok": true, "now": ..., "version": "0.3.0-alpha", "authMode": "github-app" }` — use
+`GET /api/health` → `{ "ok": true, "now": ..., "version": "0.4.0-alpha", "authMode": "github-app" }` — use
 it to verify the server is up.
 `GET /api/projects` → the projects **you** may see, with live counts:
 
@@ -140,8 +140,8 @@ PATCH /api/projects/{project}/claims/{claimId}                { "status": "in-pr
 Expiry semantics:
 
 - Sessions expire after **~2 minutes** without a heartbeat (`SESSION_TTL_MS`,
-  default 120 000 ms); their claims are released.
-- Claims with no updates expire after **30 minutes** of inactivity.
+  default 300 000 ms); their claims are released.
+- Claims with no updates expire after **45 minutes** of inactivity.
 - Completed claims are kept (`status: "done"`).
 
 Report findings as you discover them (`finding` on PATCH appends to the

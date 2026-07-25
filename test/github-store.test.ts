@@ -52,3 +52,32 @@ test('GitHub identities, immutable repositories, and authorization revocation pe
   assert.equal(store.memberRole(fresh.id, user.id), null);
   store.close();
 });
+
+test('humans see the GitHub login and repository name, not internal handles', async () => {
+  const store = new Store({ dbPath: ':memory:' });
+  const created = store.findOrCreateGithubUser({
+    githubUserId: '4242', login: 'KyleDerZweite', authorizationStatus: 'authorized',
+  });
+  // The stored handle stays normalized; only the display name is human-facing.
+  assert.equal(created.username, 'gh-kylederzweite');
+  assert.equal(created.displayName, 'KyleDerZweite');
+  assert.equal(store.getUserByGithubId('4242')?.displayName, 'KyleDerZweite');
+
+  const project = store.resolveGithubProject({
+    externalRepositoryId: '5150', fullName: 'KyleDerZweite/mediation', installationId: '77',
+    visibility: 'private', authorizationSource: 'github-app', createdBy: created.id,
+  });
+  store.patchUser(created.id, { status: 'active' });
+  store.grantGithubProjectAccess(project.id, created.id, 'ADMIN', Date.now() + 60_000);
+
+  const summary = store.listProjects(created.id, false).find((p) => p.id === project.id);
+  assert.equal(summary?.id, project.id); // routing still uses the opaque id
+  assert.equal(summary?.name, 'KyleDerZweite/mediation');
+  assert.equal(store.listMembers(project.id)[0].displayName, 'KyleDerZweite');
+
+  // An owner adds people by the name they see, in any case.
+  const mate = store.findOrCreateGithubUser({ githubUserId: '99', login: 'OctoCat', authorizationStatus: 'authorized' });
+  store.patchUser(mate.id, { status: 'active' });
+  assert.equal(store.addMember(project.id, 'octocat', 'member').displayName, 'OctoCat');
+  store.close();
+});

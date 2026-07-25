@@ -363,6 +363,8 @@ input, button { font-family: inherit; }
   padding: 13px 15px; font-family: 'IBM Plex Mono', monospace; font-size: 12px;
   line-height: 1.6; overflow: auto; color: #9fb4d4;
 }
+/* room for the absolutely positioned Copy button */
+.snippet { padding-right: 68px; }
 .copy-btn {
   position: absolute; top: 8px; right: 8px;
   border: 1px solid #1f2942; background: #141b2d; color: #9aa3b5;

@@ -244,9 +244,10 @@ curl -H "Authorization: Bearer <token>" http://localhost:4100/api/projects
 
 `GET /api/auth/me` with the Bearer token validates the credential and reports
 `ownerUsername` (`401` if invalid, revoked, or the owner is gone/disabled).
-Credentials are scoped: `GET /api/auth/credentials` returns **your own**
-credentials (an admin sees all), each with `ownerUsername`. Revoking is allowed
-for the owner or an admin, else `403`:
+Credentials are personal: `GET /api/auth/credentials` returns **only your own**
+credentials — an admin included — each with `ownerUsername` and the
+human-facing `ownerDisplayName` (the GitHub login). Revoking is allowed for the
+owner or an admin, else `403`:
 
 ```
 DELETE /api/auth/credentials/:id   (Cookie)  → 200 { "ok": true } | 403 | 404

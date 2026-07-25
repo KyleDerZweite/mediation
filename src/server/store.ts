@@ -16,8 +16,8 @@ import type {
   Heartbeat, RepoReport, SessionCreate, UserPatch, UserRegister,
 } from '../core/schemas.ts';
 
-export const DEFAULT_SESSION_TTL_MS = 120_000;
-export const DEFAULT_CLAIM_IDLE_TTL_MS = 30 * 60_000;
+export const DEFAULT_SESSION_TTL_MS = 300_000;
+export const DEFAULT_CLAIM_IDLE_TTL_MS = 45 * 60_000;
 
 const EVENTS_CAP = 200;
 
@@ -114,15 +114,21 @@ function normalizeUsername(raw: string): string {
 export interface PublicUser {
   id: string;
   username: string;
+  displayName: string; // what humans are shown: the GitHub login, original case
   role: 'user' | 'admin';
   status: 'pending' | 'active' | 'disabled';
   createdAt: number;
 }
 
+// `username` stays the normalized, case-insensitive handle the API matches on
+// (`gh-octocat`); humans only ever see the GitHub login they know (`octocat`).
+const displayName = (r: Row): string => (r.github_login as string) || (r.username as string);
+
 function publicUser(r: Row): PublicUser {
   return {
     id: r.id as string,
     username: r.username as string,
+    displayName: displayName(r),
     role: r.role as PublicUser['role'],
     status: r.status as PublicUser['status'],
     createdAt: Number(r.created_at),
@@ -140,6 +146,7 @@ export interface CredentialInfo {
   developer: string | null;
   userId: string; // owning user — a credential without an ACTIVE owner never resolves
   ownerUsername: string;
+  ownerDisplayName: string; // GitHub login of the owner, original case
   createdAt: number;
   lastUsedAt: number;
   authorizationSource: 'manual' | 'github-app';
@@ -151,6 +158,7 @@ const capabilityHash = (value: string) => createHash('sha256').update(value).dig
 export interface ProjectMember {
   userId: string;
   username: string;
+  displayName: string;
   role: MemberRole;
   createdAt: number;
   authorizationSource?: 'manual' | 'github-app';
@@ -860,7 +868,7 @@ export class Store {
       VALUES (?, ?, 'github-only', ?, ?, ?, ?, 'github', ?, ?, 'authorized')`)
       .run(id, username, bootstrap ? 'admin' : 'user', bootstrap ? 'active' : 'pending',
         t, t, identity.githubUserId, identity.login);
-    return { id, username, role: bootstrap ? 'admin' : 'user',
+    return { id, username, displayName: identity.login, role: bootstrap ? 'admin' : 'user',
       status: bootstrap ? 'active' : 'pending', createdAt: t };
   }
 
@@ -919,12 +927,13 @@ export class Store {
 
   grantGithubProjectAccess(projectId: string, userId: string, permission: string, expiresAt: number): ProjectMember {
     const role: MemberRole = permission.toUpperCase() === 'ADMIN' ? 'owner' : 'member';
-    const user = this.db.prepare('SELECT username FROM users WHERE id = ? AND status = ?').get(userId, 'active') as Row | undefined;
+    const user = this.db.prepare('SELECT username, github_login FROM users WHERE id = ? AND status = ?').get(userId, 'active') as Row | undefined;
     if (!user) notFound('user not found');
     const existing = this.db.prepare(`SELECT authorization_source, role, created_at FROM project_members
       WHERE project_id = ? AND user_id = ?`).get(projectId, userId) as Row | undefined;
     if (existing && existing.authorization_source !== 'github-app') {
-      return { userId, username: user.username as string, role: existing.role as MemberRole,
+      return { userId, username: user.username as string, displayName: displayName(user),
+        role: existing.role as MemberRole,
         createdAt: Number(existing.created_at), authorizationSource: 'manual' };
     }
     const t = Date.now();
@@ -933,7 +942,8 @@ export class Store {
       ON CONFLICT(project_id, user_id) DO UPDATE SET role = excluded.role, authorization_source = 'github-app',
       repository_permission = excluded.repository_permission, authorization_expires_at = excluded.authorization_expires_at`)
       .run(projectId, userId, role, t, permission, expiresAt);
-    return { userId, username: user.username as string, role, createdAt: t, authorizationSource: 'github-app',
+    return { userId, username: user.username as string, displayName: displayName(user),
+      role, createdAt: t, authorizationSource: 'github-app',
       repositoryPermission: permission, authorizationExpiresAt: expiresAt };
   }
 
@@ -949,11 +959,12 @@ export class Store {
 
   listMembers(projectId: string): ProjectMember[] {
     return (this.db.prepare(`SELECT m.user_id, m.role, m.created_at, m.authorization_source,
-      m.repository_permission, m.authorization_expires_at, u.username
+      m.repository_permission, m.authorization_expires_at, u.username, u.github_login
       FROM project_members m JOIN users u ON u.id = m.user_id
       WHERE m.project_id = ? ORDER BY m.role, u.username`).all(projectId) as Row[]).map((r) => ({
         userId: r.user_id as string,
         username: r.username as string,
+        displayName: displayName(r),
         role: r.role as MemberRole,
         createdAt: Number(r.created_at),
         authorizationSource: r.authorization_source === 'github-app' ? 'github-app' : 'manual',
@@ -964,14 +975,18 @@ export class Store {
 
   addMember(projectId: string, rawUsername: string, role: MemberRole): ProjectMember {
     let username = '';
-    try { username = normalizeUsername(rawUsername); } catch { notFound('user not found'); }
-    const user = this.db.prepare("SELECT id, username FROM users WHERE username = ? AND status = 'active'")
-      .get(username) as Row | undefined;
+    try { username = normalizeUsername(rawUsername); } catch { /* may still be a GitHub login */ }
+    // Humans type the name they see, which is the GitHub login, not the
+    // normalized handle the account was created with.
+    const user = this.db.prepare(`SELECT id, username, github_login FROM users
+      WHERE (username = ? OR LOWER(github_login) = LOWER(?)) AND status = 'active'`)
+      .get(username, rawUsername.trim()) as Row | undefined;
     if (!user) notFound('user not found'); // only active users can be added
     if (this.memberRole(projectId, user.id as string)) fail('user is already a member', 409);
     const t = Date.now();
     this.addMemberRow(projectId, user.id as string, role, t);
-    return { userId: user.id as string, username: user.username as string, role, createdAt: t };
+    return { userId: user.id as string, username: user.username as string,
+      displayName: displayName(user), role, createdAt: t };
   }
 
   // The last remaining owner may not be demoted or removed — same shape as the
@@ -991,9 +1006,9 @@ export class Store {
     }
     this.db.prepare('UPDATE project_members SET role = ? WHERE project_id = ? AND user_id = ?')
       .run(role, projectId, userId);
-    const username = (this.db.prepare('SELECT username FROM users WHERE id = ?').get(userId) as Row | undefined)
-      ?.username as string ?? userId;
-    return { userId, username, role, createdAt: Date.now() };
+    const row = this.db.prepare('SELECT username, github_login FROM users WHERE id = ?').get(userId) as Row | undefined;
+    const username = (row?.username as string) ?? userId;
+    return { userId, username, displayName: row ? displayName(row) : username, role, createdAt: Date.now() };
   }
 
   removeMember(projectId: string, userId: string): { ok: true } {
@@ -1015,7 +1030,7 @@ export class Store {
   // Resolves ONLY when the credential is bound to an ACTIVE user: orphaned or
   // disabled-owner credentials never authenticate (→ 401 "sign in again").
   getCredentialByToken(token: string): CredentialInfo | null {
-    const row = this.db.prepare(`SELECT c.*, u.username AS owner_username FROM credentials c
+    const row = this.db.prepare(`SELECT c.*, u.username AS owner_username, u.github_login FROM credentials c
       JOIN users u ON u.id = c.user_id AND u.status = 'active' WHERE c.token = ?`)
       .get(token) as Row | undefined;
     if (!row) return null;
@@ -1028,6 +1043,7 @@ export class Store {
       developer: (row.developer as string) ?? null,
       userId: row.user_id as string,
       ownerUsername: row.owner_username as string,
+      ownerDisplayName: (row.github_login as string) || (row.owner_username as string),
       createdAt: Number(row.created_at),
       lastUsedAt: t,
       authorizationSource: row.authorization_source === 'github-app' ? 'github-app' : 'manual',
@@ -1045,7 +1061,7 @@ export class Store {
     // token values are never returned — a credential is only ever shown by id
     const sql = `SELECT c.id, c.agent, c.machine, c.developer, c.user_id, c.created_at, c.last_used_at,
         c.authorization_source, c.github_user_id,
-        u.username AS owner_username
+        u.username AS owner_username, u.github_login
       FROM credentials c LEFT JOIN users u ON u.id = c.user_id
       ${userId ? 'WHERE c.user_id = ?' : ''} ORDER BY c.created_at`;
     const stmt = this.db.prepare(sql);
@@ -1056,6 +1072,7 @@ export class Store {
       developer: (r.developer as string) ?? null,
       userId: (r.user_id as string) ?? '',
       ownerUsername: (r.owner_username as string) ?? '',
+      ownerDisplayName: (r.github_login as string) || (r.owner_username as string) || '',
       createdAt: Number(r.created_at),
       lastUsedAt: Number(r.last_used_at),
       authorizationSource: r.authorization_source === 'github-app' ? 'github-app' : 'manual',
@@ -1098,7 +1115,7 @@ export class Store {
         SELECT p.id, ?, 'owner', ? FROM projects p WHERE NOT EXISTS (
           SELECT 1 FROM project_members m WHERE m.project_id = p.id AND m.role = 'owner')`).run(id, t);
     }
-    return { user: { id, username, role, status, createdAt: t }, bootstrap };
+    return { user: { id, username, displayName: username, role, status, createdAt: t }, bootstrap };
   }
 
   async loginUser(rawUsername: string, password: string): Promise<LoginResult> {
@@ -1326,6 +1343,7 @@ export class Store {
       ? (this.db.prepare('SELECT id FROM projects ORDER BY id').all() as Row[]).map((r) => r.id as string)
       : this.memberProjectIds(userId);
     return ids.map((id) => {
+      const project = this.db.prepare('SELECT full_name FROM projects WHERE id = ?').get(id) as Row | undefined;
       const sessions = (this.db.prepare('SELECT agent FROM sessions WHERE projectId = ?').all(id) as Row[]);
       const claims = this.activeClaims(id);
       const openBugs = this.db.prepare("SELECT COUNT(*) AS n FROM bugs WHERE projectId = ? AND status != 'fixed'")
@@ -1333,6 +1351,8 @@ export class Store {
       const lastEvent = this.db.prepare('SELECT MAX(at) AS at FROM events WHERE projectId = ?').get(id) as Row;
       return {
         id,
+        // GitHub projects carry an opaque uuid id; humans know them by repository.
+        name: (project?.full_name as string) || id,
         role: this.memberRole(id, userId),
         sessions: sessions.length,
         claims: claims.length,

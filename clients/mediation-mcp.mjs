@@ -257,11 +257,11 @@ async function ensureSession() {
   if (session) await endSession();
   if (!state?.repository && !state?.project) throw new Error('not initialized — call mediation_init first');
   if (!readCredentials()?.token) throw new Error('not signed in — call mediation_login first');
-  const created = await (await serverAuthMode()) === 'github-app'
+  const created = await ((await serverAuthMode()) === 'github-app'
     ? githubSession(state)
     : api('POST', `/api/projects/${encodeURIComponent(state.project)}/sessions`, {
       agent: process.env.MEDIATION_HARNESS || 'claude-code', machine: os.hostname(),
-    });
+    }));
   const current = { id: created.id, capability: created.capability, project: created.project || state.project, heartbeat: null };
   session = current;
   current.heartbeat = setInterval(() => {
@@ -271,7 +271,7 @@ async function ensureSession() {
         if (session === current) session = null;
         clearInterval(current.heartbeat);
       });
-  }, 45_000);
+  }, 120_000);
   current.heartbeat.unref?.();
   return current.id;
   })();
@@ -589,7 +589,7 @@ async function handle(req) {
       return reply({
         protocolVersion: params?.protocolVersion || '2024-11-05',
         capabilities: { tools: {} },
-        serverInfo: { name: 'mediation', version: '0.3.0-alpha' },
+        serverInfo: { name: 'mediation', version: '0.4.0-alpha' },
       });
     case 'notifications/initialized':
     case 'notifications/cancelled':

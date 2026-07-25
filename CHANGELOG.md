@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.0-alpha — names humans recognise
+
+- **Fixed: no coordination tool worked in a fresh install.** The MCP client
+  never awaited session creation, so `mediation_check`, `claim`, `update`,
+  `complete`, `bug` and `state` all failed with "session binding is not
+  established" in both auth modes. A new suite (`test/mcp-client.test.ts`)
+  drives the client over stdio against a stub server so this cannot recur.
+- Projects are shown by their GitHub repository (`owner/name`) instead of the
+  opaque uuid; `ProjectSummary` gained `name`. Routing still uses the id.
+- People are shown by their GitHub login in original case
+  (`KyleDerZweite`, not `gh-kylederzweite`). `PublicUser`/`ProjectMember`
+  gained `displayName`, credentials gained `ownerDisplayName`, and session
+  attribution records the display name. Owners can add a member by GitHub
+  login (case-insensitive) as well as by handle.
+- Device credentials are personal: `GET /api/auth/credentials` returns only
+  the caller's own, admins included. Admins can still revoke any by id.
+- The dashboard's install instructions moved from Settings to **Agents**, and
+  now include a paste-ready prompt that sets a local agent up end to end.
+  The instance Agents page lists only your own live sessions; a project's
+  Agents tab still shows every session in that project.
+- Sessions survive quiet agents: heartbeat TTL 120 s → **5 min** (client
+  heartbeat every 2 min) and idle claim expiry 30 min → **45 min**, because
+  real agent turns regularly run longer than half an hour.
+
 ## Unreleased Alpha — global device identity
 
 - Per-agent pairing and relay codes are removed. After an administrator

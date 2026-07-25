@@ -131,7 +131,7 @@ Environment variables for the server:
 | `GITHUB_WEBHOOK_SECRET` | — | webhook-secret string |
 | `GITHUB_BOOTSTRAP_ADMIN` | — | GitHub login allowed to become the first GitHub-backed admin |
 
-Idle claims expire after 30 minutes; completed claims are kept.
+Idle claims expire after 45 minutes; completed claims are kept.
 
 ## Tests
 
