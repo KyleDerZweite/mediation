@@ -23,6 +23,8 @@ src/core/     Domain. Pure: types, wire schemas (zod), overlap rules.
 src/server/   Hono app + SQLite store + static serving. Imports core.
 src/cli/      mediation-agent CLI (global fetch). Imports core only for types.
 web/          Dashboard: static, vanilla JS, no build step. Talks to /api only.
+              Component reference at `#/design` (unlinked; public on a manual
+              instance, session-gated in github-app mode).
 test/         node:test suites.
 clients/      Things installed on USER machines: MCP client, installer, skill.
 docs/         PRODUCT.md (product goal) + PROTOCOL.md (wire protocol, served at /AGENT.md).

@@ -1261,8 +1261,9 @@ export class Store {
   }
 
   listUsers(): PublicUser[] {
-    return (this.db.prepare('SELECT id, username, role, status, created_at FROM users ORDER BY created_at')
-      .all() as Row[]).map(publicUser);
+    // Whole row on purpose: publicUser() needs github_login and github_user_id
+    // for the display name and avatar. It never returns password_hash.
+    return (this.db.prepare('SELECT * FROM users ORDER BY created_at').all() as Row[]).map(publicUser);
   }
 
   // The last user that is role=admin AND status=active may not be demoted,

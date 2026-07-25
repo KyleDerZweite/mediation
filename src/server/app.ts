@@ -252,7 +252,16 @@ export function buildApp(store: Store, options: AppOptions = {}): Hono {
 
   // ---- api ----
 
-  app.get('/api/health', (c) => c.json({ ok: true, now: Date.now(), version: pkg.version, authMode }));
+  // `designSystemPublic`: the /#/design reference page is open on a dev
+  // instance (AUTH_MODE=manual, per the dev compose file) and behind the user
+  // session on a production one. Set DESIGN_SYSTEM_PUBLIC=0/1 to override.
+  const designSystemPublic = process.env.DESIGN_SYSTEM_PUBLIC === undefined
+    ? authMode === 'manual'
+    : process.env.DESIGN_SYSTEM_PUBLIC === '1';
+
+  app.get('/api/health', (c) => c.json({
+    ok: true, now: Date.now(), version: pkg.version, authMode, designSystemPublic,
+  }));
 
   // ---- GitHub App identity + machine activation ----
 

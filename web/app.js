@@ -164,6 +164,7 @@ const state = {
   users: [],               // admin Users view: PublicUser[]
   authView: 'login',       // login | register (manual-mode logged-out view)
   serverAuthMode: 'manual',
+  designSystemPublic: false, // dev instances serve #/design without a session
   authMsg: '',             // message shown on the login/register card
   copied: null,            // key of the element that just copied, for feedback
   armed: null,             // key of a destructive button armed for its second click
@@ -193,6 +194,8 @@ function parseRoute() {
   if (parts[0] === 'agents') return { view: 'agents', pid: null, tab: null };
   if (parts[0] === 'settings') return { view: 'settings', pid: null, tab: null };
   if (parts[0] === 'users') return { view: 'users', pid: null, tab: null };
+  // Unlinked on purpose: the design reference is reachable by URL only.
+  if (parts[0] === 'design') return { view: 'design', pid: null, tab: null };
   return { view: 'overview', pid: null, tab: null };
 }
 
@@ -350,17 +353,23 @@ function renderOverview() {
   const conflicts = sum((p) => p.conflicts);
   const activeProjects = ps.filter((p) => p.sessions > 0).length;
 
+  // One hue per metric, so the row reads at a glance instead of as four grey
+  // boxes. `tone` colours the hint only when the number means something.
   const stats = [
-    { label: 'Live sessions', value: live, icon: 'bot', hint: `across ${plural(activeProjects, 'project')}`, cls: '' },
-    { label: 'Active claims', value: claims, icon: 'repo', hint: claims ? 'work in flight right now' : 'nothing claimed yet', cls: '' },
-    { label: 'Open bugs', value: bugs, icon: 'bug', hint: bugs ? 'discovered mid-flight' : 'none reported', cls: '' },
-    { label: 'Possible conflicts', value: conflicts, icon: 'shield', hint: conflicts ? 'overlapping active claims' : 'no overlap detected', cls: conflicts ? 'warn' : 'accent' },
+    { label: 'Live sessions', value: live, icon: 'bot', tint: 'green',
+      hint: `across ${plural(activeProjects, 'project')}`, tone: live ? 'ok' : '' },
+    { label: 'Active claims', value: claims, icon: 'repo', tint: 'blue',
+      hint: claims ? 'work in flight right now' : 'nothing claimed yet', tone: claims ? 'info' : '' },
+    { label: 'Open bugs', value: bugs, icon: 'bug', tint: 'amber',
+      hint: bugs ? 'discovered mid-flight' : 'none reported', tone: bugs ? 'warn' : '' },
+    { label: 'Possible conflicts', value: conflicts, icon: 'shield', tint: 'violet',
+      hint: conflicts ? 'overlapping active claims' : 'no overlap detected', tone: conflicts ? 'danger' : 'ok' },
   ];
 
-  const statCards = stats.map((s) => `<div class="stat-card">
-    <div class="stat-head">${icon(s.icon, '#667085', 15)}<span>${s.label}</span></div>
+  const statCards = stats.map((s) => `<div class="stat-card tint-${s.tint}">
+    <div class="stat-head"><span class="stat-icon">${icon(s.icon, 'currentColor', 15)}</span><span>${s.label}</span></div>
     <div class="stat-value">${s.value}</div>
-    <div class="stat-hint ${s.cls}">${esc(s.hint)}</div>
+    <div class="stat-hint ${s.tone}">${esc(s.hint)}</div>
   </div>`).join('');
 
   const cards = ps.map((p) => {
@@ -1033,6 +1042,258 @@ function renderUsers() {
   </div>`;
 }
 
+
+/* ---------------- design system (unlinked reference at #/design) ---------------- */
+
+const DS_STATUSES = ['investigating', 'in-progress', 'testing', 'blocked', 'done'];
+const DS_SEVERITIES = ['critical', 'high', 'medium', 'low', 'unknown'];
+
+const dsSection = (title, note, body) => `<section class="ds-section">
+  <div class="ds-section-head"><h2>${title}</h2>${note ? `<p>${note}</p>` : ''}</div>
+  ${body}
+</section>`;
+
+// One specimen: the rendered thing over the class that produces it.
+const dsItem = (label, html) => `<div class="ds-item">
+  <div class="ds-item-demo">${html}</div>
+  <code class="ds-item-label">${esc(label)}</code>
+</div>`;
+
+const dsRow = (items) => `<div class="ds-row">${items.join('')}</div>`;
+
+function renderDesignSystem() {
+  const now = Date.now();
+  const swatch = (name, value) => `<div class="ds-swatch">
+    <span class="ds-swatch-chip" style="background:${value}"></span>
+    <span class="ds-swatch-name">${esc(name)}</span>
+    <code class="ds-swatch-value">${esc(value)}</code>
+  </div>`;
+
+  const colours = dsSection('Colour', 'Every hue the dashboard uses, and nothing else.', `
+    <div class="ds-sub">Surfaces &amp; ink</div>
+    <div class="ds-swatches">${[
+      ['page', '#f6f7f9'], ['surface', '#ffffff'], ['sidebar', '#0f1524'], ['dark panel', '#0f1524'],
+      ['snippet', '#0a0e19'], ['border', '#e4e7ec'], ['divider', '#f2f4f7'],
+      ['ink', '#101828'], ['ink muted', '#475467'], ['ink subtle', '#667085'], ['ink faint', '#98a2b3'],
+    ].map(([n, v]) => swatch(n, v)).join('')}</div>
+    <div class="ds-sub">Accents</div>
+    <div class="ds-swatches">${[
+      ['blue / primary', '#1f6feb'], ['green / live', '#10b981'], ['green ink', '#027a48'],
+      ['amber / warn', '#f59e0b'], ['amber ink', '#b45309'], ['red / danger', '#e11d48'],
+      ['red ink', '#b42318'], ['violet / admin', '#7c3aed'], ['cyan / info', '#0891b2'],
+    ].map(([n, v]) => swatch(n, v)).join('')}</div>
+    <div class="ds-sub">Claim status</div>
+    <div class="ds-swatches">${DS_STATUSES.map((k) => swatch(k, STATUS[k].color)).join('')}</div>
+    <div class="ds-sub">Bug severity</div>
+    <div class="ds-swatches">${DS_SEVERITIES.map((k) => swatch(k, SEVERITY[k])).join('')}</div>`);
+
+  const type = dsSection('Type', 'IBM Plex Sans for text, IBM Plex Mono for identifiers, Space Grotesk for numerals.', `
+    <div class="ds-stack">
+      <h1 class="page-title">Page title · .page-title</h1>
+      <div class="stat-value">1234 · .stat-value</div>
+      <h3 style="margin:0">Section heading · .settings-section h3</h3>
+      <div style="font-size:13px">Body copy at 13px, the table and card default.</div>
+      <div class="view-note" style="margin:0">Muted note · .view-note</div>
+      <div class="dp-key">Overline label · .dp-key</div>
+      <code class="mono" style="font-size:12.5px">monospace · .mono</code>
+    </div>`);
+
+  const buttons = dsSection('Buttons', 'Every variant and state.', `
+    ${dsRow([
+      dsItem('.user-act-btn.primary', '<button class="user-act-btn primary" type="button">Approve</button>'),
+      dsItem('.user-act-btn', '<button class="user-act-btn" type="button">Neutral</button>'),
+      dsItem('.user-act-btn.danger', '<button class="user-act-btn danger" type="button">Remove</button>'),
+      dsItem('.user-act-btn.armed', '<button class="user-act-btn armed" type="button">Confirm remove</button>'),
+      dsItem('.user-act-btn[disabled]', '<button class="user-act-btn" type="button" disabled>Disabled</button>'),
+    ])}
+    ${dsRow([
+      dsItem('.icon-btn (pencil)', `<button class="icon-btn" type="button">${icon('pencil', '#667085', 14)}</button>`),
+      dsItem('.icon-btn (dots)', `<button class="icon-btn" type="button">${icon('dots', '#667085', 15)}</button>`),
+      dsItem('.copy-btn', '<div class="snippet-wrap" style="width:190px"><pre class="snippet">copy me</pre><button class="copy-btn" type="button">Copy</button></div>'),
+      dsItem('.revoke-btn', '<button class="revoke-btn" type="button">Revoke</button>'),
+      dsItem('.revoke-btn.armed', '<button class="revoke-btn armed" type="button">Confirm revoke</button>'),
+    ])}
+    ${dsRow([
+      dsItem('.logout-btn', '<button class="logout-btn" type="button">Logout</button>'),
+      dsItem('.auth-btn', '<div style="width:200px"><button class="auth-btn" type="button">Sign in with GitHub</button></div>'),
+    ])}`);
+
+  const menus = dsSection('Menus &amp; popovers', 'Anchored to a row; they escape their card and close on outside click or Escape.', `
+    ${dsRow([
+      dsItem('.menu-pop (role picker)', `<div class="ds-menu-stage"><div class="menu-pop" style="position:static">
+        <div class="menu-head">Role</div>
+        <button class="menu-item selected" type="button">${icon('person', 'currentColor', 14)}<span>user</span>${icon('check', '#1f6feb', 14)}</button>
+        <button class="menu-item" type="button">${icon('shield', 'currentColor', 14)}<span>admin</span></button>
+      </div></div>`),
+      dsItem('.menu-pop (overflow)', `<div class="ds-menu-stage"><div class="menu-pop" style="position:static">
+        <button class="menu-item" type="button">Disable account</button>
+        <button class="menu-item danger" type="button">Delete account</button>
+      </div></div>`),
+      dsItem('.menu-item.danger.armed', `<div class="ds-menu-stage"><div class="menu-pop" style="position:static">
+        <button class="menu-item danger armed" type="button">Confirm delete</button>
+      </div></div>`),
+    ])}`);
+
+  const inputs = dsSection('Inputs &amp; filters', '', `
+    ${dsRow([
+      dsItem('.create-input', '<input class="create-input" placeholder="username">'),
+      dsItem('.create-input (select)', '<select class="create-input"><option>member</option><option>owner</option></select>'),
+      dsItem('.search-input', `<div class="search-wrap"><span class="search-icon">${icon('search', '#98a2b3', 15)}</span><input class="search-input" placeholder="Search…"></div>`),
+      dsItem('.filter-input', `<div class="filter-search"><span class="filter-search-icon">${icon('search', '#98a2b3', 14)}</span><input class="filter-input" placeholder="Filter by name…"></div>`),
+    ])}
+    ${dsRow([
+      dsItem('.filter-group / .filter-pill', `<div class="filter-group">
+        <button class="filter-pill active" type="button">All roles<span class="filter-count">7</span></button>
+        <button class="filter-pill" type="button">admin<span class="filter-count">2</span></button>
+        <button class="filter-pill" type="button">user<span class="filter-count">5</span></button>
+      </div>`),
+      dsItem('.tab-btn', `<div class="tabs"><a class="tab-btn active">Now</a><a class="tab-btn">Agents</a><a class="tab-btn">Activity</a></div>`),
+    ])}`);
+
+  const chips = dsSection('Chips, badges &amp; tags', '', `
+    ${dsRow(DS_STATUSES.map((k) => dsItem(`.status-badge (${k})`,
+      `<span class="status-badge" style="color:${STATUS[k].color};background:${STATUS[k].tint}">${STATUS[k].label}</span>`)))}
+    ${dsRow([
+      dsItem('.role-chip.role-admin', roleChip('admin')),
+      dsItem('.role-chip.role-user', roleChip('user')),
+      dsItem('.ustatus-active', '<span class="ustatus ustatus-active">active</span>'),
+      dsItem('.ustatus-pending', '<span class="ustatus ustatus-pending">pending</span>'),
+      dsItem('.ustatus-disabled', '<span class="ustatus ustatus-disabled">disabled</span>'),
+      dsItem('.you-tag', '<span class="you-tag">you</span>'),
+    ])}
+    ${dsRow([
+      dsItem('.agent-chip', '<span class="agent-chip">claude-code</span>'),
+      dsItem('.repo-chip', `<span class="repo-chip">${icon('branch', '#667085', 12)}main</span>`),
+      dsItem('.file-chip', '<span class="file-chip mono">src/server/app.ts</span>'),
+      dsItem('.comp-chip', '<span class="comp-chip">auth</span>'),
+      dsItem('.ref-chip', `<span class="ref-chip">${icon('commit', '#667085', 12)}a1b2c3d</span>`),
+      dsItem('.count-tag', '<span class="count-tag">12</span>'),
+      dsItem('.type-tag', '<span class="type-tag" style="color:#b42318;background:#fdeaec">bug</span>'),
+    ])}
+    ${dsRow([
+      dsItem('.dot.dot-ok.pulse', '<span class="dot dot-ok pulse"></span>'),
+      dsItem('.dot.dot-stale', '<span class="dot dot-stale"></span>'),
+      dsItem('.dot.dot-off', '<span class="dot dot-off"></span>'),
+      dsItem('.dot.dot-idle', '<span class="dot dot-idle"></span>'),
+    ])}`);
+
+  const avatars = dsSection('Avatars', 'GitHub picture when there is one, initials when there is not.', `
+    ${dsRow([
+      dsItem('avatar(name, url, 34)', avatar('KyleDerZweite', 'https://avatars.githubusercontent.com/u/1?v=4', 34)),
+      dsItem('avatar(name, null, 34)', avatar('KyleDerZweite', null, 34)),
+      dsItem('avatar(name, null, 28)', avatar('Octo Cat', null, 28)),
+      dsItem('.avatar + status colour', `<span class="avatar" style="background:${AVATAR_BG['#1f6feb']}">IP</span>`),
+    ])}`);
+
+  const iconGrid = dsSection('Icons', `${Object.keys(ICON_DEFS).length} inline SVGs, no icon font.`, `
+    <div class="ds-icons">${Object.keys(ICON_DEFS).map((name) => `<div class="ds-icon">
+      ${icon(name, '#344054', 20)}<code>${esc(name)}</code>
+    </div>`).join('')}</div>`);
+
+  const cards = dsSection('Cards &amp; panels', '', `
+    <div class="stat-grid">${[
+      ['Live sessions', 3, 'bot', 'green', 'across 2 projects', 'ok'],
+      ['Active claims', 2, 'repo', 'blue', 'work in flight right now', 'info'],
+      ['Open bugs', 1, 'bug', 'amber', 'discovered mid-flight', 'warn'],
+      ['Possible conflicts', 0, 'shield', 'violet', 'no overlap detected', 'ok'],
+    ].map(([label, value, ic, tint, hint, tone]) => `<div class="stat-card tint-${tint}">
+      <div class="stat-head"><span class="stat-icon">${icon(ic, 'currentColor', 15)}</span><span>${label}</span></div>
+      <div class="stat-value">${value}</div>
+      <div class="stat-hint ${tone}">${hint}</div>
+    </div>`).join('')}</div>
+    ${dsRow([
+      dsItem('.dark-panel', `<div class="dark-panel" style="width:340px">
+        <div class="dark-panel-head"><span class="dp-icon">${icon('plug', '#8fc0ff', 18)}</span>
+          <span class="dp-title">Dark panel</span>
+          <span class="dp-live"><span class="dot dot-ok pulse"></span>Live</span></div>
+        <div class="dp-grid"><div><div class="dp-key">Key</div><div class="dp-val">value</div></div>
+          <div><div class="dp-key">Key</div><div class="dp-val">value</div></div></div>
+        <div class="snippet-wrap"><pre class="snippet">$ one command</pre>
+          <button class="copy-btn" type="button">Copy</button></div>
+        <div class="dp-note">Small print with a <span class="mono">/mono</span> reference.</div>
+      </div>`),
+      dsItem('.claim-card', `<div class="claim-card" style="width:360px">
+        <div class="claim-top">
+          <span class="avatar" style="background:${AVATAR_BG['#1f6feb']}">CC</span>
+          <div class="claim-who"><div class="claim-who-row"><span class="claim-name">claude-code</span>
+            <span class="status-badge" style="color:${STATUS['in-progress'].color};background:${STATUS['in-progress'].tint}">In progress</span></div>
+            <div class="claim-intent">Fix session expiry</div></div>
+        </div>
+        <div class="chip-row"><span class="file-chip mono">src/server/app.ts</span><span class="comp-chip">auth</span></div>
+      </div>`),
+    ])}
+    ${dsRow([
+      dsItem('.kv-list / .kv-row', `<div class="kv-list" style="width:420px">
+        <div class="kv-row"><div class="kv-main"><div class="kv-label">Setting</div>
+          <div class="kv-desc">What it means, in one line.</div></div><span class="kv-value">45 min</span></div>
+        <div class="kv-row"><div class="kv-main"><div class="kv-label">Another</div>
+          <div class="kv-desc">Second row, no bottom border.</div></div><span class="kv-value">kept</span></div>
+      </div>`),
+      dsItem('emptyCard()', `<div style="width:340px">${emptyCard('Nothing here yet.')}</div>`),
+    ])}`);
+
+  const tables = dsSection('Tables', 'Grid-based; every column set is a modifier on .users-row.', `
+    <div class="table users-table" style="max-width:760px">
+      <div class="table-head users-row"><span>User</span><span>Role</span><span>Status</span><span>Created</span><span></span></div>
+      <div class="table-row users-row">
+        <span class="cell-user">${avatar('KyleDerZweite', null, 30)}<span class="cell-user-text">
+          <span class="cell-user-name">KyleDerZweite <span class="you-tag">you</span></span>
+          <span class="cell-user-handle mono">gh-kylederzweite</span></span></span>
+        <span class="cell-role">${roleChip('admin')}<button class="icon-btn" type="button">${icon('pencil', '#667085', 14)}</button></span>
+        <span><span class="ustatus ustatus-active">active</span></span>
+        <span>1h ago</span>
+        <span class="user-actions"><button class="icon-btn" type="button">${icon('dots', '#667085', 15)}</button></span>
+      </div>
+      <div class="table-row users-row">
+        <span class="cell-user">${avatar('Octo Cat', null, 30)}<span class="cell-user-text">
+          <span class="cell-user-name">OctoCat</span>
+          <span class="cell-user-handle mono">gh-octocat</span></span></span>
+        <span class="cell-role">${roleChip('user')}<button class="icon-btn" type="button">${icon('pencil', '#667085', 14)}</button></span>
+        <span><span class="ustatus ustatus-pending">pending</span></span>
+        <span>2d ago</span>
+        <span class="user-actions"><button class="user-act-btn primary" type="button">Approve</button>
+          <button class="icon-btn" type="button">${icon('dots', '#667085', 15)}</button></span>
+      </div>
+    </div>
+    <div style="height:14px"></div>
+    <div class="table" style="max-width:760px">
+      <div class="table-head"><span>Agent</span><span>Developer</span><span>Machine</span><span>Branch</span><span>Dirty</span><span>Last seen</span></div>
+      <div class="table-row">
+        <span class="cell-agent">${icon('bot', '#667085', 15)}<span>claude-code</span></span>
+        <span class="cell-dev">KyleDerZweite</span><span class="cell-machine">Kyle-FF</span>
+        <span class="cell-branch">main</span><span class="cell-dirty">3</span><span class="cell-seen">12s ago</span>
+      </div>
+    </div>`);
+
+  const feed = dsSection('Event feed', '', `
+    <div class="feed-panel" style="max-width:620px">
+      ${[['session', 'claude-code connected'], ['claim', 'claimed "Fix session expiry"'],
+        ['finding', 'found the unawaited promise'], ['bug', 'reported: menus clipped by the card'],
+        ['completed', 'completed "Move install panel"']].map(([kind, text], i) =>
+        eventRow({ kind, text, at: now - (i + 1) * 90_000 }, now, i === 0 ? 'KyleDerZweite/mediation' : null)).join('')}
+    </div>`);
+
+  const states = dsSection('Feedback states', '', `
+    ${dsRow([
+      dsItem('.conn-chip (ok)', `<div class="conn-chip" style="background:#0f1524;width:210px">
+        <span class="dot dot-ok pulse"></span><span class="conn-label">API connected</span>
+        <span class="conn-host mono">localhost</span></div>`),
+      dsItem('.dp-live.is-stale', '<span class="dp-live is-stale"><span class="dot dot-stale"></span>Stale</span>'),
+      dsItem('.empty-inline', '<div style="width:280px"><div class="empty-inline">No account matches these filters.</div></div>'),
+      dsItem('.auth-msg', '<div style="width:280px"><div class="auth-msg">An administrator must approve this account.</div></div>'),
+    ])}`);
+
+  return `<div class="view-design">
+    <header class="ds-hero">
+      <h1>Mediation design system</h1>
+      <p>Every component the dashboard ships, rendered from the same CSS the app uses, so this page
+        cannot drift from it. Unlinked by design: reachable at <code class="mono">#/design</code> only.
+        ${state.me ? '' : '<b>Open without sign-in because this is a development instance.</b>'}</p>
+    </header>
+    ${colours}${type}${buttons}${menus}${inputs}${chips}${avatars}${iconGrid}${cards}${tables}${feed}${states}
+  </div>`;
+}
+
 /* ---------------- auth (logged-out) ---------------- */
 
 function renderAuth() {
@@ -1065,6 +1326,11 @@ function renderAuth() {
 function showAuth() {
   document.querySelector('.sidebar').style.display = 'none';
   document.querySelector('.topbar').style.display = 'none';
+  // The design reference is the one page a dev instance shows signed out.
+  if (parseRoute().view === 'design' && state.designSystemPublic) {
+    $('main').innerHTML = renderDesignSystem();
+    return;
+  }
   $('main').innerHTML = renderAuth();
   const u = $('authUser');
   if (u) u.focus();
@@ -1121,7 +1387,7 @@ function render() {
   $('footerAvatar').innerHTML = `${esc(initials(who))}${state.me.avatarUrl
     ? `<img class="avatar-img" src="${esc(state.me.avatarUrl)}" alt="" onerror="this.remove()">` : ''}`;
   $('footerName').textContent = who;
-  $('footerRole').textContent = `${state.me.role === 'admin' ? 'Administrator' : 'Member'}${state.version ? ` · v${state.version}` : ''}`;
+  $('footerRole').textContent = state.me.role === 'admin' ? 'Administrator' : 'Member';
   const main = $('main');
   const r = state.route;
   const html =
@@ -1130,6 +1396,7 @@ function render() {
     : r.view === 'agents' ? renderInstanceAgents()
     : r.view === 'settings' ? renderSettings()
     : r.view === 'users' ? renderUsers()
+    : r.view === 'design' ? renderDesignSystem()
     : renderOverview();
 
   // Fresh DOM on navigation (entry animation plays once); in-place patch on
@@ -1324,6 +1591,7 @@ async function checkAuth() {
     if (health.ok) {
       const info = await health.json();
       state.serverAuthMode = info.authMode || 'manual';
+      state.designSystemPublic = !!info.designSystemPublic;
       state.version = info.version || '';
     }
     const auth = new URLSearchParams(location.search).get('auth');
@@ -1348,7 +1616,8 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && state.menu) { state.menu = null; render(); }
 });
 
-window.addEventListener('hashchange', onRoute);
+// Signed out, the hash still switches between the login card and #/design.
+window.addEventListener('hashchange', () => { if (state.me) onRoute(); else showAuth(); });
 setInterval(() => { if (state.me) refresh(); }, 3000);
 
 checkAuth().then(() => { if (state.me) enterDashboard(); else showAuth(); });

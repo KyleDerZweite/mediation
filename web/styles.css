@@ -114,12 +114,27 @@ input, button { font-family: inherit; }
 /* ---------- overview ---------- */
 .view-overview { padding: 26px 28px; max-width: 1180px; margin: 0 auto; animation: fu .25s ease; }
 .stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 24px; }
-.stat-card { background: #fff; border: 1px solid #e4e7ec; border-radius: 12px; padding: 15px 17px; }
+.stat-card {
+  position: relative; overflow: hidden;
+  background: #fff; border: 1px solid #e4e7ec; border-radius: 12px; padding: 15px 17px;
+}
+/* Accent rail down the left edge, in the tile's own hue. */
+.stat-card::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: currentColor; }
 .stat-head { display: flex; align-items: center; gap: 8px; color: #667085; font-size: 12px; margin-bottom: 10px; }
+/* Icon carries the hue itself, like the rest of the palette. */
+.stat-icon { display: flex; align-items: center; color: inherit; }
+.tint-green { color: #10b981; }
+.tint-blue { color: #1f6feb; }
+.tint-amber { color: #f59e0b; }
+.tint-violet { color: #7c3aed; }
+.stat-card .stat-head span:last-child { color: #475467; font-weight: 500; }
+.stat-card .stat-value { color: #101828; }
 .stat-value { font-size: 27px; font-weight: 600; font-family: 'Space Grotesk', sans-serif; letter-spacing: -.02em; line-height: 1; }
 .stat-hint { font-size: 11.5px; color: #98a2b3; margin-top: 6px; }
-.stat-hint.accent { color: #0891b2; }
+.stat-hint.ok { color: #027a48; }
+.stat-hint.info { color: #1f6feb; }
 .stat-hint.warn { color: #b45309; }
+.stat-hint.danger { color: #b42318; }
 
 .section-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 13px; }
 .section-head h2 { margin: 0; font-size: 14px; font-weight: 600; }
@@ -307,7 +322,11 @@ input, button { font-family: inherit; }
 
 /* ---------- agents table ---------- */
 .agents-wrap { max-width: 960px; }
-.table { background: #fff; border: 1px solid #e4e7ec; border-radius: 14px; overflow: hidden; }
+.table { background: #fff; border: 1px solid #e4e7ec; border-radius: 14px; }
+/* Not `overflow: hidden` — row menus have to escape the card. Rows clip
+   themselves instead, so the rounded corners still look right. */
+.table > :first-child { border-radius: 14px 14px 0 0; }
+.table > :last-child { border-radius: 0 0 14px 14px; }
 .table-head, .table-row {
   display: grid; grid-template-columns: 1.5fr 1.2fr 1fr 1.3fr .8fr .9fr;
   padding: 10px 16px; align-items: center;
@@ -316,7 +335,9 @@ input, button { font-family: inherit; }
   border-bottom: 1px solid #eef1f5; font-size: 11px; letter-spacing: .05em;
   text-transform: uppercase; color: #98a2b3;
 }
-.table-row { padding: 12px 16px; border-bottom: 1px solid #f2f4f7; font-size: 12.5px; }
+.table-row { position: relative; padding: 12px 16px; border-bottom: 1px solid #f2f4f7; font-size: 12.5px; }
+/* The row holding an open menu floats above its neighbours. */
+.table-row:has(.menu-pop) { z-index: 30; }
 .table-row:last-child { border-bottom: none; }
 .cell-agent { display: flex; align-items: center; gap: 8px; color: #101828; min-width: 0; }
 .cell-agent span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -458,7 +479,7 @@ input, button { font-family: inherit; }
 /* ---- row menus (role editor, overflow) ---- */
 .menu-wrap { position: relative; display: inline-flex; }
 .menu-pop {
-  position: absolute; top: 30px; left: 0; z-index: 20; min-width: 172px;
+  position: absolute; top: 30px; left: 0; z-index: 40; min-width: 172px;
   background: #fff; border: 1px solid #e4e7ec; border-radius: 10px; padding: 5px;
   box-shadow: 0 14px 34px -18px rgba(16,24,40,.5); display: flex; flex-direction: column; gap: 2px;
 }
@@ -512,3 +533,45 @@ input, button { font-family: inherit; }
 }
 .create-input:focus { outline: 2px solid #b9d3ff; outline-offset: 0; }
 .user-act-btn.armed { background: #e11d48; border-color: #e11d48; color: #fff; }
+
+/* ---------- design system reference (#/design, unlinked) ---------- */
+.view-design { padding: 30px 32px 80px; max-width: 1180px; margin: 0 auto; animation: fu .25s ease; }
+.ds-hero { margin-bottom: 34px; }
+.ds-hero h1 { margin: 0 0 8px; font-family: 'Space Grotesk', sans-serif; font-size: 26px; letter-spacing: -.02em; }
+.ds-hero p { margin: 0; max-width: 720px; font-size: 13px; line-height: 1.6; color: #667085; }
+.ds-hero code { font-size: 12px; color: #1f6feb; }
+
+.ds-section { margin-bottom: 38px; }
+.ds-section-head { border-bottom: 1px solid #e4e7ec; padding-bottom: 8px; margin-bottom: 16px; }
+.ds-section-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
+.ds-section-head p { margin: 4px 0 0; font-size: 12px; color: #98a2b3; }
+.ds-sub { font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: #98a2b3; margin: 16px 0 8px; }
+
+.ds-row { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; align-items: flex-start; }
+.ds-item {
+  display: flex; flex-direction: column; gap: 8px; background: #fff;
+  border: 1px solid #e4e7ec; border-radius: 12px; padding: 14px;
+}
+.ds-item-demo { display: flex; align-items: center; gap: 8px; min-height: 38px; flex-wrap: wrap; }
+.ds-item-label { font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; color: #98a2b3; }
+.ds-stack { display: flex; flex-direction: column; gap: 12px; align-items: flex-start; }
+.ds-menu-stage { display: flex; }
+
+.ds-swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; }
+.ds-swatch {
+  display: flex; align-items: center; gap: 10px; background: #fff;
+  border: 1px solid #e4e7ec; border-radius: 10px; padding: 9px 11px;
+}
+.ds-swatch-chip { width: 26px; height: 26px; border-radius: 7px; border: 1px solid rgba(16,24,40,.1); flex: 0 0 auto; }
+.ds-swatch-name { font-size: 12px; color: #344054; }
+.ds-swatch-value { margin-left: auto; font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; color: #98a2b3; }
+
+.ds-icons { display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 10px; }
+.ds-icon {
+  display: flex; flex-direction: column; align-items: center; gap: 7px; background: #fff;
+  border: 1px solid #e4e7ec; border-radius: 10px; padding: 14px 8px;
+}
+.ds-icon code { font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; color: #98a2b3; }
+
+/* Signed out the shell is hidden, so give the page its own breathing room. */
+.view-design:only-child { min-height: 100vh; }

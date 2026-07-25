@@ -30,6 +30,22 @@
   its members are kept, it is reachable by URL, and it returns the moment an
   agent connects. Nothing ever deletes a project except an owner's explicit
   delete.
+- New **design-system reference** at `#/design`, rendered from the app's own
+  CSS so it cannot drift: colour, type, every button/menu/chip/avatar/icon,
+  cards, tables, the event feed and feedback states. It is linked from
+  nowhere. A dev instance (`AUTH_MODE=manual`) serves it signed out;
+  production requires the user session. `DESIGN_SYSTEM_PUBLIC=0|1` overrides,
+  and `GET /api/health` reports the resolved `designSystemPublic`.
+- Overview tiles get a hue each (live green, claims blue, bugs amber,
+  conflicts violet) with a coloured icon, accent rail and a hint that only
+  takes colour when the number means something.
+- **Fixed: the Users list showed neither GitHub names nor avatars.**
+  `listUsers()` selected five columns and dropped `github_login` /
+  `github_user_id`, so every row fell back to the `gh-…` handle.
+- Row menus are no longer clipped by their table: the card stops hiding
+  overflow, rows clip themselves to keep the rounded corners, and the row with
+  an open menu is raised above its neighbours.
+- The sidebar footer no longer repeats the version; it is on the Settings page.
 - **Users page rebuilt.** Rows now carry the GitHub profile picture (initials
   if it fails to load), the display name over the `gh-…` handle, and a role
   chip with an icon (shield = admin, person = user). Rare and destructive
