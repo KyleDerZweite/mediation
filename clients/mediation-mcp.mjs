@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Mediation MCP server — single file, zero dependencies, Node >= 20.
+// Mediation MCP server: single file, zero dependencies, Node >= 20.
 //
 // Installed on user machines by install.sh and launched by an agent harness
 // (claude-code, codex, kimi) over stdio. Speaks newline-delimited JSON-RPC 2.0
@@ -27,7 +27,7 @@ if (!SERVER) {
 const STATE_FILE = '.mediation.json';
 
 /* Every state read/write, and every git question, resolves against ONE base
-   directory instead of whatever cwd the harness happened to spawn us in — a
+   directory instead of whatever cwd the harness happened to spawn us in. A
    client spawned in /tmp used to write the credential there. Precedence:
    a tool's `directory` argument > $MEDIATION_DIR > the git toplevel of cwd >
    cwd. Sticky per process: one client serves one project. */
@@ -122,7 +122,7 @@ function writeState(data) {
 /* ---------------- git-derived project id ----------------
    The project id identifies a REPO, not a directory: it comes from the git
    remote so every clone of the same repo lands in the same Mediation project.
-   Directory names are never used — they are stale, renamed, or generic.
+   Directory names are never used, because they are stale, renamed, or generic.
    (The CLI has a copy of push-remote resolution in src/cli/mediation-agent.ts; this
    file must stay standalone, so the duplication is deliberate.) */
 
@@ -133,7 +133,7 @@ function git(args, cwd) {
       encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 2000,
     }).trim();
   } catch {
-    return null; // no git, not a repo, or too slow — caller falls back
+    return null; // no git, not a repo, or too slow; caller falls back
   }
 }
 
@@ -255,8 +255,8 @@ async function ensureSession() {
   if (sessionPromise) return sessionPromise;
   sessionPromise = (async () => {
   if (session) await endSession();
-  if (!state?.repository && !state?.project) throw new Error('not initialized — call mediation_init first');
-  if (!readCredentials()?.token) throw new Error('not signed in — call mediation_login first');
+  if (!state?.repository && !state?.project) throw new Error('not initialized. Call mediation_init first');
+  if (!readCredentials()?.token) throw new Error('not signed in. Call mediation_login first');
   const created = await ((await serverAuthMode()) === 'github-app'
     ? githubSession(state)
     : api('POST', `/api/projects/${encodeURIComponent(state.project)}/sessions`, {
@@ -290,7 +290,7 @@ async function endSession() {
 
 const proj = () => {
   const state = readState();
-  if (!state?.repository && !state?.project) throw new Error('not initialized — call mediation_init first');
+  if (!state?.repository && !state?.project) throw new Error('not initialized. Call mediation_init first');
   if (!stateMatchesServer(state)) {
     throw new Error(`this repository is mapped to ${state.server || 'an invalid server'}, not ${SERVER}; call mediation_init`);
   }
@@ -305,14 +305,14 @@ const ago = (ts) => {
   return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m` : `${Math.floor(s / 3600)}h`;
 };
 
-// Server-authored `hint` fields are instructions for the human — pass them
+// Server-authored `hint` fields are instructions for the human, so pass them
 // through verbatim and stop the agent from retrying its way around them.
 function renderError(err) {
   const out = [`error: ${err.message}`];
-  if (err.status === 401) out.push('(device credential is missing, invalid, or revoked — run mediation_login again)');
+  if (err.status === 401) out.push('(device credential is missing, invalid, or revoked. Run mediation_login again)');
   else if (err.name === 'TimeoutError' || err.cause?.code === 'ECONNREFUSED') out.push(`(mediation server ${SERVER} unreachable)`);
   if (err.hint) {
-    out.push(`\nNEXT STEP — tell your user verbatim: ${err.hint}`);
+    out.push(`\nNEXT STEP, tell your user verbatim: ${err.hint}`);
     if (err.status === 403) {
       out.push('Do NOT retry, do NOT switch project ids, do NOT create a new project. Wait for the human to act.');
     }
@@ -321,7 +321,7 @@ function renderError(err) {
 }
 
 function renderConflicts(conflicts) {
-  if (!conflicts.length) return 'No overlapping work detected — clear to proceed.';
+  if (!conflicts.length) return 'No overlapping work detected. Clear to proceed.';
   const lines = conflicts.map((w) => {
     const reasons = w.reasons.map((r) =>
       r.type === 'files' ? `files: ${r.detail.map((d) => `${d.mine}<->${d.theirs}`).join(', ')}`
@@ -329,7 +329,7 @@ function renderConflicts(conflicts) {
       : `similar task (${r.detail.join(', ')})`).join('; ');
     return `- ${w.agent}${w.developer ? ` (for ${w.developer})` : ''} is "${w.status}" on: ${w.intent}\n  overlap: ${reasons}\n  claimId: ${w.claimId}`;
   });
-  return `WARNING: ${conflicts.length} overlapping claim(s). Conflicts are warnings, not locks — stop, coordinate with the owner, narrow scope, or continue explicitly.\n${lines.join('\n')}`;
+  return `WARNING: ${conflicts.length} overlapping claim(s). Conflicts are warnings, not locks. Stop, coordinate with the owner, narrow scope, or continue explicitly.\n${lines.join('\n')}`;
 }
 
 /* ---------------- tools ---------------- */
@@ -356,7 +356,7 @@ const TOOLS = [
       const where = `Directory: ${b.dir}${b.repo ? '' : ' (NOT a git repository)'}${b.explicit ? ' (given)' : ''}.`;
       if (!state) {
         const guess = derivedProject();
-        return `server ${SERVER}: ${health}. ${where} No .mediation.json found — not initialized for this directory.\n`
+        return `server ${SERVER}: ${health}. ${where} No .mediation.json found, so this directory is not initialized.\n`
           + (guess?.repository
             ? `Resolved repository: github.com/${guess.repository.owner}/${guess.repository.repository} (${guess.source}). Call mediation_init.`
             : `${guess?.error || 'No Git push remote is configured here'}, so this repository cannot be initialized. Configure its GitHub push remote; never guess from the directory name.`);
@@ -365,7 +365,7 @@ const TOOLS = [
         return `server ${SERVER}: ${health}. ${where} The mapping at ${state.path} belongs to `
           + `${state.server || 'an invalid server'}. Run mediation_init to remap this repository.`;
       }
-      let identity = 'not signed in — call mediation_login';
+      let identity = 'not signed in. Call mediation_login';
       try {
         const me = await api('GET', '/api/auth/me');
         identity = `signed in as ${me.ownerUsername}`;
@@ -513,7 +513,7 @@ const TOOLS = [
       await ensureSession();
       const { base } = proj();
       const claim = await api('PATCH', `${base}/claims/${encodeURIComponent(claimId)}`, patch);
-      return `Claim updated: ${claim.intent} — ${claim.status}${claim.findings.length ? `, ${claim.findings.length} finding(s) recorded` : ''}.`;
+      return `Claim updated: ${claim.intent}, now ${claim.status}${claim.findings.length ? `, ${claim.findings.length} finding(s) recorded` : ''}.`;
     },
   },
   {
@@ -538,7 +538,7 @@ const TOOLS = [
   },
   {
     name: 'mediation_bug',
-    description: 'Report a bug you discovered — even one you will not fix — so other agents see it and do not re-discover it.',
+    description: 'Report a bug you discovered, even one you will not fix, so other agents see it and do not re-discover it.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -564,7 +564,7 @@ const TOOLS = [
       const s = await api('GET', `${base}/state`);
       const out = [];
       out.push(`Sessions (${s.sessions.length}): ${s.sessions.map((x) => `${x.agent} (${ago(x.lastSeenAt)} ago)`).join(', ') || 'none'}`);
-      out.push(`Active claims (${s.claims.length}):${s.claims.map((cl) => `\n- [${cl.status}] ${cl.agent}: ${cl.intent}${cl.files.length ? ` — ${cl.files.join(', ')}` : ''} (id ${cl.id})`).join('') || ' none'}`);
+      out.push(`Active claims (${s.claims.length}):${s.claims.map((cl) => `\n- [${cl.status}] ${cl.agent}: ${cl.intent}${cl.files.length ? ` (${cl.files.join(', ')})` : ''} (id ${cl.id})`).join('') || ' none'}`);
       if (s.conflicts.length) out.push(`CONFLICTS (${s.conflicts.length}):${s.conflicts.map((k) => `\n- ${k.between[0].agent} <-> ${k.between[1].agent}: ${k.between[0].intent} / ${k.between[1].intent}`).join('')}`);
       out.push(`Open bugs (${s.bugs.filter((b) => b.status !== 'fixed').length}):${s.bugs.filter((b) => b.status !== 'fixed').map((b) => `\n- [${b.severity}] ${b.title}`).join('') || ' none'}`);
       if (s.completed.length) out.push(`Recently completed: ${s.completed.slice(0, 5).map((cl) => cl.intent).join('; ')}`);

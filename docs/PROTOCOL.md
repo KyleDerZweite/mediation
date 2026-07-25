@@ -1,4 +1,4 @@
-# Mediation — Agent Instructions
+# Mediation Agent Instructions
 
 You are a coding agent. This service tells you what other developers and agents
 are working on **right now**, before their work reaches Git. Check it before you
@@ -6,7 +6,7 @@ start work so you never duplicate effort.
 
 Base URL: the server root, e.g. `http://localhost:4100`. Project endpoints
 (`/api/projects/*`) require an identity: send a device **Bearer credential**
-(`Authorization: Bearer <token>`, see Device login below) — or, if a human is driving
+(`Authorization: Bearer <token>`, see Device login below). If a human is driving
 the dashboard, an active user session cookie works too. Unauthenticated requests
 get `401` with a `WWW-Authenticate: Bearer resource_metadata="/auth.md"` hint;
 the full auth contract is at `/auth.md`. The MCP client resolves one repository
@@ -14,7 +14,7 @@ binding at initialization; models never supply a project identifier to
 operational tools. All bodies are JSON; errors come back as `{ "error": "..." }` with a
 proper HTTP status (validation failures are 400 with Zod issue details).
 
-`GET /api/health` → `{ "ok": true, "now": ..., "version": "0.4.0-alpha", "authMode": "github-app" }` — use
+`GET /api/health` → `{ "ok": true, "now": ..., "version": "0.4.0-alpha", "authMode": "github-app" }`. Use
 it to verify the server is up.
 `GET /api/projects` → the projects **you** may see, with live counts:
 
@@ -59,7 +59,7 @@ later calls. Models must not choose or persist a project id.
   switch ids, do not create another project. Only an owner can add you.
 - **Unknown project** → `404`:
   `{ "error": "project not found", "project", "hint": "... Projects you can access: a, b", "docs": "/auth.md" }`.
-  That usually means a typo — compare with the list in the hint.
+  That usually means a typo, so compare with the list in the hint.
 - Your session's `developer` is overwritten with the username that owns your
   credential: attribution is verified, not self-declared.
 
@@ -126,7 +126,7 @@ POST /api/projects/{project}/claims
 
 Status values: `investigating`, `in-progress`, `testing`, `blocked`
 (`done` is set by completion, not by you). Only `sessionId` and `intent` are
-required — but the more scope you declare (files, components, task), the better
+required, but the more scope you declare (files, components, task), the better
 overlap detection works for everyone.
 
 ### 4. Keep it alive and current
@@ -145,7 +145,7 @@ Expiry semantics:
 - Completed claims are kept (`status: "done"`).
 
 Report findings as you discover them (`finding` on PATCH appends to the
-claim's findings list) — other agents read them and skip work you already did.
+claim's findings list). Other agents read them and skip work you already did.
 
 ### 5. Report bugs you find (even ones you won't fix)
 
@@ -203,7 +203,7 @@ mediation-agent disconnect
 
 Run `mediation-agent` with no arguments for full usage. Exit codes: `0` ok,
 `1` request/server error, `2` missing/unknown arguments, `3` (check only)
-overlap detected — gate on it in scripts.
+overlap detected, so gate on it in scripts.
 
 ## Device login (persistent credentials)
 
@@ -235,13 +235,13 @@ The activation secret stays on the initiating machine. The human opens the
 verification URL, signs into GitHub, and confirms the displayed code.
 
 The token is a durable `Authorization: Bearer` credential (revocable from the
-dashboard). Send it on every project request — unauthenticated project calls
+dashboard). Send it on every project request. Unauthenticated project calls
 get 401. `GET /api/auth/me` validates a stored credential. Full auth reference,
 including the human user-account flow and the authorization matrix: `/auth.md`.
 
 ## MCP install (recommended for agents)
 
-One command per developer machine — the dashboard's Settings page shows it
+One command per developer machine, and the dashboard's Settings page shows it
 with this server's URL baked in:
 
 ```
@@ -260,5 +260,5 @@ Application Support on macOS, APPDATA on Windows). Project state is read and
 written in the git toplevel of wherever the client was started, or the
 `directory` argument / `MEDIATION_DIR` env var when explicitly set.
 `mediation_init` has no project-name override. It derives the repository from
-the GitHub push remote and reports its source — state that to your human before
+the GitHub push remote and reports its source. State that to your human before
 work starts.

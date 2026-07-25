@@ -1,4 +1,4 @@
-// Overlap rules — the heart of the product. Pure functions over Claim[].
+// Overlap rules, the heart of the product. Pure functions over Claim[].
 //
 // A proposed piece of work overlaps an active claim when:
 //  - a file path matches exactly or by directory prefix, or

@@ -98,7 +98,7 @@ test('final-admin protection: last active admin cannot be demoted/disabled/delet
   assert.equal((await req('DELETE', `/api/users/${admin.id}`, undefined, { cookie: adminCookie })).status, 409);
   assert.equal((await req('PATCH', '/api/users/nope', { role: 'user' }, { cookie: adminCookie })).status, 404);
 
-  // Promote a second admin — now the protection lifts.
+  // Promote a second admin, and now the protection lifts.
   const bob = await register(req, 'bob');
   await req('PATCH', `/api/users/${bob.id}`, { status: 'active', role: 'admin' }, { cookie: adminCookie });
   assert.equal((await req('PATCH', `/api/users/${admin.id}`, { role: 'user' }, { cookie: adminCookie })).status, 200);

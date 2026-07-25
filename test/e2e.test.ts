@@ -103,7 +103,7 @@ test('user auth: bootstrap admin, pending approval, login/me/logout over TCP', a
   const bob = (await jb(await json('POST', `${BASE}/api/users/register`, { username: 'bob', password: 'password123' }))).user;
   assert.equal(bob.status, 'pending');
 
-  // Pending login is rejected 403 (no cookie) — doubles as the agent status check.
+  // Pending login is rejected 403 (no cookie), which doubles as the agent status check.
   const pending = await json('POST', `${BASE}/api/users/login`, { username: 'bob', password: 'password123' });
   assert.equal(pending.status, 403);
   assert.equal((await jb(pending)).status, 'pending');
@@ -241,7 +241,7 @@ test('static assets serve over http', async () => {
   assert.match(await powershell.text(), new RegExp(`${HOST}:${PORT}`));
 });
 
-// Served verbatim (no URL templating) — the uninstaller only touches local paths.
+// Served verbatim (no URL templating), because the uninstaller only touches local paths.
 test('uninstaller serves over http', async () => {
   const res = await json('GET', `${BASE}/uninstall.sh`);
   assert.equal(res.status, 200);

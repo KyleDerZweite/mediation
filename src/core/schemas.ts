@@ -1,4 +1,4 @@
-// Wire protocol — Zod schemas for every request body.
+// Wire protocol: Zod schemas for every request body.
 // Server validates with these; the CLI builds requests against the same types.
 // This file is the single source of truth for what agents may send.
 

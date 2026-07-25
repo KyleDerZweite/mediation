@@ -21,12 +21,12 @@ export const DEFAULT_CLAIM_IDLE_TTL_MS = 45 * 60_000;
 // A project nobody has touched for this long drops out of the dashboard list.
 // It is only HIDDEN: the row, its history and its membership all stay, and it
 // reappears the moment an agent connects again. Projects are never deleted
-// automatically — only an owner's explicit DELETE removes one.
+// automatically; only an owner's explicit DELETE removes one.
 export const PROJECT_IDLE_HIDE_MS = 7 * 24 * 60 * 60_000;
 
 const EVENTS_CAP = 200;
 
-// Project ids are slugs. Enforced on CREATION only — ids created before the
+// Project ids are slugs. Enforced on CREATION only, because ids created before the
 // Alpha milestone are grandfathered and keep working.
 const PROJECT_ID_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
@@ -154,7 +154,7 @@ export interface CredentialInfo {
   agent: string;
   machine: string | null;
   developer: string | null;
-  userId: string; // owning user — a credential without an ACTIVE owner never resolves
+  userId: string; // owning user; a credential without an ACTIVE owner never resolves
   ownerUsername: string;
   ownerDisplayName: string; // GitHub login of the owner, original case
   createdAt: number;
@@ -785,7 +785,7 @@ export class Store {
   /* Membership and *freshness* are different questions. The row itself is the
      membership: it survives until GitHub says otherwise (a revocation webhook
      deletes it) or an owner removes it. `authorization_expires_at` only says
-     how recently GitHub confirmed the permission, and gates AGENTS — every
+     how recently GitHub confirmed the permission, and gates AGENTS, since every
      agent session re-verifies against GitHub anyway. Humans reading their own
      dashboard must not lose their projects five minutes after the last agent
      disconnected, so they pass `fresh: false`. */
@@ -968,7 +968,7 @@ export class Store {
   }
 
   // Auto-creation path for agents: first session on an unknown id creates it
-  // with the acting user as owner. Never validates the slug — the id already
+  // with the acting user as owner. Never validates the slug, because the id already
   // came from a client that may predate the rule.
   ensureProject(id: string, userId: string | null): void {
     if (this.projectExists(id)) return;
@@ -1010,7 +1010,7 @@ export class Store {
       displayName: displayName(user), avatarUrl: avatarUrl(user), role, createdAt: t };
   }
 
-  // The last remaining owner may not be demoted or removed — same shape as the
+  // The last remaining owner may not be demoted or removed, the same shape as the
   // final-admin guard. An instance admin does not bypass it either.
   private isLastOwner(projectId: string, userId: string): boolean {
     if (this.memberRole(projectId, userId) !== 'owner') return false;
@@ -1080,7 +1080,7 @@ export class Store {
 
   // userId = null lists everything (instance admin); otherwise own credentials only.
   listCredentials(userId: string | null): CredentialInfo[] {
-    // token values are never returned — a credential is only ever shown by id
+    // token values are never returned; a credential is only ever shown by id
     const sql = `SELECT c.id, c.agent, c.machine, c.developer, c.user_id, c.created_at, c.last_used_at,
         c.authorization_source, c.github_user_id,
         u.username AS owner_username, u.github_login
@@ -1266,7 +1266,7 @@ export class Store {
   }
 
   // The last user that is role=admin AND status=active may not be demoted,
-  // disabled, or deleted — self-targeting included.
+  // disabled, or deleted, self-targeting included.
   private isLastActiveAdmin(row: Row): boolean {
     if (row.role !== 'admin' || row.status !== 'active') return false;
     const n = (this.db.prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'admin' AND status = 'active'").get() as Row).n;

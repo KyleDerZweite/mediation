@@ -3,11 +3,11 @@ name: mediation
 description: Coordinate work through the Mediation live-coordination server so you never duplicate another developer's or agent's in-flight work. Use BEFORE starting any coding task (check for overlapping claims), when starting work (claim it), when discovering findings or bugs (report them), and when finishing (complete with commits). Also use when the user says "set up mediation", "connect to mediation", or asks what others are working on.
 ---
 
-# Mediation — live work coordination
+# Mediation: live work coordination
 
 Mediation shows what every developer and agent is working on *right now*,
 before anything reaches Git. The `mediation_*` MCP tools talk to it. Conflicts
-are **warnings, not locks** — never refuse work because of one; surface it and
+are **warnings, not locks**. Never refuse work because of one; surface it and
 let the user decide.
 
 ## Service unavailable
@@ -69,12 +69,12 @@ diagnostic only; it never authorizes Mediation access.
 2. **When you start**: `mediation_claim` with intent, files, components, task
    reference, and branch. Keep the returned `claimId`.
 3. **While working**: push important discoveries with
-   `mediation_update {claimId, finding}` — root causes, gotchas, decisions.
+   `mediation_update {claimId, finding}` for root causes, gotchas, decisions.
    Other agents read these live; a good finding saves someone else the same
    investigation. Update `status` as you move (investigating → in-progress →
    testing; blocked when stuck).
 4. **Side discoveries**: file bugs you notice but won't fix with
-   `mediation_bug` — even small ones.
+   `mediation_bug`, even small ones.
 5. **When done**: `mediation_complete {claimId, commits, summary}` with the
    real commit SHAs after committing.
 

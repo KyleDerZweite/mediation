@@ -1,14 +1,14 @@
-# AGENTS.md — contributor guide
+# AGENTS.md: contributor guide
 
 Mediation: live coordination service that prevents developers and coding agents
 from unknowingly duplicating work. Product spec: `docs/PRODUCT.md`.
-Agent-facing protocol docs: `docs/PROTOCOL.md` (served at `/AGENT.md` — the
+Agent-facing protocol docs: `docs/PROTOCOL.md` (served at `/AGENT.md`, the
 URL agents are told to fetch; don't confuse the two files: AGENTS.md = how to
 work on this repo, docs/PROTOCOL.md = the product's wire protocol).
 
 ## Stack
 
-- Node ≥ 22.18, TypeScript run natively (type stripping — erasable syntax only:
+- Node ≥ 22.18, TypeScript run natively (type stripping, erasable syntax only:
   no enums, no namespaces, relative imports use explicit `.ts` extensions).
   No build step. `pnpm run typecheck` must pass.
 - Runtime deps (keep this list short and mainstream): `hono` + `@hono/node-server`
@@ -45,40 +45,40 @@ or instance-admin cookie, human only), USER (active user, human only), ADMIN
 
 | Level | Method | Path | Body schema (`src/core/schemas.ts`) |
 | --- | --- | --- | --- |
-| PUBLIC | GET | `/api/health` | — |
+| PUBLIC | GET | `/api/health` | none |
 | PUBLIC | POST | `/api/auth/device/start` | `deviceStart` (GitHub App mode) |
 | PUBLIC | POST | `/api/auth/device/redeem` | `deviceRedeem` (GitHub App mode) |
 | PUBLIC | GET | `/api/github/login`, `/api/github/callback` | browser OAuth |
 | PUBLIC | POST | `/api/github/webhook` | signed GitHub webhook |
-| A\|U | GET | `/api/projects` | — (ProjectSummary[], filtered to the actor; `role` per row) |
+| A\|U | GET | `/api/projects` | none (ProjectSummary[], filtered to the actor; `role` per row) |
 | A\|U | POST | `/api/repositories/github/session` | `githubRepositorySession` → verified repository-bound session |
 | USER | POST | `/api/projects` | `projectCreate` → creates + owner membership (409 taken, 400 bad slug) |
 | MEMBER | POST | `/api/projects/:p/sessions` | `sessionCreate` (manual mode only; auto-creates an unknown project) |
 | MEMBER | POST | `/api/projects/:p/sessions/:id/heartbeat` | `heartbeat` |
-| MEMBER | DELETE | `/api/projects/:p/sessions/:id` | — |
+| MEMBER | DELETE | `/api/projects/:p/sessions/:id` | none |
 | MEMBER | POST | `/api/projects/:p/sessions/:id/repo` | `repoReport` |
 | MEMBER | POST | `/api/projects/:p/claims` | `claimCreate` → `{ claim, conflicts }` |
 | MEMBER | PATCH | `/api/projects/:p/claims/:id` | `claimPatch` |
 | MEMBER | POST | `/api/projects/:p/claims/:id/complete` | `claimComplete` |
 | MEMBER | POST | `/api/projects/:p/bugs` | `bugCreate` |
 | MEMBER | PATCH | `/api/projects/:p/bugs/:id` | `bugPatch` |
-| MEMBER | GET | `/api/projects/:p/state` | — (ProjectState) |
+| MEMBER | GET | `/api/projects/:p/state` | none (ProjectState) |
 | MEMBER | GET | `/api/projects/:p/check` | query: `sessionId,files,components,task,intent` |
-| MEMBER | GET | `/api/projects/:p/members` | — (ProjectMember[]) |
+| MEMBER | GET | `/api/projects/:p/members` | none (ProjectMember[]) |
 | OWNER | POST | `/api/projects/:p/members` | `memberAdd` (404 unknown user, 409 dup) |
 | OWNER | PATCH | `/api/projects/:p/members/:uid` | `memberPatch` (409 last owner) |
-| OWNER | DELETE | `/api/projects/:p/members/:uid` | — (a member may remove themselves; 409 last owner) |
-| OWNER | DELETE | `/api/projects/:p` | — cascades sessions/claims/bugs/events/members |
+| OWNER | DELETE | `/api/projects/:p/members/:uid` | none (a member may remove themselves; 409 last owner) |
+| OWNER | DELETE | `/api/projects/:p` | none; cascades sessions/claims/bugs/events/members |
 | PUBLIC | POST | `/api/users/register` | `userRegister` (manual mode only) |
 | PUBLIC | POST | `/api/users/login` | `userLogin` (manual mode only) |
-| PUBLIC | POST | `/api/users/logout` | — clears cookie |
+| PUBLIC | POST | `/api/users/logout` | none; clears cookie |
 | PUBLIC | POST | `/api/auth/device-login` | `deviceLogin` → narrow global device token (manual mode only) |
-| USER | GET | `/api/users/me` | — active user identity |
-| ADMIN | GET | `/api/users` | — (PublicUser[]) |
+| USER | GET | `/api/users/me` | none; returns the active user identity |
+| ADMIN | GET | `/api/users` | none (PublicUser[]) |
 | ADMIN | PATCH | `/api/users/:id` | `userPatch` (role?/status?; final-admin protected 409) |
-| ADMIN | DELETE | `/api/users/:id` | — (final-admin protected 409) |
+| ADMIN | DELETE | `/api/users/:id` | none (final-admin protected 409) |
 | PUBLIC | GET | `/api/auth/me` | Bearer token → identity, 401 if invalid |
-| USER | GET | `/api/auth/credentials` | — own credentials only (admins included), incl. `ownerUsername`/`ownerDisplayName` |
+| USER | GET | `/api/auth/credentials` | none; own credentials only (admins included), incl. `ownerUsername`/`ownerDisplayName` |
 | USER | DELETE | `/api/auth/credentials/:id` | revoke (owner or admin, else 403) |
 | PUBLIC | GET | `/install.sh` | installer script, `__MEDIATION_URL__` templated from request proto+host |
 | PUBLIC | GET | `/install.ps1` | Windows installer bootstrap, URL templated likewise |
@@ -92,8 +92,8 @@ User accounts + sessions live in the same SQLite store (`users`,
 
 Schema changes are **additive and self-migrating**: new tables use
 `CREATE TABLE IF NOT EXISTS`, new columns go in the `ADD_COLUMNS` list in
-`store.ts` (guarded by a `PRAGMA table_info` check — node:sqlite throws on a
-duplicate `ADD COLUMN`). A live database must upgrade by restarting the
+`store.ts` (guarded by a `PRAGMA table_info` check, because node:sqlite throws
+on a duplicate `ADD COLUMN`). A live database must upgrade by restarting the
 container, never by hand.
 
 ## Device identity + enforcement
@@ -109,12 +109,12 @@ session capability; mutations for that session, its claims, and its bugs must
 present `X-Mediation-Session`.
 
 Enforcement summary (all of it in the one `/api/*` middleware in
-`src/server/app.ts` — don't scatter permission checks beyond it):
+`src/server/app.ts`; don't scatter permission checks beyond it):
 
 - Actor for project authorization = cookie user ?? the credential's owner.
   Instance-admin power comes from the **cookie** only, never a credential.
 - The project id is validated on the raw path **segment**
-  (`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`) before anything else — `%2F`, `%00`,
+  (`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`) before anything else. `%2F`, `%00`,
   spaces and traversal all 404 there, so the middleware and the handler's
   decoded param can never disagree.
 - Deny by default: **any** future route under `/api/projects/:p/` is
@@ -131,25 +131,25 @@ Enforcement summary (all of it in the one `/api/*` middleware in
 
 ## Clients (`clients/`)
 
-- `clients/mediation-mcp.mjs` — single-file, dependency-free MCP stdio server
+- `clients/mediation-mcp.mjs` is a single-file, dependency-free MCP stdio server
   (plain JS, Node ≥ 20, no TS, no imports beyond node builtins). Downloaded to
   user machines by the installer; must stay self-contained. All state I/O and
   git calls resolve against one base directory (`directory` argument >
-  `MEDIATION_DIR` > git toplevel of cwd > cwd) — never bare `process.cwd()`.
-- `clients/install.sh` — installer template; server serves it with
+  `MEDIATION_DIR` > git toplevel of cwd > cwd), never bare `process.cwd()`.
+- `clients/install.sh` is the installer template; the server serves it with
   `__MEDIATION_URL__` replaced. Its dependency-free Node helper performs
   transactional, manifest-owned changes and supports wizard or headless use.
   Detects claude-code + codex + kimi (Kimi Code
   CLI `~/.kimi-code`, legacy Kimi CLI `~/.kimi`; both take an `mcpServers`
   JSON at `<dir>/mcp.json` and a skill at `<dir>/skills/`), registers the MCP
   server, installs the skill. Idempotent.
-- `clients/uninstall.sh` — reverses install.sh for every harness; served
+- `clients/uninstall.sh` reverses install.sh for every harness; it is served
   verbatim at `/uninstall.sh` (no URL templating needed). Blocks appended to
   harness config files carry `>>> mediation >>>` / `<<< mediation <<<` markers
-  so they can be removed surgically — keep them in sync with install.sh.
+  so they can be removed surgically. Keep them in sync with install.sh.
   Never deletes per-project `.mediation.json` (they contain only repository
   mappings). Global device auth is removed unless `--keep-auth` is passed.
-- `clients/skills/mediation/SKILL.md` — teaches agents the workflow
+- `clients/skills/mediation/SKILL.md` teaches agents the workflow
   (init → check → claim → update findings → complete).
 
 ## Conventions
@@ -170,7 +170,7 @@ Enforcement summary (all of it in the one `/api/*` middleware in
 - Auth is a single module: global device Bearers + human user
   accounts/sessions + project membership (`docs/auth.md`), enforced once in the
   `/api/*` middleware. Invitations and an audit trail from `docs/PRODUCT.md`
-  are still later work — don't scatter permission checks around.
+  are still later work. Don't scatter permission checks around.
 - Project ids identify the actual GitHub **push target**. Clients follow Git's
   push-remote precedence and include owner+repository, so forks do not collide
   with upstream. The slug rule applies only to new ids; pre-Alpha ids remain
@@ -178,8 +178,8 @@ Enforcement summary (all of it in the one `/api/*` middleware in
 
 ## Commands
 
-- `pnpm start` — run server (env: `PORT`=4100, `HOST`, `DB_PATH`=./data/mediation.db, `SESSION_TTL_MS`)
-- `pnpm test` — tests. `pnpm run typecheck` — TS check. Both gate "done".
+- `pnpm start` runs the server (env: `PORT`=4100, `HOST`, `DB_PATH`=./data/mediation.db, `SESSION_TTL_MS`)
+- `pnpm test` runs the tests. `pnpm run typecheck` runs the TS check. Both gate "done".
 
 ## Development vs production
 

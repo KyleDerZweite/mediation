@@ -1,4 +1,4 @@
-# Single stage — the app has no build step (Node runs the TypeScript natively).
+# Single stage, because the app has no build step (Node runs the TypeScript natively).
 # node:22-alpine tracks the latest 22.x (>=22.18, which engines requires and
 # which node:sqlite needs).
 FROM docker.io/library/node:22-alpine
@@ -19,7 +19,7 @@ ENV DB_PATH=/data/mediation.db
 EXPOSE 4100
 STOPSIGNAL SIGTERM
 
-# ponytail: runs as root; USER node needs /data chown handling — add if image is ever exposed beyond the tunnel
+# ponytail: runs as root; USER node needs /data chown handling, so add it if the image is ever exposed beyond the tunnel
 
 # Same command as `pnpm start`.
 CMD ["node", "--disable-warning=ExperimentalWarning", "src/server/index.ts"]

@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.0-alpha — names humans recognise
+## 0.4.0-alpha: names humans recognise
 
 - **Fixed: no coordination tool worked in a fresh install.** The MCP client
   never awaited session creation, so `mediation_check`, `claim`, `update`,
@@ -26,7 +26,7 @@
   stands until GitHub revokes it (webhook) or an owner removes it, while the
   five-minute freshness window keeps gating agents, whose session creation
   re-verifies against GitHub anyway. A project drops out of the list only
-  after **7 idle days** — and only from the list: the project, its history and
+  after **7 idle days**, and only from the list. The project, its history and
   its members are kept, it is reachable by URL, and it returns the moment an
   agent connects. Nothing ever deletes a project except an owner's explicit
   delete.
@@ -51,7 +51,7 @@
   heartbeat every 2 min) and idle claim expiry 30 min → **45 min**, because
   real agent turns regularly run longer than half an hour.
 
-## Unreleased Alpha — global device identity
+## Unreleased Alpha: global device identity
 
 - Per-agent pairing and relay codes are removed. After an administrator
   activates a registered user, the agent exchanges that user's password once
@@ -75,7 +75,7 @@ Not yet Alpha-complete: the server still needs independent GitHub permission
 verification before agent-driven project creation is a security boundary.
 Until that lands, a valid device bearer can present a guessed project slug.
 
-## 0.3.0-alpha — private projects
+## 0.3.0-alpha: private projects
 
 **Projects are now real, private objects.** A project has an owner and members;
 only they can see or touch anything in it.
@@ -88,27 +88,27 @@ only they can see or touch anything in it.
   one path only: starting a session on an id that does not exist creates it,
   and the user who owns the agent's credential becomes its owner.
 - **Project ids come from the git remote.** `mediation_init` no longer needs a
-  project name — it derives the repository name from `git remote origin` (one
+  project name. It derives the repository name from `git remote origin` (one
   project per repository), tells the agent which id and source it used, and the
   agent must state that to you *before* you approve, so a wrong id is caught
   early. Directory names are never used. New ids must look like
   `^[a-z0-9][a-z0-9._-]{0,63}$`; existing ids keep working.
 - **Clear failures instead of silence.** Hitting a project you are not in
   answers `403` with a hint you can act on ("ask an owner to add you"); an id
-  that does not exist answers `404` listing the projects you *can* access —
-  usually a typo. Agents relay both to you verbatim and stop retrying.
+  that does not exist answers `404` listing the projects you *can* access,
+  which usually means a typo. Agents relay both to you verbatim and stop retrying.
 - **Pairing is approve-then-code.** Pending requests no longer show a code. You
   click **Approve** (or **Deny**) in the dashboard and only then does the code
-  appear — now **8 characters**. The credential belongs to the approver: the
+  appear, and it is now **8 characters**. The credential belongs to the approver: the
   agent acts as that user, sees only that user's projects, and its sessions are
   attributed to that username no matter what the agent claims.
 - **Credentials are yours.** The Agents page shows *My agents* (admins see all)
   with the owner of each credential; you can only revoke your own. A credential
   whose owner is disabled or deleted stops working immediately and must be
   re-paired.
-- **Admins** can still see and reach every project from their dashboard session
-  — but their *agent* credentials cannot: admin power is never delegated to an
-  agent.
+- **Admins** can still see and reach every project from their dashboard
+  session, but their *agent* credentials cannot: admin power is never delegated
+  to an agent.
 - `/api/health` now reports the server `version`, and the dashboard shows it in
   the sidebar footer.
 - **Kimi support in the installer.** `install.sh` now also detects **Kimi Code
@@ -117,20 +117,20 @@ only they can see or touch anything in it.
   `<dir>/skills/mediation/`, so Kimi users no longer wire it up by hand. A
   harness that fails to register no longer aborts the others.
 - **Uninstaller.** `curl -fsSL <server>/uninstall.sh | bash` reverses the
-  installer for every harness — the shared client, the claude-code MCP
+  installer for every harness: the shared client, the claude-code MCP
   registration and skill, the codex `config.toml` and `AGENTS.md` blocks (cut
   out surgically by their `>>> mediation >>>` markers, leaving your own content
   alone), and the Kimi entries. It prints what it removed and what it did not
   find, is safe to re-run, and deliberately **keeps** your per-project
-  `.mediation.json` files — they hold credentials, so it tells you how to find
+  `.mediation.json` files. They hold credentials, so it tells you how to find
   and revoke them instead.
 - **The MCP client no longer trusts the directory it was spawned in.** It
   resolved `.mediation.json` from `process.cwd()`, so a harness that started it
   elsewhere could write a credential into, say, `/tmp`. State reads/writes and
   git lookups now share one base directory: an optional `directory` argument on
   `mediation_status`/`mediation_init`/`mediation_confirm`, else `$MEDIATION_DIR`,
-  else the git toplevel of the working directory, else the working directory —
-  and if that last case is not a git repository, `mediation_init` and
+  else the git toplevel of the working directory, else the working directory.
+  If that last case is not a git repository, `mediation_init` and
   `mediation_confirm` say so loudly instead of writing in silence.
 
 ### Upgrading
@@ -139,7 +139,7 @@ Restart the server; the database migrates itself. Existing projects are adopted
 by the oldest active admin (who becomes their owner), developers who already
 worked in a project are added as members, and existing agent credentials are
 bound to the user whose username matches their `developer` field (anything left
-over goes to that admin). Back up `data/mediation.db` first — see "Upgrading" in
+over goes to that admin). Back up `data/mediation.db` first. See "Upgrading" in
 the README.
 
 ### Known limitations

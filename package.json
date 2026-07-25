@@ -2,7 +2,7 @@
   "name": "mediation",
   "version": "0.4.0-alpha",
   "private": true,
-  "description": "Live coordination service for developers and coding agents — see overlapping work before Git makes it visible.",
+  "description": "Live coordination service for developers and coding agents. See overlapping work before Git makes it visible.",
   "type": "module",
   "bin": {
     "mediation-agent": "src/cli/mediation-agent.ts"

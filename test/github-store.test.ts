@@ -116,7 +116,7 @@ test('a project stays listed after its GitHub grant goes stale, hides after a we
   raw.prepare('UPDATE events SET at = ? WHERE projectId = ?').run(eightDaysAgo, project.id);
   raw.close();
 
-  // Hidden from the list — but the project, its history and membership remain.
+  // Hidden from the list, but the project, its history and membership remain.
   assert.deepEqual(store.listProjects(user.id, false, { fresh: false }).map((p) => p.id), []);
   assert.equal(store.getGithubProjectById(project.id)?.fullName, 'Octo/widgets');
   assert.equal(store.githubMemberRole(project.id, user.id, { fresh: false }), 'owner');

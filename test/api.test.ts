@@ -7,7 +7,7 @@ import { bootstrap, ctx, pair } from './helpers.ts';
 
 let store: Store;
 let app: Hono;
-let token = ''; // agent bearer — project routes now require an identity
+let token = ''; // agent bearer, because project routes now require an identity
 const P = '/api/projects/api-test';
 const auth = () => ({ authorization: `Bearer ${token}` });
 const capabilities = new Map<string, string>();

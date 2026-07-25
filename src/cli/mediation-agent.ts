@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// mediation-agent — CLI client for coding agents. Global fetch, no deps.
+// mediation-agent: CLI client for coding agents. Global fetch, no deps.
 // Imports core only for types (see AGENTS.md boundaries).
 
 import { execFileSync } from 'node:child_process';
@@ -86,7 +86,7 @@ function git(...args: string[]): string | null {
 }
 
 // Deliberate duplicate of push-remote resolution in
-// clients/mediation-mcp.mjs — that client ships to user machines as a single
+// clients/mediation-mcp.mjs, because that client ships to user machines as a single
 // standalone file and cannot import from here. Keep the two in sync.
 function parseGitHubRemote(raw: string): { owner: string; repo: string } | null {
   const value = raw.trim();
@@ -172,7 +172,7 @@ async function call<T = any>(method: string, path: string, body?: unknown): Prom
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
   } catch {
-    console.error(`error: cannot reach ${SERVER} — is the mediation server running?`);
+    console.error(`error: cannot reach ${SERVER}. Is the mediation server running?`);
     process.exit(1);
   }
   const data: any = await res.json().catch(() => ({}));
@@ -242,7 +242,7 @@ const commands: Record<string, () => Promise<void>> = {
     const r = await call<{ conflicts: { agent: string }[] }>('GET', `/api/projects/${project()}/check?${q}`);
     if (r.conflicts.length) {
       console.error(
-        `warning: ${r.conflicts.length} overlapping claim(s) found — coordinate before proceeding ` +
+        `warning: ${r.conflicts.length} overlapping claim(s) found. Coordinate before proceeding ` +
           `(agents: ${[...new Set(r.conflicts.map((c) => c.agent))].join(', ')})`,
       );
       out(r);

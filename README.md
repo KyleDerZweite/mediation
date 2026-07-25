@@ -1,6 +1,6 @@
 # Mediation
 
-Live coordination for developers and coding agents — see overlapping work
+Live coordination for developers and coding agents. See overlapping work
 **before Git makes it visible**.
 
 Git shows committed work. Mediation shows local work that is still being
@@ -53,7 +53,7 @@ On Windows, use `irm http://<your-server>/uninstall.ps1 | iex`.
 
 ## Stack
 
-Node.js ≥ 22.18, TypeScript run natively (type stripping — no build step),
+Node.js ≥ 22.18, TypeScript run natively (type stripping, no build step),
 [Hono](https://hono.dev) for HTTP, [Zod](https://zod.dev) for protocol
 validation, built-in `node:sqlite` for persistence. Nothing else.
 
@@ -91,7 +91,7 @@ Product spec: [`docs/PRODUCT.md`](docs/PRODUCT.md).
 | GET | `/api/projects/:p/state` | full live project state (dashboard uses this) |
 | GET | `/api/projects/:p/check` | pre-flight overlap check |
 
-Conflicts are **warnings, not locks** — no request is ever rejected because of
+Conflicts are **warnings, not locks**. No request is ever rejected because of
 overlap. Full agent-facing instructions with request/response examples:
 [`docs/PROTOCOL.md`](docs/PROTOCOL.md) (served to agents at `/AGENT.md`).
 
@@ -120,16 +120,16 @@ Environment variables for the server:
 | Var | Default | Meaning |
 | --- | --- | --- |
 | `PORT` | `4100` | listen port |
-| `HOST` | — | listen host |
+| `HOST` | none | listen host |
 | `DB_PATH` | `./data/mediation.db` | SQLite database file |
 | `SESSION_TTL_MS` | `120000` | session expiry without heartbeat |
 | `AUTH_MODE` | `manual` | `github-app` in production, `manual` for local/self-hosted auth |
-| `PUBLIC_URL` | — | externally reachable origin used for OAuth callbacks and secure cookies |
-| `GITHUB_APP_ID`, `GITHUB_APP_CLIENT_ID` | — | GitHub App identifiers |
-| `GITHUB_APP_PRIVATE_KEY_FILE` | — | protected App private-key path |
-| `GITHUB_APP_CLIENT_SECRET` | — | OAuth client-secret string |
-| `GITHUB_WEBHOOK_SECRET` | — | webhook-secret string |
-| `GITHUB_BOOTSTRAP_ADMIN` | — | GitHub login allowed to become the first GitHub-backed admin |
+| `PUBLIC_URL` | none | externally reachable origin used for OAuth callbacks and secure cookies |
+| `GITHUB_APP_ID`, `GITHUB_APP_CLIENT_ID` | none | GitHub App identifiers |
+| `GITHUB_APP_PRIVATE_KEY_FILE` | none | protected App private-key path |
+| `GITHUB_APP_CLIENT_SECRET` | none | OAuth client-secret string |
+| `GITHUB_WEBHOOK_SECRET` | none | webhook-secret string |
+| `GITHUB_BOOTSTRAP_ADMIN` | none | GitHub login allowed to become the first GitHub-backed admin |
 
 Idle claims expire after 45 minutes; completed claims are kept.
 
@@ -167,7 +167,7 @@ podman-compose down && cp data/mediation.db data/mediation.db.bak && podman-comp
 git pull                       # (before the rebuild, if you deploy from source)
 ```
 
-Keep a rolling backup — SQLite is a single file:
+Keep a rolling backup, because SQLite is a single file:
 
 ```
 # crontab -e   → nightly copy, keeps the last 7 by date
@@ -177,7 +177,7 @@ Keep a rolling backup — SQLite is a single file:
 Newt values come from your Pangolin dashboard (Sites → Add Site → Newt). For
 the public resource target select method `HTTP`, hostname `mediation`, and port
 `4100`. Do not add the `http://` prefix to the hostname and do not use
-`localhost`—inside Newt, `localhost` is the Newt container itself. Production
+`localhost`. Inside Newt, `localhost` is the Newt container itself. Production
 does not publish port 4100 on the host; only Newt can reach it through the
 Compose network. SQLite data persists in `./data`.
 

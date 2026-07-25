@@ -1,4 +1,4 @@
-// Mediation dashboard — vanilla ES module, no build step.
+// Mediation dashboard: vanilla ES module, no build step.
 // Talks only to the HTTP API (/api/*). Renders via innerHTML string builders.
 
 /* ---------------- utilities ---------------- */
@@ -200,7 +200,7 @@ function parseRoute() {
 
 async function getJSON(path) {
   const res = await fetch(path, { headers: { Accept: 'application/json' } });
-  // Only 401 means "logged out" — a 403 (not a member) must never bounce the
+  // Only 401 means "logged out"; a 403 (not a member) must never bounce the
   // user back to the login screen.
   if (res.status === 401) { state.me = null; throw new Error('unauthenticated'); }
   if (!res.ok) {
@@ -551,7 +551,7 @@ function renderProject() {
   if (tab === 'members') {
     body = renderMembersTab(pid);
   } else if (failure === 403) {
-    body = emptyCard(`You are not a member of <span class="mono">${esc(projectName(pid))}</span> — ask one of its
+    body = emptyCard(`You are not a member of <span class="mono">${esc(projectName(pid))}</span>. Ask one of its
       owners to add you (dashboard → project → Members). Retrying will not help until they do.`);
   } else if (failure === 404) {
     body = emptyCard(`No project <span class="mono">${esc(projectName(pid))}</span> on this server.
@@ -646,7 +646,7 @@ function renderNowTab(ps, now) {
 
 /* ---------------- members tab ----------------
    TRAP: the 3s poll morphs this DOM. morph() syncs attributes, not input value
-   properties — so every input lives in a STATIC row (never inside the mapped
+   properties, so every input lives in a STATIC row (never inside the mapped
    list), has a stable id, is never rendered with a value="…" attribute, and is
    read with .value at click time. */
 
@@ -739,7 +739,7 @@ function renderInstanceActivity() {
   merged.sort((a, b) => b.at - a.at);
   const events = merged.slice(0, 100);
   return `<div class="view-activity">
-    <div class="view-note">Every event across the instance, newest first — sessions, claims, findings, bugs and completions.</div>
+    <div class="view-note">Every event across the instance, newest first: sessions, claims, findings, bugs and completions.</div>
     ${events.length
       ? `<div class="feed-panel">${events.map((e) => eventRow(e, now, e.projectId)).join('')}</div>`
       : emptyCard('Nothing has happened yet. Events appear here as agents connect, claim work and report findings.')}
@@ -781,7 +781,7 @@ function renderInstallPanel() {
       '3. Run mediation_login and show me the verification URL and code it prints.',
       '   I open that link, sign in with GitHub if I am not signed in already, and',
       '   confirm the code. Then run mediation_login again to store this machine’s',
-      '   credential. Never ask me for a GitHub token — you do not get one.',
+      '   credential. Never ask me for a GitHub token, because you do not get one.',
       '   If it says the account awaits approval, tell me and stop until I say go.',
     ]
     : [
@@ -855,13 +855,13 @@ function renderSettings() {
   const origin = location.origin && location.origin !== 'null' ? location.origin : 'http://localhost:4100';
   const pid = state.projects[0]?.id || 'my-project';
   const snippet = [
-    '# start a session for this project (creates it if the id is new — you become its owner)',
+    '# start a session for this project (creates it if the id is new, and you become its owner)',
     `mediation-agent connect --project ${pid} --agent claude-code`,
     '',
     '# before touching files: check who else is there',
     `mediation-agent check --files src/server/app.ts --task "fix session expiry"`,
     '',
-    '# claim the work — overlaps come back as warnings, never locks',
+    '# claim the work; overlaps come back as warnings, never locks',
     `mediation-agent claim --intent "Fix session expiry" --files src/server/app.ts`,
   ].join('\n');
   const health = connectionHealth();
@@ -907,7 +907,7 @@ function renderSettings() {
       <div class="kv-list">
         ${[
           ['Conflicts are warnings', 'Overlap never blocks an agent. Claims always succeed; overlapping work comes back as a warning to negotiate around.', 'warn, not lock'],
-          ['Session heartbeat TTL', 'A session disappears — and its claims are released — if it stops heartbeating for this long.', '5 min'],
+          ['Session heartbeat TTL', 'A session disappears, and its claims are released, if it stops heartbeating for this long.', '5 min'],
           ['Claim idle expiry', 'Idle work claims auto-release so overlap warnings never rely on stale locks.', '45 min'],
           ['Completed work', 'Finished claims are kept with their commits, PRs and summary so others can see what just changed.', 'kept'],
         ].map(([label, desc, value]) => `<div class="kv-row">
@@ -994,7 +994,7 @@ function userOverflow(u) {
 }
 
 function renderUsers() {
-  // Accounts waiting on an admin come first — that is the only row that needs
+  // Accounts waiting on an admin come first, because that is the only row that needs
   // acting on; the rest is reference material, sorted by name.
   const rank = (u) => (u.status === 'pending' ? 0 : u.status === 'active' ? 1 : 2);
   const shown = state.users.filter(userMatchesFilter).sort((a, b) =>
@@ -1087,7 +1087,7 @@ async function doLogin(username, password) {
     const body = await res.json().catch(() => ({}));
     if (res.ok) { state.me = body.user; state.authMsg = ''; enterDashboard(); return; }
     state.authMsg = body.error || `Login failed (${res.status})`;
-  } catch { state.authMsg = 'Request failed — is the server reachable?'; }
+  } catch { state.authMsg = 'Request failed. Is the server reachable?'; }
   showAuth();
 }
 
@@ -1101,11 +1101,11 @@ async function doRegister(username, password) {
     if (res.ok) {
       if (body.bootstrap) { await doLogin(username, password); return; } // first account: active admin, log straight in
       state.authView = 'login';
-      state.authMsg = 'Account created — an administrator must approve it before you can sign in.';
+      state.authMsg = 'Account created. An administrator must approve it before you can sign in.';
     } else {
       state.authMsg = (body.issues ? 'Check username (3-32 chars) and password (min 8).' : body.error) || `Registration failed (${res.status})`;
     }
-  } catch { state.authMsg = 'Request failed — is the server reachable?'; }
+  } catch { state.authMsg = 'Request failed. Is the server reachable?'; }
   showAuth();
 }
 
@@ -1236,7 +1236,7 @@ document.addEventListener('click', async (e) => {
     try {
       await navigator.clipboard.writeText(copyEl.dataset.copy);
       state.copied = copyEl.dataset.copyKey || 'copied';
-    } catch { /* clipboard denied — text is visible to select manually */ }
+    } catch { /* clipboard denied; text is visible to select manually */ }
     render();
     clearTimeout(copiedTimer);
     copiedTimer = setTimeout(() => { state.copied = null; render(); }, 1500);
@@ -1307,7 +1307,7 @@ async function send(method, path, body) {
     if (res.ok) return true;
     const b = await res.json().catch(() => ({}));
     alert([b.error || `Request failed (${res.status})`, b.hint].filter(Boolean).join('\n\n'));
-  } catch { alert('Request failed — is the server reachable?'); }
+  } catch { alert('Request failed. Is the server reachable?'); }
   return false;
 }
 
@@ -1331,7 +1331,7 @@ async function checkAuth() {
     if (auth === 'error') state.authMsg = new URLSearchParams(location.search).get('message') || 'GitHub sign-in failed.';
     const res = await fetch('/api/users/me', { headers: { Accept: 'application/json' } });
     if (res.ok) { state.me = (await res.json()).user; return; }
-  } catch { /* server unreachable — treat as logged out */ }
+  } catch { /* server unreachable, so treat as logged out */ }
   state.me = null;
 }
 

@@ -1,6 +1,6 @@
 // Upgrade rehearsal: a pre-Alpha database (no projects/project_members, no
 // credentials.user_id, no pair_requests.approved_by) must upgrade in place when
-// the new Store opens it. The OLD DDL is spelled out here on purpose — it is the
+// the new Store opens it. The OLD DDL is spelled out here on purpose: it is the
 // contract we are migrating from, so it must not follow src/server/store.ts.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -111,7 +111,7 @@ test('pre-Alpha database upgrades in place: projects, ownership, legacy credenti
   assert.equal(row<{ n: number }>("SELECT COUNT(*) AS n FROM pragma_table_info('pair_requests') WHERE name = 'approved_by'").n, 1);
   store.close();
 
-  // 5. reopening is a no-op — no duplicate members, no re-dating
+  // 5. reopening is a no-op with no duplicate members and no re-dating
   const again = new Store({ dbPath: file });
   const members = again.db.prepare('SELECT COUNT(*) AS n FROM project_members').get() as { n: number };
   assert.equal(Number(members.n), 3); // kyle x2 owner + gang member

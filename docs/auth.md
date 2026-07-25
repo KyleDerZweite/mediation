@@ -1,4 +1,4 @@
-# Mediation — Authentication & Authorization
+# Mediation Authentication & Authorization
 
 This document is the auth discovery manifest for the Mediation API. It is served
 at `/auth.md`, and every `401` response advertises it:
@@ -90,11 +90,11 @@ That five-minute window is **freshness, not membership**, and it gates agents
 only. The membership itself stands until GitHub revokes it (webhook) or an
 owner removes it, so a human's dashboard keeps listing and opening a project
 between agent sessions. A project no one has touched for seven days drops out
-of `GET /api/projects` — hidden only: it keeps its history and members,
-answers on its own URL, and returns on the next event. Nothing deletes a
+of `GET /api/projects`, and it is only hidden: it keeps its history and
+members, answers on its own URL, and returns on the next event. Nothing deletes a
 project except `DELETE /api/projects/:p` by an owner.
 
-## Two credential kinds — pick the right one
+## Two credential kinds: pick the right one
 
 | Credential | Who | How to get it | Sent as | Use for |
 | --- | --- | --- | --- | --- |
@@ -102,7 +102,7 @@ project except `DELETE /api/projects/:p` by an owner.
 | **User session cookie** | a human | register + login | `Cookie: mediation_user=<token>` | the dashboard + admin endpoints |
 
 If you are an **agent** scripting the coordination API, use the global device
-token — do not persist a human login/cookie. If you are driving the
+token, and do not persist a human login/cookie. If you are driving the
 **user/admin** endpoints programmatically, log in and persist the cookie.
 
 ## Authorization matrix
@@ -111,7 +111,7 @@ token — do not persist a human login/cookie. If you are driving the
 | --- | --- | --- |
 | PUBLIC | none | `GET /api/health`, mode-specific sign-in/device routes, `POST /api/users/logout`, `GET /api/auth/me`, GitHub callback/webhook, all non-`/api` routes |
 | AGENT-OR-USER | valid Bearer **or** active user cookie | `GET /api/projects` (the response is filtered to what you may see) |
-| PROJECT-MEMBER | member of `:p` (any role), **or** instance admin cookie | everything under `/api/projects/:p/` — sessions, heartbeat, repo, claims, bugs, state, check |
+| PROJECT-MEMBER | member of `:p` (any role), **or** instance admin cookie | everything under `/api/projects/:p/`: sessions, heartbeat, repo, claims, bugs, state, check |
 | PROJECT-OWNER | `owner` of `:p` (or instance admin), human cookie only | `POST/PATCH/DELETE /api/projects/:p/members*`, `DELETE /api/projects/:p` |
 | USER | active user cookie (human only) | `POST /api/projects`, `GET /api/users/me`, `GET/DELETE /api/auth/credentials*` |
 | ADMIN | active user cookie, `role=admin` | `GET /api/users`, `PATCH /api/users/:id`, `DELETE /api/users/:id` |
@@ -123,7 +123,7 @@ public routes.
 deleting a project are human-only: with a valid
 Bearer they answer `403 { "error": "project administration is human-only" }`
 (or `401` where no identity applies). Instance-admin power applies to the
-**cookie** only — an admin's own agent credential has no admin rights.
+**cookie** only, and an admin's own agent credential has no admin rights.
 
 **Who is the actor?** For project authorization the actor is the cookie user
 if present, otherwise the user that owns the Bearer credential. A credential
@@ -164,9 +164,9 @@ The cookie is a 7-day session. Persist and send it as `Cookie: mediation_user=�
 
 | Response | Meaning |
 | --- | --- |
-| `401 { "error": "invalid credentials" }` | wrong password **or** unknown user (identical — no enumeration) |
-| `403 { "error": "account pending approval", "status": "pending" }` | correct password, awaiting admin approval — **no cookie set** |
-| `403 { "error": "account disabled", "status": "disabled" }` | account disabled — **no cookie set** |
+| `401 { "error": "invalid credentials" }` | wrong password **or** unknown user (identical, so there is no enumeration) |
+| `403 { "error": "account pending approval", "status": "pending" }` | correct password, awaiting admin approval, with **no cookie set** |
+| `403 { "error": "account disabled", "status": "disabled" }` | account disabled, with **no cookie set** |
 
 curl example that keeps the cookie in a jar:
 
@@ -183,7 +183,7 @@ GET  /api/users/me    (Cookie)  → 200 { "user": { ... } }   |  401 if no/expir
 POST /api/users/logout          → 200 { "ok": true }        (clears the cookie; idempotent)
 ```
 
-A user disabled or deleted mid-session is invalidated immediately — the next
+A user disabled or deleted mid-session is invalidated immediately, so the next
 request returns `401`.
 
 ## Manual-mode projects and membership
@@ -213,7 +213,7 @@ DELETE /api/projects/:p                             (owner or instance admin) �
 
 ### The two project errors
 
-Not a member of an existing project — **403**:
+Not a member of an existing project, **403**:
 
 ```json
 { "error": "not a member of project \"acme\"", "project": "acme",
@@ -221,7 +221,7 @@ Not a member of an existing project — **403**:
   "docs": "/auth.md" }
 ```
 
-Unknown project — **404**:
+Unknown project, **404**:
 
 ```json
 { "error": "project not found", "project": "ghost",
@@ -253,7 +253,7 @@ curl -H "Authorization: Bearer <token>" http://localhost:4100/api/projects
 `GET /api/auth/me` with the Bearer token validates the credential and reports
 `ownerUsername` (`401` if invalid, revoked, or the owner is gone/disabled).
 Credentials are personal: `GET /api/auth/credentials` returns **only your own**
-credentials — an admin included — each with `ownerUsername` and the
+credentials, an admin included, each with `ownerUsername` and the
 human-facing `ownerDisplayName` (the GitHub login). Revoking is allowed for the
 owner or an admin, else `403`:
 
@@ -280,7 +280,7 @@ PATCH  /api/users/:id  { "role": "admin" | "user" }
 DELETE /api/users/:id                            → 200 { "ok": true }
 ```
 
-- `status` may only be set to `active` or `disabled` — `pending` is never
+- `status` may only be set to `active` or `disabled`, and `pending` is never
   settable (approving = `active`).
 - The **last active admin** cannot be demoted, disabled, or deleted (self
   included) → `409 { "error": "cannot remove the last active admin" }`.
@@ -315,6 +315,6 @@ page). Retrying will not help until they act.
 
 On `403 not a member of project "x"` or `404 project not found`, relay the
 response's `hint` to your human **verbatim** and stop. Do not retry, do not
-switch project ids, and do not create a different project to get around it —
-only an owner (or instance admin) can grant access, from the project's
+switch project ids, and do not create a different project to get around it.
+Only an owner (or instance admin) can grant access, from the project's
 **Members** tab.

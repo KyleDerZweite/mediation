@@ -1,4 +1,4 @@
-// Alpha milestone: private projects + membership. Adversarial by design — the
+// Alpha milestone: private projects + membership. Adversarial by design, since the
 // sweeps below drive every project route from one list, so a route added later
 // is covered automatically (deny-by-default in the middleware).
 import { test } from 'node:test';
@@ -138,7 +138,7 @@ test('a member can remove themselves (leave) but not others', async () => {
   assert.equal((await req('GET', '/api/projects/acme/state', undefined, { cookie: bob.cookie })).status, 403);
 });
 
-test('last owner cannot be demoted or removed — instance admin does not bypass it', async () => {
+test('last owner cannot be demoted or removed, and instance admin does not bypass it', async () => {
   const { req, adminCookie, alice } = await fixture();
   const M = `/api/projects/acme/members/${alice.id}`;
   assert.equal((await req('PATCH', M, { role: 'member' }, { cookie: alice.cookie })).status, 409);
@@ -182,7 +182,7 @@ test('GET /api/projects is scoped: own projects, admin sees all, agent sees its 
   assert.deepEqual(await ids({ token: adminToken }), []); // the admin's AGENT gets no admin powers
 });
 
-test('instance admin overrides membership by cookie only — never through its own agent', async () => {
+test('instance admin overrides membership by cookie only, never through its own agent', async () => {
   const { req, adminCookie, adminToken } = await fixture();
   assert.equal((await req('GET', '/api/projects/acme/state', undefined, { cookie: adminCookie })).status, 200);
   const asAgent = await req('GET', '/api/projects/acme/state', undefined, { token: adminToken });

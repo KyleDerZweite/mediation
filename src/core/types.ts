@@ -1,4 +1,4 @@
-// Domain model. Pure data shapes — no I/O, no HTTP, no persistence here.
+// Domain model. Pure data shapes with no I/O, no HTTP, no persistence here.
 // All timestamps are epoch milliseconds.
 
 export interface RepoState {
@@ -123,7 +123,7 @@ export interface ProjectSummary {
   conflicts: number;
   agents: string[];
   lastActivityAt: number | null;
-  lastUsedAt: number; // last event, else creation — drives the idle-hide rule
+  lastUsedAt: number; // last event, else creation; drives the idle-hide rule
 }
 
 export interface RecentFile {

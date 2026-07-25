@@ -1,4 +1,4 @@
-// Drives clients/mediation-mcp.mjs the way a harness does — over stdio, with a
+// Drives clients/mediation-mcp.mjs the way a harness does, over stdio, with a
 // stub Mediation server. The other suites test the server; nothing tested the
 // client's own tool calls, which is how an unawaited session-creation promise
 // shipped and broke every coordination tool in both auth modes.
@@ -88,7 +88,7 @@ function callTool(name: string, args: Record<string, unknown> = {}): Promise<str
 
 test('mediation_check binds a GitHub session and reports no overlap', async () => {
   const out = await callTool('mediation_check', { files: ['src/app.ts'], intent: 'test' });
-  assert.equal(out, 'No overlapping work detected — clear to proceed.');
+  assert.equal(out, 'No overlapping work detected. Clear to proceed.');
   assert.ok(seen.includes('POST /api/repositories/github/session'), seen.join(', '));
   assert.ok(seen.includes(`GET /api/projects/${PROJECT_ID}/check`), seen.join(', '));
 });

@@ -111,8 +111,8 @@ export function buildApp(store: Store, options: AppOptions = {}): Hono {
   });
 
   // Single enforcement point. Identity is resolved once per request from two
-  // independent sources — a global device Bearer and/or a human
-  // user session cookie — then the route's required level is checked. See the
+  // independent sources, a global device Bearer and/or a human
+  // user session cookie, and then the route's required level is checked. See the
   // authorization matrix in docs/auth.md. A *presented* Bearer must be valid.
   app.use('/api/*', async (c, next) => {
     const auth = c.req.header('authorization');
@@ -137,7 +137,7 @@ export function buildApp(store: Store, options: AppOptions = {}): Hono {
     const p = c.req.path;
     const m = c.req.method === 'HEAD' ? 'GET' : c.req.method; // HEAD inherits GET's tier
 
-    // PUBLIC — no identity required (handlers self-enforce where needed).
+    // PUBLIC: no identity required (handlers self-enforce where needed).
     if (
       (m === 'GET' && p === '/api/health') ||
       (m === 'POST' && (p === '/api/users/register' || p === '/api/users/login' || p === '/api/users/logout'
@@ -147,14 +147,14 @@ export function buildApp(store: Store, options: AppOptions = {}): Hono {
       (m === 'GET' && p === '/api/auth/me')
     ) return next();
 
-    // ADMIN — active session with role=admin.
+    // ADMIN: active session with role=admin.
     if ((m === 'GET' && p === '/api/users') || ((m === 'PATCH' || m === 'DELETE') && p.startsWith('/api/users/'))) {
       if (!user) return unauthorized(c);
       if (user.role !== 'admin') return c.json({ error: 'admin required' }, 403);
       return next();
     }
 
-    // USER — any active session, human only.
+    // USER: any active session, human only.
     if (
       (m === 'GET' && p === '/api/users/me') ||
       (m === 'GET' && p === '/api/auth/credentials') ||
@@ -172,7 +172,7 @@ export function buildApp(store: Store, options: AppOptions = {}): Hono {
         : unauthorized(c);
     }
 
-    // PROJECT-MEMBER — everything under /api/projects/:p/. Deny by default:
+    // PROJECT-MEMBER: everything under /api/projects/:p/. Deny by default:
     // any future route below this prefix is member-gated by construction.
     if (p.startsWith('/api/projects/')) {
       const seg = p.split('/'); // ['', 'api', 'projects', '<pid>', ...]
@@ -245,7 +245,7 @@ export function buildApp(store: Store, options: AppOptions = {}): Hono {
       return next();
     }
 
-    // AGENT-OR-USER — the rest under /api (GET /api/projects; handler filters).
+    // AGENT-OR-USER: the rest under /api (GET /api/projects; handler filters).
     if (cred || user) return next();
     return unauthorized(c);
   });
@@ -619,11 +619,11 @@ export function buildApp(store: Store, options: AppOptions = {}): Hono {
 
   app.get('/', (c) => serveFile(c, path.join(WEB_DIR, 'index.html')));
 
-  // The protocol doc lives at docs/PROTOCOL.md but stays served at /AGENT.md —
-  // that URL is the discovery convention agents are told to fetch.
+  // The protocol doc lives at docs/PROTOCOL.md but stays served at /AGENT.md,
+  // because that URL is the discovery convention agents are told to fetch.
   app.get('/AGENT.md', (c) => serveFile(c, path.join(ROOT, 'docs', 'PROTOCOL.md')));
 
-  // Auth discovery manifest — the URL the 401 WWW-Authenticate hint points at.
+  // Auth discovery manifest, the URL the 401 WWW-Authenticate hint points at.
   app.get('/auth.md', (c) => serveFile(c, path.join(ROOT, 'docs', 'auth.md')));
 
   // ---- installer + agent-machine clients (see AGENTS.md "Clients") ----
