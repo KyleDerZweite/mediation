@@ -42,7 +42,7 @@ input, button { font-family: inherit; }
   border-right: 1px solid #1c2436;
 }
 .brand { display: flex; align-items: center; gap: 11px; padding: 18px 16px 6px; }
-.brand-logo { width: 30px; height: 30px; object-fit: contain; }
+.brand-logo { width: 30px; height: 30px; }
 .brand-text { display: flex; flex-direction: column; line-height: 1.12; }
 .brand-name { font-family: 'Space Grotesk', sans-serif; font-weight: 600; font-size: 16px; color: #f2f5fa; letter-spacing: -.01em; }
 .brand-tag { font-size: 10px; letter-spacing: .15em; text-transform: uppercase; color: #5b6478; }
@@ -438,7 +438,11 @@ input, button { font-family: inherit; }
   border-radius: 14px; padding: 28px 26px; box-shadow: 0 8px 30px rgba(16,24,40,.08);
   display: flex; flex-direction: column; gap: 12px;
 }
-.auth-brand { font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 20px; color: #1f6feb; }
+.auth-brand {
+  display: flex; align-items: center; gap: 9px;
+  font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 20px; color: #17213a;
+}
+.auth-logo { width: 28px; height: 28px; }
 .auth-title { font-size: 15px; font-weight: 600; color: #344054; margin-bottom: 2px; }
 .auth-msg { font-size: 12.5px; color: #475467; background: #f2f6fd; border: 1px solid #dce7fb; border-radius: 8px; padding: 9px 11px; }
 .auth-input { font: inherit; font-size: 14px; padding: 10px 12px; border: 1px solid #d0d5dd; border-radius: 9px; outline: none; }
