@@ -22,7 +22,7 @@ fs.mkdirSync(path.dirname(path.resolve(DB_PATH)), { recursive: true });
 const store = new Store({ dbPath: DB_PATH, sessionTtlMs: SESSION_TTL_MS });
 setInterval(() => store.sweep(), Math.min(SESSION_TTL_MS / 2, 30_000)).unref();
 
-serve({ fetch: buildApp(store, {
+const server = serve({ fetch: buildApp(store, {
   authMode: AUTH_MODE,
   publicUrl: githubConfig?.publicUrl ?? process.env.PUBLIC_URL,
   github,
@@ -32,4 +32,33 @@ serve({ fetch: buildApp(store, {
   console.log(`dashboard: http://localhost:${PORT}/`);
   console.log(`agent instructions: http://localhost:${PORT}/AGENT.md`);
   console.log(`authentication mode: ${AUTH_MODE}`);
-});
+}) as ReturnType<typeof serve> & {
+  closeAllConnections?: () => void;
+  closeIdleConnections?: () => void;
+};
+
+let stopping = false;
+function shutdown(signal: NodeJS.Signals): void {
+  if (stopping) {
+    server.closeAllConnections?.();
+    return;
+  }
+  stopping = true;
+  console.log(`${signal} received; shutting down`);
+  const force = setTimeout(() => {
+    console.error('graceful shutdown timed out; closing remaining connections');
+    server.closeAllConnections?.();
+    store.close();
+    process.exit(1);
+  }, 7_000);
+  force.unref();
+  server.close((error) => {
+    clearTimeout(force);
+    store.close();
+    process.exit(error ? 1 : 0);
+  });
+  server.closeIdleConnections?.();
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));

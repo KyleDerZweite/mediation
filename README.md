@@ -163,7 +163,7 @@ The database migrates itself on start (additive schema + one-shot backfill), so
 an upgrade is: back up, pull, rebuild.
 
 ```bash
-podman-compose stop mediation && cp data/mediation.db data/mediation.db.bak && podman-compose up -d --build mediation
+podman-compose down && cp data/mediation.db data/mediation.db.bak && podman-compose up -d --build
 git pull                       # (before the rebuild, if you deploy from source)
 ```
 

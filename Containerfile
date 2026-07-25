@@ -17,6 +17,7 @@ COPY docs ./docs
 
 ENV DB_PATH=/data/mediation.db
 EXPOSE 4100
+STOPSIGNAL SIGTERM
 
 # ponytail: runs as root; USER node needs /data chown handling — add if image is ever exposed beyond the tunnel
 

@@ -20,6 +20,8 @@ services:
       - ./secrets/github-app.pem:/run/secrets/github-app.pem:ro,Z
     env_file: .env
     restart: unless-stopped
+    stop_signal: SIGTERM
+    stop_grace_period: 10s
     healthcheck:
       # alpine node image has no curl/wget; use node's built-in fetch.
       test: ["CMD", "node", "-e", "fetch(`http://127.0.0.1:$${process.env.PORT || 4100}/api/health`).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
@@ -33,7 +35,8 @@ services:
   # configured in the Pangolin dashboard, not here. Crash-loops harmlessly
   # until the NEWT_* credentials are set.
   newt:
-    image: docker.io/fosrl/newt
+    image: docker.io/fosrl/newt:latest
+    pull_policy: always
     environment:
       PANGOLIN_ENDPOINT: ${PANGOLIN_ENDPOINT}
       NEWT_ID: ${NEWT_ID}
