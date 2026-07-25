@@ -13,8 +13,10 @@ services:
     build:
       context: .
       dockerfile: Containerfile
-    ports:
-      - "${PORT:-4100}:${PORT:-4100}"
+    # Internal-only: Newt reaches this service as mediation:4100 over the
+    # Compose network. Never publish the production API on the host.
+    expose:
+      - "4100"
     volumes:
       - ./data:/data:Z
       - ./secrets/github-app.pem:/run/secrets/github-app.pem:ro,Z

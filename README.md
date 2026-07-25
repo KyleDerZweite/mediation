@@ -174,11 +174,12 @@ Keep a rolling backup — SQLite is a single file:
 0 3 * * * cp /path/to/mediation/data/mediation.db /path/to/backups/mediation-$(date +\%F).db
 ```
 
-Newt values come from your Pangolin dashboard (Sites → Add Site → Newt); point
-the Pangolin site at `mediation:4100`. SQLite data persists in `./data`.
-Mediation runs standalone: without Newt credentials the tunnel container just
-crash-loops while mediation keeps serving on `:4100` — or run only it with
-`podman-compose up -d mediation`.
+Newt values come from your Pangolin dashboard (Sites → Add Site → Newt). For
+the public resource target select method `HTTP`, hostname `mediation`, and port
+`4100`. Do not add the `http://` prefix to the hostname and do not use
+`localhost`—inside Newt, `localhost` is the Newt container itself. Production
+does not publish port 4100 on the host; only Newt can reach it through the
+Compose network. SQLite data persists in `./data`.
 
 ## Users & auth
 
