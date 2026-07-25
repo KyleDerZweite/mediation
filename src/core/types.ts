@@ -123,6 +123,7 @@ export interface ProjectSummary {
   conflicts: number;
   agents: string[];
   lastActivityAt: number | null;
+  lastUsedAt: number; // last event, else creation — drives the idle-hide rule
 }
 
 export interface RecentFile {

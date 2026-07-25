@@ -18,6 +18,11 @@ import type {
 
 export const DEFAULT_SESSION_TTL_MS = 300_000;
 export const DEFAULT_CLAIM_IDLE_TTL_MS = 45 * 60_000;
+// A project nobody has touched for this long drops out of the dashboard list.
+// It is only HIDDEN: the row, its history and its membership all stay, and it
+// reappears the moment an agent connects again. Projects are never deleted
+// automatically — only an owner's explicit DELETE removes one.
+export const PROJECT_IDLE_HIDE_MS = 7 * 24 * 60 * 60_000;
 
 const EVENTS_CAP = 200;
 
@@ -115,6 +120,7 @@ export interface PublicUser {
   id: string;
   username: string;
   displayName: string; // what humans are shown: the GitHub login, original case
+  avatarUrl: string | null; // GitHub profile picture, by immutable user id
   role: 'user' | 'admin';
   status: 'pending' | 'active' | 'disabled';
   createdAt: number;
@@ -123,12 +129,16 @@ export interface PublicUser {
 // `username` stays the normalized, case-insensitive handle the API matches on
 // (`gh-octocat`); humans only ever see the GitHub login they know (`octocat`).
 const displayName = (r: Row): string => (r.github_login as string) || (r.username as string);
+// Keyed by the numeric GitHub id, so a rename or a new picture still resolves.
+const avatarUrl = (r: Row): string | null =>
+  (r.github_user_id ? `https://avatars.githubusercontent.com/u/${r.github_user_id as string}?v=4` : null);
 
 function publicUser(r: Row): PublicUser {
   return {
     id: r.id as string,
     username: r.username as string,
     displayName: displayName(r),
+    avatarUrl: avatarUrl(r),
     role: r.role as PublicUser['role'],
     status: r.status as PublicUser['status'],
     createdAt: Number(r.created_at),
@@ -159,6 +169,7 @@ export interface ProjectMember {
   userId: string;
   username: string;
   displayName: string;
+  avatarUrl: string | null;
   role: MemberRole;
   createdAt: number;
   authorizationSource?: 'manual' | 'github-app';
@@ -771,20 +782,28 @@ export class Store {
     return row ? (row.role as MemberRole) : null;
   }
 
-  githubMemberRole(projectId: string, userId: string | null): MemberRole | null {
+  /* Membership and *freshness* are different questions. The row itself is the
+     membership: it survives until GitHub says otherwise (a revocation webhook
+     deletes it) or an owner removes it. `authorization_expires_at` only says
+     how recently GitHub confirmed the permission, and gates AGENTS — every
+     agent session re-verifies against GitHub anyway. Humans reading their own
+     dashboard must not lose their projects five minutes after the last agent
+     disconnected, so they pass `fresh: false`. */
+  githubMemberRole(projectId: string, userId: string | null, { fresh = true } = {}): MemberRole | null {
     if (!userId) return null;
     const row = this.db.prepare(`SELECT role FROM project_members WHERE project_id = ? AND user_id = ?
-      AND authorization_source = 'github-app' AND authorization_expires_at > ?`)
-      .get(projectId, userId, Date.now()) as Row | undefined;
+      AND authorization_source = 'github-app'${fresh ? ' AND authorization_expires_at > ?' : ''}`)
+      .get(...(fresh ? [projectId, userId, Date.now()] : [projectId, userId])) as Row | undefined;
     return row ? row.role as MemberRole : null;
   }
 
-  memberProjectIds(userId: string | null): string[] {
+  memberProjectIds(userId: string | null, { fresh = true } = {}): string[] {
     if (!userId) return [];
+    const freshOnly = `AND (authorization_source IS NULL OR authorization_source != 'github-app'
+        OR authorization_expires_at IS NULL OR authorization_expires_at > ?)`;
     return (this.db.prepare(`SELECT project_id FROM project_members WHERE user_id = ?
-      AND (authorization_source IS NULL OR authorization_source != 'github-app'
-        OR authorization_expires_at IS NULL OR authorization_expires_at > ?) ORDER BY project_id`)
-      .all(userId, Date.now()) as Row[]).map((r) => r.project_id as string);
+      ${fresh ? freshOnly : ''} ORDER BY project_id`)
+      .all(...(fresh ? [userId, Date.now()] : [userId])) as Row[]).map((r) => r.project_id as string);
   }
 
   // Creation-time slug rule; legacy ids keep working but no new one can be odd.
@@ -868,8 +887,9 @@ export class Store {
       VALUES (?, ?, 'github-only', ?, ?, ?, ?, 'github', ?, ?, 'authorized')`)
       .run(id, username, bootstrap ? 'admin' : 'user', bootstrap ? 'active' : 'pending',
         t, t, identity.githubUserId, identity.login);
-    return { id, username, displayName: identity.login, role: bootstrap ? 'admin' : 'user',
-      status: bootstrap ? 'active' : 'pending', createdAt: t };
+    return { id, username, displayName: identity.login,
+      avatarUrl: `https://avatars.githubusercontent.com/u/${identity.githubUserId}?v=4`,
+      role: bootstrap ? 'admin' : 'user', status: bootstrap ? 'active' : 'pending', createdAt: t };
   }
 
   getUserByGithubId(githubUserId: string): PublicUser | null {
@@ -927,13 +947,13 @@ export class Store {
 
   grantGithubProjectAccess(projectId: string, userId: string, permission: string, expiresAt: number): ProjectMember {
     const role: MemberRole = permission.toUpperCase() === 'ADMIN' ? 'owner' : 'member';
-    const user = this.db.prepare('SELECT username, github_login FROM users WHERE id = ? AND status = ?').get(userId, 'active') as Row | undefined;
+    const user = this.db.prepare('SELECT username, github_login, github_user_id FROM users WHERE id = ? AND status = ?').get(userId, 'active') as Row | undefined;
     if (!user) notFound('user not found');
     const existing = this.db.prepare(`SELECT authorization_source, role, created_at FROM project_members
       WHERE project_id = ? AND user_id = ?`).get(projectId, userId) as Row | undefined;
     if (existing && existing.authorization_source !== 'github-app') {
       return { userId, username: user.username as string, displayName: displayName(user),
-        role: existing.role as MemberRole,
+        avatarUrl: avatarUrl(user), role: existing.role as MemberRole,
         createdAt: Number(existing.created_at), authorizationSource: 'manual' };
     }
     const t = Date.now();
@@ -943,7 +963,7 @@ export class Store {
       repository_permission = excluded.repository_permission, authorization_expires_at = excluded.authorization_expires_at`)
       .run(projectId, userId, role, t, permission, expiresAt);
     return { userId, username: user.username as string, displayName: displayName(user),
-      role, createdAt: t, authorizationSource: 'github-app',
+      avatarUrl: avatarUrl(user), role, createdAt: t, authorizationSource: 'github-app',
       repositoryPermission: permission, authorizationExpiresAt: expiresAt };
   }
 
@@ -959,12 +979,13 @@ export class Store {
 
   listMembers(projectId: string): ProjectMember[] {
     return (this.db.prepare(`SELECT m.user_id, m.role, m.created_at, m.authorization_source,
-      m.repository_permission, m.authorization_expires_at, u.username, u.github_login
+      m.repository_permission, m.authorization_expires_at, u.username, u.github_login, u.github_user_id
       FROM project_members m JOIN users u ON u.id = m.user_id
       WHERE m.project_id = ? ORDER BY m.role, u.username`).all(projectId) as Row[]).map((r) => ({
         userId: r.user_id as string,
         username: r.username as string,
         displayName: displayName(r),
+        avatarUrl: avatarUrl(r),
         role: r.role as MemberRole,
         createdAt: Number(r.created_at),
         authorizationSource: r.authorization_source === 'github-app' ? 'github-app' : 'manual',
@@ -978,7 +999,7 @@ export class Store {
     try { username = normalizeUsername(rawUsername); } catch { /* may still be a GitHub login */ }
     // Humans type the name they see, which is the GitHub login, not the
     // normalized handle the account was created with.
-    const user = this.db.prepare(`SELECT id, username, github_login FROM users
+    const user = this.db.prepare(`SELECT id, username, github_login, github_user_id FROM users
       WHERE (username = ? OR LOWER(github_login) = LOWER(?)) AND status = 'active'`)
       .get(username, rawUsername.trim()) as Row | undefined;
     if (!user) notFound('user not found'); // only active users can be added
@@ -986,7 +1007,7 @@ export class Store {
     const t = Date.now();
     this.addMemberRow(projectId, user.id as string, role, t);
     return { userId: user.id as string, username: user.username as string,
-      displayName: displayName(user), role, createdAt: t };
+      displayName: displayName(user), avatarUrl: avatarUrl(user), role, createdAt: t };
   }
 
   // The last remaining owner may not be demoted or removed — same shape as the
@@ -1006,9 +1027,10 @@ export class Store {
     }
     this.db.prepare('UPDATE project_members SET role = ? WHERE project_id = ? AND user_id = ?')
       .run(role, projectId, userId);
-    const row = this.db.prepare('SELECT username, github_login FROM users WHERE id = ?').get(userId) as Row | undefined;
+    const row = this.db.prepare('SELECT username, github_login, github_user_id FROM users WHERE id = ?').get(userId) as Row | undefined;
     const username = (row?.username as string) ?? userId;
-    return { userId, username, displayName: row ? displayName(row) : username, role, createdAt: Date.now() };
+    return { userId, username, displayName: row ? displayName(row) : username,
+      avatarUrl: row ? avatarUrl(row) : null, role, createdAt: Date.now() };
   }
 
   removeMember(projectId: string, userId: string): { ok: true } {
@@ -1115,7 +1137,7 @@ export class Store {
         SELECT p.id, ?, 'owner', ? FROM projects p WHERE NOT EXISTS (
           SELECT 1 FROM project_members m WHERE m.project_id = p.id AND m.role = 'owner')`).run(id, t);
     }
-    return { user: { id, username, displayName: username, role, status, createdAt: t }, bootstrap };
+    return { user: { id, username, displayName: username, avatarUrl: null, role, status, createdAt: t }, bootstrap };
   }
 
   async loginUser(rawUsername: string, password: string): Promise<LoginResult> {
@@ -1337,13 +1359,14 @@ export class Store {
 
   // Scoped to what the actor may see: their memberships, or everything for an
   // instance admin (rows they are not a member of come back with role: null).
-  listProjects(userId: string | null, isAdmin: boolean): ProjectSummary[] {
+  listProjects(userId: string | null, isAdmin: boolean, { fresh = true } = {}): ProjectSummary[] {
     this.sweep();
     const ids = isAdmin
       ? (this.db.prepare('SELECT id FROM projects ORDER BY id').all() as Row[]).map((r) => r.id as string)
-      : this.memberProjectIds(userId);
+      : this.memberProjectIds(userId, { fresh });
+    const idleBefore = Date.now() - PROJECT_IDLE_HIDE_MS;
     return ids.map((id) => {
-      const project = this.db.prepare('SELECT full_name FROM projects WHERE id = ?').get(id) as Row | undefined;
+      const project = this.db.prepare('SELECT full_name, created_at FROM projects WHERE id = ?').get(id) as Row | undefined;
       const sessions = (this.db.prepare('SELECT agent FROM sessions WHERE projectId = ?').all(id) as Row[]);
       const claims = this.activeClaims(id);
       const openBugs = this.db.prepare("SELECT COUNT(*) AS n FROM bugs WHERE projectId = ? AND status != 'fixed'")
@@ -1360,8 +1383,10 @@ export class Store {
         conflicts: pairConflicts(claims).length,
         agents: [...new Set(sessions.map((r) => r.agent as string))],
         lastActivityAt: lastEvent.at == null ? null : Number(lastEvent.at),
+        // A project with no events yet counts as used since it was created.
+        lastUsedAt: lastEvent.at == null ? Number(project?.created_at ?? 0) : Number(lastEvent.at),
       };
-    });
+    }).filter((p) => p.sessions > 0 || p.lastUsedAt >= idleBefore);
   }
 
   // ---- expiry ----

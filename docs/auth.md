@@ -86,6 +86,14 @@ and carries `authorizationSource: "github"` metadata. The verification expires
 after five minutes and is refreshed by heartbeat. Expired or revoked access
 ends the session and releases its live claims.
 
+That five-minute window is **freshness, not membership**, and it gates agents
+only. The membership itself stands until GitHub revokes it (webhook) or an
+owner removes it, so a human's dashboard keeps listing and opening a project
+between agent sessions. A project no one has touched for seven days drops out
+of `GET /api/projects` — hidden only: it keeps its history and members,
+answers on its own URL, and returns on the next event. Nothing deletes a
+project except `DELETE /api/projects/:p` by an owner.
+
 ## Two credential kinds — pick the right one
 
 | Credential | Who | How to get it | Sent as | Use for |

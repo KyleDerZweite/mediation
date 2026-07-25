@@ -39,7 +39,10 @@ function serveFile(c: Context, filePath: string): Response {
     return c.json({ error: 'not found' }, 404);
   }
   const type = MIME[path.extname(filePath).toLowerCase()] ?? 'application/octet-stream';
-  return c.body(new Uint8Array(buf), 200, { 'content-type': type });
+  // Everything served here (dashboard, installer, client, docs) is small and
+  // versionless: a proxy or browser caching it hands users a stale app or an
+  // outdated install script after a deploy. Always revalidate.
+  return c.body(new Uint8Array(buf), 200, { 'content-type': type, 'cache-control': 'no-cache' });
 }
 
 const USER_COOKIE = 'mediation_user';
@@ -217,7 +220,12 @@ export function buildApp(store: Store, options: AppOptions = {}): Hono {
         return next();
       }
 
-      const role = githubProject ? store.githubMemberRole(pid, actor) : store.memberRole(pid, actor);
+      // A human's own dashboard keeps working on an unexpired membership even
+      // when the last GitHub verification has gone stale; an agent's device
+      // bearer still needs a fresh grant (its session creation re-verifies).
+      const role = githubProject
+        ? store.githubMemberRole(pid, actor, { fresh: !user })
+        : store.memberRole(pid, actor);
       if (!role && !instanceAdmin) {
         return c.json({
           error: `not a member of project "${pid}"`, project: pid, hint: NOT_A_MEMBER_HINT, docs: AUTH_MD,
@@ -464,10 +472,11 @@ export function buildApp(store: Store, options: AppOptions = {}): Hono {
 
   app.get('/api/projects', (c) => {
     const actor = actorId(c);
-    const projects = store.listProjects(actor, authMode === 'manual' && getUser(c)?.role === 'admin');
+    const fresh = !getUser(c); // see the middleware: humans read through a stale grant
+    const projects = store.listProjects(actor, authMode === 'manual' && getUser(c)?.role === 'admin', { fresh });
     return c.json(authMode === 'github-app'
       ? projects.filter((project) => !!store.getGithubProjectById(project.id)
-        && !!store.githubMemberRole(project.id, actor))
+        && !!store.githubMemberRole(project.id, actor, { fresh }))
       : projects);
   });
 

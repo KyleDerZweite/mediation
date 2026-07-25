@@ -160,7 +160,10 @@ Enforcement summary (all of it in the one `/api/*` middleware in
   directory-prefix match, case-insensitive component match, ≥2 shared
   significant task/intent tokens.
 - Sessions expire after `SESSION_TTL_MS` (default 300 000) without heartbeat;
-  their claims are released. Idle claims expire after 45 min. Completed claims
+  their claims are released. Idle claims expire after 45 min. Projects are
+  never expired or deleted automatically: after `PROJECT_IDLE_HIDE_MS`
+  (7 days) with no activity one is merely hidden from `GET /api/projects`,
+  and reappears on the next event. Completed claims
   are kept (`status: 'done'`).
 - Errors: JSON `{ error }` with proper status; validation failures are 400 with
   Zod issue details.

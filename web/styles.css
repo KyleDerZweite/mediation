@@ -47,13 +47,6 @@ input, button { font-family: inherit; }
 .brand-name { font-family: 'Space Grotesk', sans-serif; font-weight: 600; font-size: 16px; color: #f2f5fa; letter-spacing: -.01em; }
 .brand-tag { font-size: 10px; letter-spacing: .15em; text-transform: uppercase; color: #5b6478; }
 
-.conn-chip {
-  margin: 12px 14px 4px; display: flex; align-items: center; gap: 8px;
-  background: #141b2d; border: 1px solid #1f2942; border-radius: 8px; padding: 8px 10px;
-}
-.conn-label { font-size: 11.5px; color: #9aa3b5; }
-.conn-host { margin-left: auto; font-size: 11px; color: #5b6478; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 96px; }
-
 .side-nav { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px 4px; }
 .side-nav-item {
   display: flex; align-items: center; gap: 11px; padding: 8px 10px;
@@ -83,6 +76,7 @@ input, button { font-family: inherit; }
 
 .side-footer { border-top: 1px solid #1c2436; padding: 12px 14px; display: flex; align-items: center; gap: 10px; }
 .side-avatar {
+  position: relative; overflow: hidden;
   width: 30px; height: 30px; border-radius: 50%;
   background: linear-gradient(135deg, #2fb6e6, #2f6bed);
   display: flex; align-items: center; justify-content: center;
@@ -91,6 +85,11 @@ input, button { font-family: inherit; }
 .side-footer-text { display: flex; flex-direction: column; line-height: 1.25; min-width: 0; }
 .side-footer-name { font-size: 12.5px; color: #e6ebf3; }
 .side-footer-role { font-size: 11px; color: #6b7488; }
+.side-footer .logout-btn {
+  margin-left: auto; font-size: 11.5px; color: #9aa3b5;
+  background: #141b2d; border-color: #1f2942; padding: 4px 9px;
+}
+.side-footer .logout-btn:hover { background: #182136; color: #dbe2ec; }
 
 /* ---------- content / topbar ---------- */
 .content { flex: 1; display: flex; flex-direction: column; min-width: 0; }
@@ -110,8 +109,6 @@ input, button { font-family: inherit; }
   padding: 0 10px 0 30px; font-size: 12.5px; color: #101828; outline: none; background: #f9fafb;
 }
 .search-input:focus { border-color: #1f6feb; background: #fff; }
-.sync-chip { display: flex; align-items: center; gap: 7px; font-size: 12px; color: #667085; white-space: nowrap; }
-
 .main { flex: 1; overflow: auto; min-height: 0; }
 
 /* ---------- overview ---------- */
@@ -201,7 +198,10 @@ input, button { font-family: inherit; }
   width: 34px; height: 34px; border-radius: 50%;
   display: flex; align-items: center; justify-content: center;
   font-size: 12px; font-weight: 600; color: #fff; flex: 0 0 auto;
+  position: relative; overflow: hidden;
 }
+/* Sits on top of the initials, so a blocked/404 GitHub avatar falls back. */
+.avatar-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 .claim-who { flex: 1 0 190px; }
 .claim-who-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .claim-name { font-size: 14px; font-weight: 600; }
@@ -427,14 +427,74 @@ input, button { font-family: inherit; }
 .auth-toggle { font-size: 12.5px; color: #667085; text-align: center; }
 .auth-toggle a { color: #1f6feb; text-decoration: none; }
 
-.user-chip { display: flex; align-items: center; gap: 8px; }
-.user-name { font-size: 13px; font-weight: 600; color: #344054; }
-.user-role { font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; color: #1f6feb; background: #eef4fe; border-radius: 8px; padding: 2px 7px; }
 .logout-btn { font: inherit; font-size: 12px; color: #475467; background: #f2f4f7; border: 1px solid #e4e7ec; border-radius: 7px; padding: 5px 11px; cursor: pointer; }
 .logout-btn:hover { background: #e9ecf1; }
 
-.users-table .users-row { grid-template-columns: 2fr 1fr 1fr 1fr 2.4fr; }
-.user-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.users-table .users-row { grid-template-columns: 2.4fr 1.3fr 1fr 1fr 1.1fr; align-items: center; }
+.user-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
+.user-act-btn.primary { color: #fff; background: #1f6feb; border-color: #1f6feb; }
+.user-act-btn.primary:hover { background: #1a5fd0; }
+
+.cell-user { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.cell-user-text { display: flex; flex-direction: column; line-height: 1.3; min-width: 0; }
+.cell-user-name { font-size: 13px; font-weight: 600; color: #101828; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cell-user-handle { font-size: 11px; color: #98a2b3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cell-role { display: flex; align-items: center; gap: 4px; }
+
+.role-chip {
+  display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 500;
+  border-radius: 8px; padding: 3px 9px 3px 7px; text-transform: capitalize;
+}
+.role-admin { color: #6941c6; background: #f4f0fe; }
+.role-user { color: #475467; background: #eef1f6; }
+
+.icon-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; border: 1px solid transparent; border-radius: 7px;
+  background: transparent; cursor: pointer; color: #667085;
+}
+.icon-btn:hover { background: #eef1f6; border-color: #e4e7ec; }
+
+/* ---- row menus (role editor, overflow) ---- */
+.menu-wrap { position: relative; display: inline-flex; }
+.menu-pop {
+  position: absolute; top: 30px; left: 0; z-index: 20; min-width: 172px;
+  background: #fff; border: 1px solid #e4e7ec; border-radius: 10px; padding: 5px;
+  box-shadow: 0 14px 34px -18px rgba(16,24,40,.5); display: flex; flex-direction: column; gap: 2px;
+}
+.menu-pop-right { left: auto; right: 0; }
+.menu-head { font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: #98a2b3; padding: 5px 8px 3px; }
+.menu-item {
+  display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+  font: inherit; font-size: 12.5px; color: #344054; background: transparent;
+  border: none; border-radius: 7px; padding: 7px 8px; cursor: pointer; text-transform: capitalize;
+}
+.menu-item:hover { background: #f2f4f7; }
+.menu-item.selected { color: #1f6feb; font-weight: 600; }
+.menu-item.selected svg:last-child { margin-left: auto; }
+.menu-item.danger { color: #b42318; text-transform: none; }
+.menu-item.danger:hover { background: #fdf1f0; }
+.menu-item.danger.armed { background: #e11d48; color: #fff; }
+
+/* ---- filters ---- */
+.filter-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0 0 14px; }
+.filter-search { position: relative; display: flex; align-items: center; }
+.filter-search-icon { position: absolute; left: 9px; display: flex; }
+.filter-input {
+  font: inherit; font-size: 12.5px; color: #101828; background: #fff;
+  border: 1px solid #d0d5dd; border-radius: 8px; padding: 6px 10px 6px 29px; width: 200px;
+}
+.filter-input:focus { outline: 2px solid #b9d3ff; outline-offset: 0; border-color: #1f6feb; }
+.filter-group { display: flex; align-items: center; gap: 4px; background: #eef1f6; border-radius: 9px; padding: 3px; }
+.filter-pill {
+  display: inline-flex; align-items: center; gap: 6px; font: inherit; font-size: 11.5px;
+  color: #475467; background: transparent; border: none; border-radius: 7px;
+  padding: 4px 9px; cursor: pointer; text-transform: capitalize;
+}
+.filter-pill:hover { color: #101828; }
+.filter-pill.active { background: #fff; color: #101828; font-weight: 600; box-shadow: 0 1px 2px rgba(16,24,40,.08); }
+.filter-count { font-size: 10.5px; color: #98a2b3; font-weight: 500; }
+.filter-pill.active .filter-count { color: #1f6feb; }
 .user-act-btn { font: inherit; font-size: 11.5px; color: #344054; background: #f2f4f7; border: 1px solid #e4e7ec; border-radius: 7px; padding: 4px 9px; cursor: pointer; }
 .user-act-btn:hover { background: #e6e9ef; }
 .user-act-btn.danger { color: #98322c; background: #fdf1f0; border-color: #f2d4d1; }
@@ -445,7 +505,6 @@ input, button { font-family: inherit; }
 .ustatus-disabled { color: #98a2b3; background: #eef1f6; }
 
 /* ---- Alpha: project creation and membership ---- */
-.side-footer-version { margin-left: auto; font-size: 10px; color: #5b6478; }
 .create-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 14px; }
 .create-input {
   font: inherit; font-size: 12.5px; color: #101828; background: #fff;

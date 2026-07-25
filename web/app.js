@@ -27,6 +27,18 @@ function initials(name) {
 
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
+// GitHub profile picture when we have one, initials otherwise. The <img> is
+// laid over the initials, so a blocked or 404 avatar degrades to them.
+function avatar(name, url, size = 30) {
+  const style = `width:${size}px;height:${size}px;font-size:${Math.round(size / 2.7)}px`;
+  return `<span class="avatar" style="${style};background:${AVATAR_FALLBACK}">${esc(initials(name))}${
+    url ? `<img class="avatar-img" src="${esc(url)}" alt="" loading="lazy" onerror="this.remove()">` : ''}</span>`;
+}
+
+const ROLE_ICON = { admin: 'shield', user: 'person' };
+const roleChip = (role) => `<span class="role-chip role-${esc(role)}">${
+  icon(ROLE_ICON[role] || 'person', 'currentColor', 13)}${esc(role)}</span>`;
+
 /* ---------------- DOM morphing ----------------
    Patch a container toward new HTML instead of replacing it wholesale.
    Unchanged nodes are left alone, so CSS animations don't restart, scroll
@@ -85,6 +97,10 @@ const ICON_DEFS = {
   branch: [['line', 6, 3, 6, 15], ['circle', 18, 6, 3], ['circle', 6, 18, 3], ['path', 'M18 9a9 9 0 0 1-9 9']],
   plug: [['path', 'M9 2v6'], ['path', 'M15 2v6'], ['path', 'M7 8h10v3a5 5 0 0 1-10 0z'], ['path', 'M12 16v6']],
   check: [['polyline', '4 12 10 18 20 6']],
+  person: [['circle', 12, 8, 3.6], ['path', 'M5 20a7 7 0 0 1 14 0']],
+  pencil: [['path', 'M4 20h4L19 9a2.1 2.1 0 0 0-3-3L5 17z'], ['line', 14.5, 6.5, 17.5, 9.5]],
+  dots: [['circle', 12, 5, 1.4], ['circle', 12, 12, 1.4], ['circle', 12, 19, 1.4]],
+  x: [['line', 6, 6, 18, 18], ['line', 18, 6, 6, 18]],
 };
 
 function icon(name, color = 'currentColor', size = 18, width = 1.75) {
@@ -151,6 +167,8 @@ const state = {
   authMsg: '',             // message shown on the login/register card
   copied: null,            // key of the element that just copied, for feedback
   armed: null,             // key of a destructive button armed for its second click
+  menu: null,              // key of the open row menu (role editor / overflow)
+  userFilter: { q: '', role: 'all', status: 'all' },
   version: '',             // server version, shown in the sidebar footer
   lastSyncAt: null,
   misses: 0,
@@ -242,21 +260,17 @@ async function refresh() {
 
 /* ---------------- header + sidebar ---------------- */
 
-function renderConnection() {
+// Connection health is not chrome: it belongs on the Settings health panel,
+// where someone goes when they suspect the server is down.
+function connectionHealth() {
   const stale = !state.everSynced || state.misses >= 2;
-  const dotClass = state.everSynced
-    ? (stale ? 'dot dot-stale' : 'dot dot-ok pulse')
-    : 'dot dot-idle';
-  $('connDot').className = dotClass;
-  $('connLabel').textContent = !state.everSynced
-    ? (state.misses >= 2 ? 'API unreachable' : 'Connecting…')
-    : (stale ? 'API stale' : 'API connected');
-  $('connHost').textContent = location.host || 'local file';
-
-  $('syncDot').className = stale ? 'dot dot-stale' : 'dot dot-ok pulse';
-  $('syncLabel').textContent = state.lastSyncAt
-    ? `Synced ${ago(state.lastSyncAt)} ago`
-    : 'Syncing…';
+  return {
+    stale,
+    label: !state.everSynced
+      ? (state.misses >= 2 ? 'API unreachable' : 'Connecting…')
+      : (stale ? 'API stale' : 'API connected'),
+    synced: state.lastSyncAt ? `${ago(state.lastSyncAt)} ago` : 'never',
+  };
 }
 
 const NAV = [
@@ -669,8 +683,14 @@ function renderMembersTab(pid) {
     }
     if (you) acts.push(mBtn('leave', pid, m.userId, 'Leave', true));
     return `<div class="table-row users-row">
-      <span class="cell-agent">${esc(m.displayName || m.username)}${you ? ' <span class="you-tag">you</span>' : ''}</span>
-      <span>${esc(m.role)}</span>
+      <span class="cell-user">
+        ${avatar(m.displayName || m.username, m.avatarUrl, 28)}
+        <span class="cell-user-text">
+          <span class="cell-user-name">${esc(m.displayName || m.username)}${you ? ' <span class="you-tag">you</span>' : ''}</span>
+          <span class="cell-user-handle mono">${esc(m.username)}</span>
+        </span>
+      </span>
+      <span>${roleChip(m.role)}</span>
       <span>${ago(m.createdAt)} ago</span>
       <span></span>
       <span class="user-actions">${acts.join('')}</span>
@@ -730,7 +750,7 @@ function renderDeviceCredentials() {
   const now = Date.now();
   const creds = state.authCredentials.length
     ? state.authCredentials.map((cr) => `<div class="pair-row">
-        <span class="avatar" style="background:${AVATAR_FALLBACK}">${esc(initials(cr.agent))}</span>
+        ${avatar(cr.ownerDisplayName || cr.agent, state.me?.avatarUrl, 34)}
         <div class="pair-who">
           <div class="pair-agent">${esc(cr.agent)}${cr.developer ? ` <span class="pair-dev">for ${esc(cr.developer)}</span>` : ''}</div>
           <div class="pair-meta">${esc(cr.ownerDisplayName || cr.ownerUsername || 'unbound')}${cr.machine ? ' · ' + esc(cr.machine) : ''} · signed in ${ago(cr.createdAt, now)} ago · last used ${ago(cr.lastUsedAt, now)} ago</div>
@@ -844,14 +864,29 @@ function renderSettings() {
     '# claim the work — overlaps come back as warnings, never locks',
     `mediation-agent claim --intent "Fix session expiry" --files src/server/app.ts`,
   ].join('\n');
-  const stale = !state.everSynced || state.misses >= 2;
+  const health = connectionHealth();
 
   return `<div class="view-settings">
     <div class="dark-panel">
       <div class="dark-panel-head">
+        <span class="dp-icon">${icon('activity', '#8fc0ff', 18)}</span>
+        <span class="dp-title">Health</span>
+        <span class="dp-live${health.stale ? ' is-stale' : ''}"><span class="dot ${health.stale ? 'dot-stale' : 'dot-ok pulse'}"></span>${esc(health.label)}</span>
+      </div>
+      <div class="dp-grid">
+        <div><div class="dp-key">Server</div><div class="dp-val">${esc(origin)}</div></div>
+        <div><div class="dp-key">Version</div><div class="dp-val">${state.version ? `v${esc(state.version)}` : '—'}</div></div>
+        <div><div class="dp-key">Last sync</div><div class="dp-val">${esc(health.synced)}</div></div>
+        <div><div class="dp-key">Auth mode</div><div class="dp-val">${esc(state.serverAuthMode)}</div></div>
+      </div>
+      <div class="dp-note" style="margin:0">The dashboard polls <span class="mono">/api</span> every 3 s.
+        <a href="/api/health" target="_blank" rel="noopener">/api/health</a> is the raw endpoint.</div>
+    </div>
+
+    <div class="dark-panel">
+      <div class="dark-panel-head">
         <span class="dp-icon">${icon('plug', '#8fc0ff', 18)}</span>
         <span class="dp-title">Connect an agent</span>
-        <span class="dp-live${stale ? ' is-stale' : ''}"><span class="dot ${stale ? 'dot-stale' : 'dot-ok pulse'}"></span>${stale ? 'Stale' : 'Live'}</span>
       </div>
       <div class="dp-grid">
         <div><div class="dp-key">Server URL</div><div class="dp-val">${esc(origin)}</div></div>
@@ -886,31 +921,114 @@ function renderSettings() {
 
 /* ---------------- users (admin) ---------------- */
 
-const uBtn = (act, id, label, danger) =>
-  `<button class="user-act-btn${danger ? ' danger' : ''}" type="button" data-uaction="${act}" data-uid="${esc(id)}">${label}</button>`;
+const USER_STATUS = ['pending', 'active', 'disabled'];
+
+// One row action. Rare and destructive ones live in the overflow menu, so the
+// row itself only ever shows what an admin actually reaches for: approving.
+const uItem = (act, id, label, danger) =>
+  `<button class="menu-item${danger ? ' danger' : ''}" type="button" data-uaction="${act}" data-uid="${esc(id)}">${label}</button>`;
+
+function userMatchesFilter(u) {
+  const f = state.userFilter;
+  if (f.role !== 'all' && u.role !== f.role) return false;
+  if (f.status !== 'all' && u.status !== f.status) return false;
+  const q = f.q.trim().toLowerCase();
+  return !q || `${u.displayName} ${u.username}`.toLowerCase().includes(q);
+}
+
+function userFilterBar() {
+  const f = state.userFilter;
+  const counts = state.users.reduce((acc, u) => {
+    acc.role[u.role] = (acc.role[u.role] || 0) + 1;
+    acc.status[u.status] = (acc.status[u.status] || 0) + 1;
+    return acc;
+  }, { role: {}, status: {} });
+  const pill = (group, value, label, n) => `<button class="filter-pill${f[group] === value ? ' active' : ''}"
+    type="button" data-ufilter="${group}" data-uvalue="${esc(value)}">${esc(label)}${
+    n === undefined ? '' : `<span class="filter-count">${n}</span>`}</button>`;
+  return `<div class="filter-bar">
+    <div class="filter-search">
+      <span class="filter-search-icon">${icon('search', '#98a2b3', 14)}</span>
+      <input class="filter-input" id="userSearch" type="search" placeholder="Filter by name…"
+        value="${esc(f.q)}" data-usearch>
+    </div>
+    <div class="filter-group">
+      ${pill('role', 'all', 'All roles', state.users.length)}
+      ${['admin', 'user'].map((r) => pill('role', r, r, counts.role[r] || 0)).join('')}
+    </div>
+    <div class="filter-group">
+      ${pill('status', 'all', 'Any status')}
+      ${USER_STATUS.map((st) => pill('status', st, st, counts.status[st] || 0)).join('')}
+    </div>
+  </div>`;
+}
+
+function roleMenu(u) {
+  const open = state.menu === `role-${u.id}`;
+  return `<div class="menu-wrap">
+    <button class="icon-btn" type="button" title="Change role" data-menu="role-${esc(u.id)}">${icon('pencil', '#667085', 14)}</button>
+    ${open ? `<div class="menu-pop">
+      <div class="menu-head">Role</div>
+      ${['user', 'admin'].map((r) => `<button class="menu-item${u.role === r ? ' selected' : ''}" type="button"
+        data-uaction="${r === 'admin' ? 'makeadmin' : 'makeuser'}" data-uid="${esc(u.id)}">
+        ${icon(ROLE_ICON[r], 'currentColor', 14)}<span>${r}</span>
+        ${u.role === r ? icon('check', '#1f6feb', 14) : ''}</button>`).join('')}
+    </div>` : ''}
+  </div>`;
+}
+
+function userOverflow(u) {
+  const open = state.menu === `more-${u.id}`;
+  const armKey = `del-${u.id}`;
+  const items = [];
+  if (u.status === 'active') items.push(uItem('disable', u.id, 'Disable account'));
+  if (u.status === 'disabled') items.push(uItem('activate', u.id, 'Reactivate account'));
+  if (u.status === 'pending') items.push(uItem('approve', u.id, 'Approve account'));
+  items.push(`<button class="menu-item danger${state.armed === armKey ? ' armed' : ''}" type="button"
+    data-uaction="delete" data-uid="${esc(u.id)}"
+    >${state.armed === armKey ? 'Confirm delete' : 'Delete account'}</button>`);
+  return `<div class="menu-wrap">
+    <button class="icon-btn" type="button" title="More" data-menu="more-${esc(u.id)}">${icon('dots', '#667085', 15)}</button>
+    ${open ? `<div class="menu-pop menu-pop-right">${items.join('')}</div>` : ''}
+  </div>`;
+}
 
 function renderUsers() {
-  const rows = state.users.map((u) => {
+  // Accounts waiting on an admin come first — that is the only row that needs
+  // acting on; the rest is reference material, sorted by name.
+  const rank = (u) => (u.status === 'pending' ? 0 : u.status === 'active' ? 1 : 2);
+  const shown = state.users.filter(userMatchesFilter).sort((a, b) =>
+    rank(a) - rank(b) || (a.displayName || a.username).localeCompare(b.displayName || b.username));
+  const rows = shown.map((u) => {
     const you = state.me && u.id === state.me.id;
-    const acts = [];
-    if (u.status === 'pending') acts.push(uBtn('approve', u.id, 'Approve'));
-    if (u.status === 'active') acts.push(uBtn('disable', u.id, 'Disable'));
-    if (u.status === 'disabled') acts.push(uBtn('activate', u.id, 'Reactivate'));
-    acts.push(u.role === 'admin' ? uBtn('makeuser', u.id, 'Make user') : uBtn('makeadmin', u.id, 'Make admin'));
-    acts.push(uBtn('delete', u.id, 'Delete', true));
     return `<div class="table-row users-row">
-      <span class="cell-agent">${esc(u.displayName || u.username)}${you ? ' <span class="you-tag">you</span>' : ''}</span>
-      <span>${esc(u.role)}</span>
+      <span class="cell-user">
+        ${avatar(u.displayName || u.username, u.avatarUrl, 30)}
+        <span class="cell-user-text">
+          <span class="cell-user-name">${esc(u.displayName || u.username)}${you ? ' <span class="you-tag">you</span>' : ''}</span>
+          <span class="cell-user-handle mono">${esc(u.username)}</span>
+        </span>
+      </span>
+      <span class="cell-role">${roleChip(u.role)}${roleMenu(u)}</span>
       <span><span class="ustatus ustatus-${esc(u.status)}">${esc(u.status)}</span></span>
       <span>${ago(u.createdAt)} ago</span>
-      <span class="user-actions">${acts.join('')}</span>
+      <span class="user-actions">
+        ${u.status === 'pending' ? `<button class="user-act-btn primary" type="button"
+          data-uaction="approve" data-uid="${esc(u.id)}">Approve</button>` : ''}
+        ${userOverflow(u)}
+      </span>
     </div>`;
   }).join('');
+  const pending = state.users.filter((u) => u.status === 'pending').length;
   return `<div class="view-activity" style="max-width:1000px">
-    <div class="view-note">Approve, disable, promote or remove accounts. The last active admin cannot be demoted, disabled or deleted.</div>
+    <div class="view-note">${pending
+      ? `<b>${plural(pending, 'account')}</b> waiting for approval.`
+      : 'Everyone here signed in with GitHub.'} The last active admin cannot be demoted, disabled or deleted.</div>
+    ${userFilterBar()}
     <div class="table users-table" style="max-width:1000px">
-      <div class="table-head users-row"><span>Username</span><span>Role</span><span>Status</span><span>Created</span><span>Actions</span></div>
-      ${state.users.length ? rows : '<div class="empty-inline" style="padding:16px">No users yet.</div>'}
+      <div class="table-head users-row"><span>User</span><span>Role</span><span>Status</span><span>Created</span><span></span></div>
+      ${shown.length ? rows : `<div class="empty-inline" style="padding:16px">${
+        state.users.length ? 'No account matches these filters.' : 'No users yet.'}</div>`}
     </div>
   </div>`;
 }
@@ -997,16 +1115,13 @@ let lastRouteKey = null;
 
 function render() {
   if (!state.me) return; // logged out: managed by showAuth()
-  renderConnection();
   renderSidebar();
   renderHeader();
-  $('userChip').innerHTML =
-    `<span class="user-name">${esc(state.me.displayName || state.me.username)}</span>` +
-    `<span class="user-role">${esc(state.me.role)}</span>` +
-    '<button class="logout-btn" type="button" data-logout>Logout</button>';
-  $('footerName').textContent = state.me.displayName || state.me.username;
-  $('footerRole').textContent = state.me.role === 'admin' ? 'Administrator' : 'Member';
-  $('footerVersion').textContent = state.version ? `v${state.version}` : '';
+  const who = state.me.displayName || state.me.username;
+  $('footerAvatar').innerHTML = `${esc(initials(who))}${state.me.avatarUrl
+    ? `<img class="avatar-img" src="${esc(state.me.avatarUrl)}" alt="" onerror="this.remove()">` : ''}`;
+  $('footerName').textContent = who;
+  $('footerRole').textContent = `${state.me.role === 'admin' ? 'Administrator' : 'Member'}${state.version ? ` · v${state.version}` : ''}`;
   const main = $('main');
   const r = state.route;
   const html =
@@ -1062,11 +1177,32 @@ document.addEventListener('click', async (e) => {
     return;
   }
 
+  // Row menus: one open at a time, and any click elsewhere closes them.
+  const menuBtn = e.target.closest('[data-menu]');
+  if (menuBtn) {
+    const key = menuBtn.dataset.menu;
+    state.menu = state.menu === key ? null : key;
+    state.armed = null;
+    render();
+    return;
+  }
+  const insideMenu = e.target.closest('.menu-pop');
+  if (state.menu && !insideMenu) { state.menu = null; render(); }
+
+  const uf = e.target.closest('[data-ufilter]');
+  if (uf) {
+    state.userFilter = { ...state.userFilter, [uf.dataset.ufilter]: uf.dataset.uvalue };
+    render();
+    return;
+  }
+
   const ua = e.target.closest('[data-uaction]');
   if (ua) {
     const id = ua.dataset.uid;
     const act = ua.dataset.uaction;
-    if (act === 'delete' && !confirm('Delete this user? This cannot be undone.')) return;
+    // Deleting an account is irreversible: arm it, then confirm in place.
+    if (act === 'delete' && !arm(`del-${id}`)) return;
+    state.menu = null;
     const bodies = {
       approve: { status: 'active' }, disable: { status: 'disabled' }, activate: { status: 'active' },
       makeadmin: { role: 'admin' }, makeuser: { role: 'user' },
@@ -1199,8 +1335,20 @@ async function checkAuth() {
   state.me = null;
 }
 
+// The filter box lives inside a morphed subtree: keep the value in state so a
+// poll re-render never resets what someone is typing.
+document.addEventListener('input', (e) => {
+  const search = e.target.closest('[data-usearch]');
+  if (!search) return;
+  state.userFilter = { ...state.userFilter, q: search.value };
+  render();
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && state.menu) { state.menu = null; render(); }
+});
+
 window.addEventListener('hashchange', onRoute);
 setInterval(() => { if (state.me) refresh(); }, 3000);
-setInterval(() => { if (state.me) renderConnection(); }, 1000); // keep "Synced Ns ago" ticking
 
 checkAuth().then(() => { if (state.me) enterDashboard(); else showAuth(); });

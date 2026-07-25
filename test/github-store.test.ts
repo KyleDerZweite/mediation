@@ -1,5 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Store } from '../src/server/store.ts';
 
 test('GitHub identities, immutable repositories, and authorization revocation persist safely', async () => {
@@ -61,7 +65,9 @@ test('humans see the GitHub login and repository name, not internal handles', as
   // The stored handle stays normalized; only the display name is human-facing.
   assert.equal(created.username, 'gh-kylederzweite');
   assert.equal(created.displayName, 'KyleDerZweite');
+  assert.equal(created.avatarUrl, 'https://avatars.githubusercontent.com/u/4242?v=4');
   assert.equal(store.getUserByGithubId('4242')?.displayName, 'KyleDerZweite');
+  assert.equal(store.getUserByGithubId('4242')?.avatarUrl, 'https://avatars.githubusercontent.com/u/4242?v=4');
 
   const project = store.resolveGithubProject({
     externalRepositoryId: '5150', fullName: 'KyleDerZweite/mediation', installationId: '77',
@@ -74,10 +80,51 @@ test('humans see the GitHub login and repository name, not internal handles', as
   assert.equal(summary?.id, project.id); // routing still uses the opaque id
   assert.equal(summary?.name, 'KyleDerZweite/mediation');
   assert.equal(store.listMembers(project.id)[0].displayName, 'KyleDerZweite');
+  assert.equal(store.listMembers(project.id)[0].avatarUrl, 'https://avatars.githubusercontent.com/u/4242?v=4');
 
   // An owner adds people by the name they see, in any case.
   const mate = store.findOrCreateGithubUser({ githubUserId: '99', login: 'OctoCat', authorizationStatus: 'authorized' });
   store.patchUser(mate.id, { status: 'active' });
   assert.equal(store.addMember(project.id, 'octocat', 'member').displayName, 'OctoCat');
   store.close();
+});
+
+test('a project stays listed after its GitHub grant goes stale, hides after a week idle, and is never deleted', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mediation-idle-'));
+  const dbPath = join(dir, 'idle.db');
+  const store = new Store({ dbPath });
+  const user = store.findOrCreateGithubUser({ githubUserId: '31337', login: 'Octo', authorizationStatus: 'authorized' });
+  store.patchUser(user.id, { status: 'active' });
+  const project = store.resolveGithubProject({
+    externalRepositoryId: '6001', fullName: 'Octo/widgets', installationId: '42',
+    visibility: 'private', authorizationSource: 'github-app', createdBy: user.id,
+  });
+  // The grant GitHub last confirmed has lapsed.
+  store.grantGithubProjectAccess(project.id, user.id, 'ADMIN', Date.now() - 1);
+
+  // Agents need a fresh verification; the human's own dashboard does not.
+  assert.equal(store.githubMemberRole(project.id, user.id), null);
+  assert.equal(store.githubMemberRole(project.id, user.id, { fresh: false }), 'owner');
+  assert.deepEqual(store.listProjects(user.id, false, { fresh: true }).map((p) => p.id), []);
+  assert.deepEqual(store.listProjects(user.id, false, { fresh: false }).map((p) => p.id), [project.id]);
+
+  // Age the project and its history past the idle window (no clock injection
+  // in the store, so reach into the same database file directly).
+  const eightDaysAgo = Date.now() - 8 * 24 * 60 * 60_000;
+  const raw = new DatabaseSync(dbPath);
+  raw.prepare('UPDATE projects SET created_at = ? WHERE id = ?').run(eightDaysAgo, project.id);
+  raw.prepare('UPDATE events SET at = ? WHERE projectId = ?').run(eightDaysAgo, project.id);
+  raw.close();
+
+  // Hidden from the list — but the project, its history and membership remain.
+  assert.deepEqual(store.listProjects(user.id, false, { fresh: false }).map((p) => p.id), []);
+  assert.equal(store.getGithubProjectById(project.id)?.fullName, 'Octo/widgets');
+  assert.equal(store.githubMemberRole(project.id, user.id, { fresh: false }), 'owner');
+  assert.equal(store.listMembers(project.id).length, 1);
+
+  // Using it again brings it straight back.
+  store.startSession(project.id, { agent: 'codex', developer: 'Octo' }, 'cap');
+  assert.deepEqual(store.listProjects(user.id, false, { fresh: false }).map((p) => p.id), [project.id]);
+  store.close();
+  rmSync(dir, { recursive: true, force: true });
 });

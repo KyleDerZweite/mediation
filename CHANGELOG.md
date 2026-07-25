@@ -20,6 +20,33 @@
   now include a paste-ready prompt that sets a local agent up end to end.
   The instance Agents page lists only your own live sessions; a project's
   Agents tab still shows every session in that project.
+- **Projects no longer vanish from the dashboard.** A GitHub grant went stale
+  five minutes after the last verification and the project disappeared from
+  the list. Membership and freshness are now separate: the membership row
+  stands until GitHub revokes it (webhook) or an owner removes it, while the
+  five-minute freshness window keeps gating agents, whose session creation
+  re-verifies against GitHub anyway. A project drops out of the list only
+  after **7 idle days** — and only from the list: the project, its history and
+  its members are kept, it is reachable by URL, and it returns the moment an
+  agent connects. Nothing ever deletes a project except an owner's explicit
+  delete.
+- **Users page rebuilt.** Rows now carry the GitHub profile picture (initials
+  if it fails to load), the display name over the `gh-…` handle, and a role
+  chip with an icon (shield = admin, person = user). Rare and destructive
+  actions moved out of the row into a ⋯ menu (disable / reactivate / delete,
+  with delete arming before it fires); only *Approve* stays inline, because a
+  pending account is the one row that needs acting on. Role changes go through
+  a pencil button next to the chip that opens a role picker with the current
+  role checked. A filter bar adds name search plus role and status filters
+  with live counts, and accounts waiting for approval sort to the top.
+  Avatars also appear in the sidebar footer, project members and device
+  credentials; `PublicUser`/`ProjectMember` gained `avatarUrl`.
+- Dashboard chrome is quieter: the sidebar "API connected" chip, the topbar
+  "Synced Ns ago" pill and the top-right user chip are gone. Logout moved to
+  the sidebar footer next to your name, and connection state (server, version,
+  last sync, auth mode) now lives in one **Health** panel on Settings.
+- Static assets are served `cache-control: no-cache`, so a proxy or browser no
+  longer hands users last deploy's dashboard or install script.
 - Sessions survive quiet agents: heartbeat TTL 120 s → **5 min** (client
   heartbeat every 2 min) and idle claim expiry 30 min → **45 min**, because
   real agent turns regularly run longer than half an hour.

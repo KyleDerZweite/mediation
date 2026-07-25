@@ -24,12 +24,6 @@
       </div>
     </div>
 
-    <div class="conn-chip" id="connChip">
-      <span class="dot dot-ok pulse" id="connDot"></span>
-      <span class="conn-label" id="connLabel">Connecting…</span>
-      <span class="conn-host mono" id="connHost"></span>
-    </div>
-
     <nav class="side-nav" id="sideNav"></nav>
 
     <div class="side-heading">
@@ -38,12 +32,12 @@
     <div class="side-projects" id="sideProjects"></div>
 
     <div class="side-footer">
-      <span class="side-avatar">M</span>
+      <span class="side-avatar" id="footerAvatar">M</span>
       <div class="side-footer-text">
         <span class="side-footer-name" id="footerName">Mediation</span>
         <span class="side-footer-role" id="footerRole">Live coordination</span>
       </div>
-      <span class="side-footer-version" id="footerVersion"></span>
+      <button class="logout-btn" type="button" id="footerLogout" data-logout>Logout</button>
     </div>
   </aside>
 
@@ -58,11 +52,6 @@
           <span class="search-icon" id="searchIcon"></span>
           <input class="search-input" placeholder="Search sessions, files, agents…" aria-label="Search">
         </div>
-        <div class="sync-chip">
-          <span class="dot dot-ok pulse" id="syncDot"></span>
-          <span id="syncLabel">Synced —</span>
-        </div>
-        <div class="user-chip" id="userChip"></div>
       </div>
     </header>
 
