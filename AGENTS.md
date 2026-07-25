@@ -177,3 +177,15 @@ Enforcement summary (all of it in the one `/api/*` middleware in
 
 - `pnpm start` — run server (env: `PORT`=4100, `HOST`, `DB_PATH`=./data/mediation.db, `SESSION_TTL_MS`)
 - `pnpm test` — tests. `pnpm run typecheck` — TS check. Both gate "done".
+
+## Development vs production
+
+- This checkout is the development workspace. Use `podman-compose.dev.yml`
+  with `.dev.env`; it runs `AUTH_MODE=manual` and stores data under `data/dev`.
+- Production is a separate remote deployment. Its host, address, SSH details,
+  `.env`, database, GitHub secrets, and private keys are operational state and
+  must never be committed or copied into repository documentation.
+- `podman-compose.yml` is the production template. It expects an untracked
+  `.env` plus one untracked GitHub App private-key file under `secrets/`.
+  Client and webhook secrets are strings in `.env`. Do not start, stop, rebuild, or
+  otherwise operate the production stack from the development machine.

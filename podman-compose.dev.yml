@@ -1,6 +1,6 @@
 # Development: local manual authentication, no GitHub App and no tunnel.
 # Copy .dev.env.example to .dev.env, then:
-# docker compose --env-file .dev.env -f compose.dev.yml up --build
+# podman-compose --env-file .dev.env -f podman-compose.dev.yml up --build
 
 services:
   mediation:

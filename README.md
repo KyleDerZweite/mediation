@@ -127,8 +127,8 @@ Environment variables for the server:
 | `PUBLIC_URL` | — | externally reachable origin used for OAuth callbacks and secure cookies |
 | `GITHUB_APP_ID`, `GITHUB_APP_CLIENT_ID` | — | GitHub App identifiers |
 | `GITHUB_APP_PRIVATE_KEY_FILE` | — | protected App private-key path |
-| `GITHUB_APP_CLIENT_SECRET_FILE` | — | protected OAuth client-secret path |
-| `GITHUB_WEBHOOK_SECRET_FILE` | — | protected webhook-secret path |
+| `GITHUB_APP_CLIENT_SECRET` | — | OAuth client-secret string |
+| `GITHUB_WEBHOOK_SECRET` | — | webhook-secret string |
 | `GITHUB_BOOTSTRAP_ADMIN` | — | GitHub login allowed to become the first GitHub-backed admin |
 
 Idle claims expire after 30 minutes; completed claims are kept.
@@ -145,16 +145,16 @@ pnpm run typecheck   # tsc --noEmit
 ```bash
 cp .env.example .env
 mkdir -p secrets
-# Add github-app.pem, github-client-secret and github-webhook-secret.
-docker compose up -d --build
+# Add only the downloaded private key as secrets/github-app.pem.
+podman-compose up -d --build
 ```
 
-Production uses `compose.yml`, `.env`, GitHub App authentication and the
+Production uses `podman-compose.yml`, `.env`, GitHub App authentication and the
 optional Newt tunnel. For local manual-auth development:
 
 ```bash
 cp .dev.env.example .dev.env
-docker compose --env-file .dev.env -f compose.dev.yml up --build
+podman-compose --env-file .dev.env -f podman-compose.dev.yml up --build
 ```
 
 ### Upgrading
@@ -163,7 +163,7 @@ The database migrates itself on start (additive schema + one-shot backfill), so
 an upgrade is: back up, pull, rebuild.
 
 ```bash
-docker compose stop mediation && cp data/mediation.db data/mediation.db.bak && docker compose up -d --build mediation
+podman-compose stop mediation && cp data/mediation.db data/mediation.db.bak && podman-compose up -d --build mediation
 git pull                       # (before the rebuild, if you deploy from source)
 ```
 
@@ -178,7 +178,7 @@ Newt values come from your Pangolin dashboard (Sites → Add Site → Newt); poi
 the Pangolin site at `mediation:4100`. SQLite data persists in `./data`.
 Mediation runs standalone: without Newt credentials the tunnel container just
 crash-loops while mediation keeps serving on `:4100` — or run only it with
-`docker compose up -d mediation`.
+`podman-compose up -d mediation`.
 
 ## Users & auth
 
@@ -212,14 +212,13 @@ PUBLIC_URL=https://mediation.example.com
 GITHUB_APP_ID=123456
 GITHUB_APP_CLIENT_ID=Iv23...
 GITHUB_APP_PRIVATE_KEY_FILE=/run/secrets/mediation-github-app.pem
-GITHUB_APP_CLIENT_SECRET_FILE=/run/secrets/mediation-github-client-secret
-GITHUB_WEBHOOK_SECRET_FILE=/run/secrets/mediation-github-webhook-secret
+GITHUB_APP_CLIENT_SECRET=<client-secret>
+GITHUB_WEBHOOK_SECRET=<webhook-secret>
 GITHUB_BOOTSTRAP_ADMIN=github-login
 ```
 
-Inline secret variables are supported for constrained deployments, but
-protected files are preferred. The private key, client secret, and webhook
-secret stay outside the application database. OAuth user tokens are used only
+The private key stays in a protected file; the two short secrets live in the
+untracked `.env`. All three stay outside the application database. OAuth user tokens are used only
 to resolve immutable identity and are immediately discarded. Until the App is
 configured, use `AUTH_MODE=manual`.
 
