@@ -2,7 +2,7 @@
 // columns; rows are hydrated back into the core domain types. All domain rules
 // (overlap, tokenize, normalizePath) come from src/core/overlap.ts.
 
-import { randomBytes, randomUUID, scrypt, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from 'node:crypto';
 import type { ScryptOptions } from 'node:crypto';
 import { promisify } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
@@ -21,12 +21,6 @@ export const DEFAULT_CLAIM_IDLE_TTL_MS = 30 * 60_000;
 
 const EVENTS_CAP = 200;
 
-// Pairing codes: short-lived, human-relayed. Unambiguous alphabet (no I/O/0/1);
-// 32 chars divides 256 evenly, so byte % 32 is unbiased.
-const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-const CODE_LENGTH = 8;
-const PAIR_REQUEST_TTL_MS = 15 * 60_000;
-
 // Project ids are slugs. Enforced on CREATION only — ids created before the
 // Alpha milestone are grandfathered and keep working.
 const PROJECT_ID_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
@@ -38,6 +32,29 @@ const ADD_COLUMNS: [table: string, column: string, decl: string][] = [
   ['credentials', 'user_id', 'TEXT'],
   ['pair_requests', 'approved_by', 'TEXT'],
   ['pair_requests', 'approved_at', 'INTEGER'],
+  ['sessions', 'capability_hash', 'TEXT'],
+  ['users', 'auth_provider', 'TEXT'],
+  ['users', 'github_user_id', 'TEXT'],
+  ['users', 'github_login', 'TEXT'],
+  ['users', 'github_authorization_status', 'TEXT'],
+  ['projects', 'provider', 'TEXT'],
+  ['projects', 'external_repository_id', 'TEXT'],
+  ['projects', 'full_name', 'TEXT'],
+  ['projects', 'installation_id', 'TEXT'],
+  ['projects', 'visibility', 'TEXT'],
+  ['projects', 'authorization_source', 'TEXT'],
+  ['sessions', 'user_id', 'TEXT'],
+  ['sessions', 'authorization_source', 'TEXT'],
+  ['sessions', 'github_user_id', 'TEXT'],
+  ['sessions', 'github_repository_id', 'TEXT'],
+  ['sessions', 'github_permission', 'TEXT'],
+  ['sessions', 'authorization_verified_at', 'INTEGER'],
+  ['sessions', 'authorization_expires_at', 'INTEGER'],
+  ['credentials', 'authorization_source', 'TEXT'],
+  ['credentials', 'github_user_id', 'TEXT'],
+  ['project_members', 'authorization_source', 'TEXT'],
+  ['project_members', 'repository_permission', 'TEXT'],
+  ['project_members', 'authorization_expires_at', 'INTEGER'],
 ];
 
 interface StoreOptions {
@@ -116,19 +133,6 @@ export type LoginResult =
   | { ok: true; user: PublicUser; token: string }
   | { ok: false; code: 401 | 403; error: string; status?: 'pending' | 'disabled' };
 
-// Pairing/credential shapes are server-local (not part of the wire protocol
-// in core): the dashboard and /api/auth routes are their only consumers.
-export interface PairRequest {
-  id: string;
-  code: string | null; // null until a human approves the request (approve-to-reveal)
-  agent: string;
-  machine: string | null;
-  developer: string | null;
-  approvedBy: string | null; // username of the approver
-  createdAt: number;
-  expiresAt: number;
-}
-
 export interface CredentialInfo {
   id: string;
   agent: string;
@@ -138,19 +142,58 @@ export interface CredentialInfo {
   ownerUsername: string;
   createdAt: number;
   lastUsedAt: number;
+  authorizationSource: 'manual' | 'github-app';
+  githubUserId: string | null;
 }
+
+const capabilityHash = (value: string) => createHash('sha256').update(value).digest('base64url');
 
 export interface ProjectMember {
   userId: string;
   username: string;
   role: MemberRole;
   createdAt: number;
+  authorizationSource?: 'manual' | 'github-app';
+  repositoryPermission?: string | null;
+  authorizationExpiresAt?: number | null;
 }
 
-interface PairRequestInput {
-  agent: string;
-  machine?: string | null;
-  developer?: string | null;
+export interface GithubIdentity {
+  githubUserId: string; // GitHub IDs are decimal strings: never JS numbers.
+  login: string;
+  authorizationStatus: 'authorized' | 'revoked' | 'pending';
+}
+
+export interface GithubProjectInput {
+  externalRepositoryId: string;
+  fullName: string;
+  installationId: string;
+  visibility: 'public' | 'private' | 'internal';
+  authorizationSource: 'github-app';
+  createdBy?: string | null;
+}
+
+export interface GithubProjectMetadata extends GithubProjectInput {
+  id: string;
+  provider: 'github';
+  createdAt: number;
+}
+
+export interface GithubDeviceActivation {
+  requestId: string;
+  secret: string; // Returned once to the initiating device; only its hash is stored.
+  userCode: string;
+  expiresAt: number;
+}
+
+export interface GithubSessionAuthorization {
+  userId: string;
+  githubUserId: string;
+  githubRepositoryId: string;
+  permission: 'write' | 'admin';
+  verifiedAt: number;
+  expiresAt: number;
+  authorizationSource: 'github-app';
 }
 
 function sessionFromRow(r: Row): Session {
@@ -274,6 +317,14 @@ export class Store {
         project_id TEXT NOT NULL, user_id TEXT NOT NULL, role TEXT NOT NULL,
         created_at INTEGER NOT NULL, PRIMARY KEY (project_id, user_id)
       );
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        id TEXT PRIMARY KEY, applied_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS github_device_activations (
+        id TEXT PRIMARY KEY, secret_hash TEXT NOT NULL UNIQUE, user_code TEXT NOT NULL UNIQUE,
+        machine TEXT, github_user_id TEXT, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+        bound_at INTEGER, redeemed_at INTEGER
+      );
       CREATE INDEX IF NOT EXISTS idx_members_user ON project_members(user_id);
       CREATE INDEX IF NOT EXISTS idx_user_sessions_user ON user_sessions(user_id);
       CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(projectId);
@@ -287,15 +338,31 @@ export class Store {
         this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
       }
     }
+    this.db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_users_github_user_id
+        ON users(github_user_id) WHERE github_user_id IS NOT NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_projects_provider_external_repository
+        ON projects(provider, external_repository_id)
+        WHERE provider IS NOT NULL AND external_repository_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_sessions_github_authorization
+        ON sessions(authorization_source, github_user_id, github_repository_id);
+      CREATE INDEX IF NOT EXISTS idx_credentials_github_authorization
+        ON credentials(authorization_source, github_user_id);
+      CREATE INDEX IF NOT EXISTS idx_project_members_github_authorization
+        ON project_members(authorization_source, authorization_expires_at);
+      CREATE INDEX IF NOT EXISTS idx_github_device_activations_github_user
+        ON github_device_activations(github_user_id, expires_at);
+    `);
     this.backfillAlpha();
   }
 
-  // ---- one-shot pre-Alpha backfill (idempotent) ----
-  // Runs only while `projects` is empty AND an active admin exists: a fresh
-  // instance has nothing to adopt, and a legacy instance with no admin yet is
-  // adopted later by the first admin that registers (see registerUser).
+  // ---- one-shot pre-Alpha backfill ----
+  // It waits for an active admin, records an explicit marker, and never relies
+  // on "projects is empty" as its completion flag: a valid new installation
+  // may have device credentials before its first project.
   private backfillAlpha(): void {
-    if (Number((this.db.prepare('SELECT COUNT(*) AS n FROM projects').get() as Row).n) > 0) return;
+    const migrationId = 'global-device-auth-v1';
+    if (this.db.prepare('SELECT 1 FROM schema_migrations WHERE id = ?').get(migrationId)) return;
     const admin = this.db.prepare(
       "SELECT id FROM users WHERE role = 'admin' AND status = 'active' ORDER BY created_at, rowid LIMIT 1")
       .get() as Row | undefined;
@@ -303,46 +370,46 @@ export class Store {
     const adminId = admin.id as string;
     const t = Date.now();
 
-    // 1. every project id that legacy activity refers to becomes a real project
-    //    owned by the admin, dated at its earliest known activity.
-    const ids = this.db.prepare(`
-      SELECT projectId, MIN(at) AS at FROM (
-        SELECT projectId, createdAt AS at FROM sessions
-        UNION ALL SELECT projectId, createdAt FROM claims
-        UNION ALL SELECT projectId, createdAt FROM bugs
-        UNION ALL SELECT projectId, at FROM events
-      ) GROUP BY projectId`).all() as Row[];
-    for (const row of ids) {
-      this.db.prepare('INSERT OR IGNORE INTO projects (id, created_by, created_at) VALUES (?, ?, ?)')
-        .run(row.projectId as string, adminId, row.at == null ? t : Number(row.at));
-      this.addMemberRow(row.projectId as string, adminId, 'owner', t);
+    // Only a database with no project rows needs the original ownership
+    // adoption. Existing private-project databases already have intentional
+    // owners and must not gain the oldest admin as a new owner.
+    if (Number((this.db.prepare('SELECT COUNT(*) AS n FROM projects').get() as Row).n) === 0) {
+      const ids = this.db.prepare(`
+        SELECT projectId, MIN(at) AS at FROM (
+          SELECT projectId, createdAt AS at FROM sessions
+          UNION ALL SELECT projectId, createdAt FROM claims
+          UNION ALL SELECT projectId, createdAt FROM bugs
+          UNION ALL SELECT projectId, at FROM events
+        ) GROUP BY projectId`).all() as Row[];
+      for (const row of ids) {
+        this.db.prepare('INSERT OR IGNORE INTO projects (id, created_by, created_at) VALUES (?, ?, ?)')
+          .run(row.projectId as string, adminId, row.at == null ? t : Number(row.at));
+        this.addMemberRow(row.projectId as string, adminId, 'owner', t);
+      }
+
+      // Grandfather membership for known legacy contributors.
+      const seen = this.db.prepare(`
+        SELECT DISTINCT projectId, developer FROM (
+          SELECT projectId, developer FROM sessions
+          UNION SELECT projectId, developer FROM claims
+        ) WHERE developer IS NOT NULL`).all() as Row[];
+      for (const row of seen) {
+        const user = this.db.prepare('SELECT id FROM users WHERE username = ?')
+          .get(row.developer as string) as Row | undefined;
+        if (user) this.addMemberRow(row.projectId as string, user.id as string, 'member', t);
+      }
     }
 
-    // 2. bind legacy credentials to users: by developer/username match first,
-    //    everything left over to the admin (never leave an orphan → those 401).
-    this.db.exec(`UPDATE credentials SET user_id = (
-        SELECT id FROM users WHERE username = credentials.developer AND status = 'active')
-      WHERE user_id IS NULL AND EXISTS (
-        SELECT 1 FROM users WHERE username = credentials.developer AND status = 'active')`);
-    this.db.prepare('UPDATE credentials SET user_id = ? WHERE user_id IS NULL').run(adminId);
-
-    // 3. grandfather membership so already-paired directories keep working:
-    //    any developer name that matches a username becomes a project member.
-    const seen = this.db.prepare(`
-      SELECT DISTINCT projectId, developer FROM (
-        SELECT projectId, developer FROM sessions
-        UNION SELECT projectId, developer FROM claims
-      ) WHERE developer IS NOT NULL`).all() as Row[];
-    for (const row of seen) {
-      const user = this.db.prepare('SELECT id FROM users WHERE username = ?')
-        .get(row.developer as string) as Row | undefined;
-      if (user) this.addMemberRow(row.projectId as string, user.id as string, 'member', t);
-    }
+    // Legacy bearer attribution was self-declared. Never turn it into authority.
+    this.db.exec('DELETE FROM credentials');
+    this.db.exec('DELETE FROM pair_requests');
+    this.db.prepare('INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)').run(migrationId, t);
   }
 
   private addMemberRow(projectId: string, userId: string, role: MemberRole, at: number): void {
-    this.db.prepare(`INSERT OR IGNORE INTO project_members (project_id, user_id, role, created_at)
-      VALUES (?, ?, ?, ?)`).run(projectId, userId, role, at);
+    this.db.prepare(`INSERT OR IGNORE INTO project_members
+      (project_id, user_id, role, created_at, authorization_source) VALUES (?, ?, ?, ?, 'manual')`)
+      .run(projectId, userId, role, at);
   }
 
   private emit(projectId: string, type: EventType, message: string): void {
@@ -389,24 +456,94 @@ export class Store {
 
   // ---- sessions ----
 
-  startSession(projectId: string, input: SessionCreate): Session {
+  startSession(projectId: string, input: SessionCreate, capability?: string): Session {
     this.ensureProject(projectId, null); // no-op for the API (the middleware already created/authorized it)
     const t = Date.now();
     const session: Session = {
       id: randomUUID(),
       projectId,
-      agent: input.agent,
+      agent: input.developer ? `${input.agent}-${'pending'}@${input.developer}` : input.agent,
       developer: input.developer ?? null,
       machine: input.machine ?? null,
       repo: null,
       createdAt: t,
       lastSeenAt: t,
     };
-    this.db.prepare(`INSERT INTO sessions (id, projectId, agent, developer, machine, repo, createdAt, lastSeenAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(session.id, projectId, session.agent, session.developer, session.machine, null, t, t);
+    if (input.developer) session.agent = `${input.agent}-${session.id.slice(0, 8)}@${input.developer}`;
+    this.db.prepare(`INSERT INTO sessions (id, projectId, agent, developer, machine, repo, createdAt, lastSeenAt, capability_hash)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(session.id, projectId, session.agent, session.developer, session.machine, null, t, t,
+        capability ? capabilityHash(capability) : null);
     this.emit(projectId, 'session', `${session.agent} connected`);
     return session;
+  }
+
+  assertSessionCapability(projectId: string, sessionId: string, capability: string | undefined,
+    allowExpiredGithubAuthorization = false): void {
+    const row = this.db.prepare(`SELECT capability_hash, authorization_source, authorization_expires_at
+      FROM sessions WHERE projectId = ? AND id = ?`)
+      .get(projectId, sessionId) as Row | undefined;
+    if (!row) notFound('session not found or expired');
+    if (!capability || !row.capability_hash || !timingSafeEqual(
+      Buffer.from(capabilityHash(capability)), Buffer.from(row.capability_hash as string),
+    )) fail('session capability required', 403);
+    if (!allowExpiredGithubAuthorization && row.authorization_source === 'github-app'
+      && Number(row.authorization_expires_at) <= Date.now()) {
+      fail('GitHub session authorization expired', 403);
+    }
+  }
+
+  setGithubSessionAuthorization(projectId: string, sessionId: string, authorization: GithubSessionAuthorization): void {
+    if (!/^\d+$/.test(authorization.githubUserId) || !/^\d+$/.test(authorization.githubRepositoryId)) {
+      fail('GitHub ids must be decimal strings', 400);
+    }
+    this.requireSession(projectId, sessionId);
+    this.db.prepare(`UPDATE sessions SET user_id = ?, authorization_source = ?, github_user_id = ?,
+      github_repository_id = ?, github_permission = ?, authorization_verified_at = ?, authorization_expires_at = ?
+      WHERE id = ?`).run(authorization.userId, authorization.authorizationSource, authorization.githubUserId,
+      authorization.githubRepositoryId, authorization.permission, authorization.verifiedAt, authorization.expiresAt, sessionId);
+  }
+
+  getGithubSessionAuthorization(projectId: string, sessionId: string): GithubSessionAuthorization | null {
+    const row = this.db.prepare(`SELECT user_id, authorization_source, github_user_id, github_repository_id,
+      github_permission, authorization_verified_at, authorization_expires_at FROM sessions
+      WHERE projectId = ? AND id = ?`).get(projectId, sessionId) as Row | undefined;
+    if (!row) notFound('session not found or expired');
+    if (row.authorization_source !== 'github-app') return null;
+    return {
+      userId: row.user_id as string, githubUserId: row.github_user_id as string,
+      githubRepositoryId: row.github_repository_id as string,
+      permission: row.github_permission as GithubSessionAuthorization['permission'],
+      verifiedAt: Number(row.authorization_verified_at), expiresAt: Number(row.authorization_expires_at),
+      authorizationSource: 'github-app',
+    };
+  }
+
+  assertGithubSessionAuthorization(projectId: string, sessionId: string, now = Date.now()): GithubSessionAuthorization {
+    const authorization = this.getGithubSessionAuthorization(projectId, sessionId);
+    if (!authorization || authorization.expiresAt <= now) fail('GitHub session authorization expired', 403);
+    return authorization;
+  }
+
+  markCredentialGithubAuthorization(credentialId: string, githubUserId: string): void {
+    if (!/^\d+$/.test(githubUserId)) fail('invalid GitHub user id', 400);
+    const result = this.db.prepare(`UPDATE credentials SET authorization_source = 'github-app', github_user_id = ?
+      WHERE id = ?`).run(githubUserId, credentialId);
+    if (result.changes === 0) notFound('credential not found');
+  }
+
+  assertClaimCapability(projectId: string, claimId: string, capability: string | undefined): void {
+    const row = this.db.prepare('SELECT sessionId FROM claims WHERE projectId = ? AND id = ?')
+      .get(projectId, claimId) as Row | undefined;
+    if (!row) notFound('claim not found');
+    this.assertSessionCapability(projectId, row.sessionId as string, capability);
+  }
+
+  assertBugCapability(projectId: string, bugId: string, capability: string | undefined): void {
+    const row = this.db.prepare('SELECT sessionId FROM bugs WHERE projectId = ? AND id = ?')
+      .get(projectId, bugId) as Row | undefined;
+    if (!row) notFound('bug not found');
+    this.assertSessionCapability(projectId, row.sessionId as string, capability);
   }
 
   heartbeat(projectId: string, sessionId: string, input: Heartbeat): Session {
@@ -432,6 +569,54 @@ export class Store {
       this.db.prepare('DELETE FROM claims WHERE id = ?').run(claim.id);
       this.emit(projectId, 'claim', `claim "${claim.intent}" released (${reason})`);
     }
+  }
+
+  invalidateGithubAuthorization({ userId, githubUserId, reason = 'GitHub authorization revoked' }: {
+    userId?: string; githubUserId?: string | null; reason?: string;
+  }): { sessions: number; credentials: number } {
+    if (!userId && !githubUserId) return { sessions: 0, credentials: 0 };
+    const sessions = (this.db.prepare(`SELECT * FROM sessions WHERE authorization_source = 'github-app'
+      AND (${userId ? 'user_id = ?' : '0'} OR ${githubUserId ? 'github_user_id = ?' : '0'})`)
+      .all(...([userId, githubUserId].filter(Boolean) as string[])) as Row[]).map(sessionFromRow);
+    for (const session of sessions) {
+      this.db.prepare('DELETE FROM sessions WHERE id = ?').run(session.id);
+      this.releaseClaims(session.projectId, session.id, reason);
+      this.emit(session.projectId, 'session', `${session.agent} disconnected (${reason})`);
+    }
+    const credentialSql = `DELETE FROM credentials WHERE authorization_source = 'github-app'
+      AND (${userId ? 'user_id = ?' : '0'} OR ${githubUserId ? 'github_user_id = ?' : '0'})`;
+    const credentials = this.db.prepare(credentialSql)
+      .run(...([userId, githubUserId].filter(Boolean) as string[])).changes;
+    if (userId) this.db.prepare(`DELETE FROM project_members WHERE user_id = ? AND authorization_source = 'github-app'`)
+      .run(userId);
+    return { sessions: sessions.length, credentials: Number(credentials) };
+  }
+
+  invalidateGithubRepository(externalRepositoryId: string, reason = 'GitHub repository access revoked'):
+    { sessions: number; grants: number } {
+    const project = this.getGithubProject(externalRepositoryId);
+    if (!project) return { sessions: 0, grants: 0 };
+    const sessions = (this.db.prepare(`SELECT * FROM sessions WHERE authorization_source = 'github-app'
+      AND github_repository_id = ?`).all(externalRepositoryId) as Row[]).map(sessionFromRow);
+    for (const session of sessions) {
+      this.db.prepare('DELETE FROM sessions WHERE id = ?').run(session.id);
+      this.releaseClaims(session.projectId, session.id, reason);
+      this.emit(session.projectId, 'session', `${session.agent} disconnected (${reason})`);
+    }
+    const grants = this.db.prepare(`DELETE FROM project_members WHERE project_id = ?
+      AND authorization_source = 'github-app'`).run(project.id).changes;
+    return { sessions: sessions.length, grants: Number(grants) };
+  }
+
+  invalidateGithubInstallation(installationId: string, reason = 'GitHub App installation removed'):
+    { sessions: number; grants: number } {
+    const repositories = (this.db.prepare(`SELECT external_repository_id FROM projects
+      WHERE provider = 'github' AND installation_id = ?`).all(installationId) as Row[])
+      .map((row) => row.external_repository_id as string);
+    return repositories.reduce((total, repositoryId) => {
+      const invalidated = this.invalidateGithubRepository(repositoryId, reason);
+      return { sessions: total.sessions + invalidated.sessions, grants: total.grants + invalidated.grants };
+    }, { sessions: 0, grants: 0 });
   }
 
   reportRepoState(projectId: string, sessionId: string, input: RepoReport): RepoState {
@@ -571,15 +756,27 @@ export class Store {
 
   memberRole(projectId: string, userId: string | null): MemberRole | null {
     if (!userId) return null;
-    const row = this.db.prepare('SELECT role FROM project_members WHERE project_id = ? AND user_id = ?')
-      .get(projectId, userId) as Row | undefined;
+    const row = this.db.prepare(`SELECT role FROM project_members WHERE project_id = ? AND user_id = ?
+      AND (authorization_source IS NULL OR authorization_source != 'github-app'
+        OR authorization_expires_at IS NULL OR authorization_expires_at > ?)`)
+      .get(projectId, userId, Date.now()) as Row | undefined;
     return row ? (row.role as MemberRole) : null;
+  }
+
+  githubMemberRole(projectId: string, userId: string | null): MemberRole | null {
+    if (!userId) return null;
+    const row = this.db.prepare(`SELECT role FROM project_members WHERE project_id = ? AND user_id = ?
+      AND authorization_source = 'github-app' AND authorization_expires_at > ?`)
+      .get(projectId, userId, Date.now()) as Row | undefined;
+    return row ? row.role as MemberRole : null;
   }
 
   memberProjectIds(userId: string | null): string[] {
     if (!userId) return [];
-    return (this.db.prepare('SELECT project_id FROM project_members WHERE user_id = ? ORDER BY project_id')
-      .all(userId) as Row[]).map((r) => r.project_id as string);
+    return (this.db.prepare(`SELECT project_id FROM project_members WHERE user_id = ?
+      AND (authorization_source IS NULL OR authorization_source != 'github-app'
+        OR authorization_expires_at IS NULL OR authorization_expires_at > ?) ORDER BY project_id`)
+      .all(userId, Date.now()) as Row[]).map((r) => r.project_id as string);
   }
 
   // Creation-time slug rule; legacy ids keep working but no new one can be odd.
@@ -595,6 +792,151 @@ export class Store {
     return { id, createdAt: t };
   }
 
+  bindGithubIdentity(userId: string, identity: GithubIdentity): void {
+    if (!/^\d+$/.test(identity.githubUserId)) fail('invalid GitHub user id', 400);
+    const user = this.db.prepare('SELECT id FROM users WHERE id = ?').get(userId) as Row | undefined;
+    if (!user) notFound('user not found');
+    const existing = this.db.prepare('SELECT id FROM users WHERE github_user_id = ? AND id != ?')
+      .get(identity.githubUserId, userId) as Row | undefined;
+    if (existing) fail('GitHub account is already linked to another user', 409);
+    this.db.prepare(`UPDATE users SET auth_provider = 'github', github_user_id = ?, github_login = ?,
+      github_authorization_status = ?, updated_at = ? WHERE id = ?`)
+      .run(identity.githubUserId, identity.login, identity.authorizationStatus, Date.now(), userId);
+  }
+
+  getGithubIdentity(userId: string): GithubIdentity | null {
+    const row = this.db.prepare(`SELECT github_user_id, github_login, github_authorization_status FROM users
+      WHERE id = ?`).get(userId) as Row | undefined;
+    if (!row) notFound('user not found');
+    if (!row.github_user_id) return null;
+    return {
+      githubUserId: row.github_user_id as string,
+      login: (row.github_login as string) ?? '',
+      authorizationStatus: (row.github_authorization_status as GithubIdentity['authorizationStatus']) ?? 'pending',
+    };
+  }
+
+  revokeGithubIdentity(userId: string, reason = 'GitHub authorization revoked'): { sessions: number; credentials: number } {
+    const row = this.db.prepare('SELECT github_user_id FROM users WHERE id = ?').get(userId) as Row | undefined;
+    if (!row) notFound('user not found');
+    const githubUserId = row.github_user_id as string | null;
+    this.db.prepare(`UPDATE users SET github_authorization_status = 'revoked', updated_at = ? WHERE id = ?`)
+      .run(Date.now(), userId);
+    this.clearUserSessions(userId);
+    return this.invalidateGithubAuthorization({ userId, githubUserId, reason });
+  }
+
+  findOrCreateGithubUser(identity: GithubIdentity, bootstrapLogin?: string | null): PublicUser {
+    if (!/^\d+$/.test(identity.githubUserId) || !identity.login) fail('invalid GitHub identity', 400);
+    const existing = this.db.prepare('SELECT * FROM users WHERE github_user_id = ?')
+      .get(identity.githubUserId) as Row | undefined;
+    if (existing) {
+      const bootstrap = !!bootstrapLogin && identity.login.toLowerCase() === bootstrapLogin.toLowerCase()
+        && !this.db.prepare(`SELECT 1 FROM users WHERE role = 'admin' AND status = 'active'
+          AND auth_provider = 'github' AND github_authorization_status = 'authorized'`).get();
+      const role = bootstrap ? 'admin' : existing.role as PublicUser['role'];
+      const status = bootstrap ? 'active' : existing.status as PublicUser['status'];
+      this.db.prepare(`UPDATE users SET auth_provider = 'github', github_login = ?,
+        github_authorization_status = 'authorized', role = ?, status = ?, updated_at = ? WHERE id = ?`)
+        .run(identity.login, role, status, Date.now(), existing.id as string);
+      return publicUser({ ...existing, github_login: identity.login,
+        github_authorization_status: 'authorized', role, status });
+    }
+
+    const base = `gh-${identity.login.toLowerCase().replace(/[^a-z0-9_-]+/g, '-')
+      .replace(/^-+|-+$/g, '').slice(0, 24) || 'user'}`;
+    let username = base;
+    for (let n = 1; this.db.prepare('SELECT 1 FROM users WHERE username = ?').get(username); n += 1) {
+      const suffix = `-${identity.githubUserId.slice(-6)}-${n}`;
+      username = `${base.slice(0, 32 - suffix.length)}${suffix}`;
+    }
+    const bootstrap = !!bootstrapLogin && identity.login.toLowerCase() === bootstrapLogin.toLowerCase()
+      && !this.db.prepare(`SELECT 1 FROM users WHERE role = 'admin' AND status = 'active'
+        AND auth_provider = 'github' AND github_authorization_status = 'authorized'`).get();
+    const id = randomUUID();
+    const t = Date.now();
+    this.db.prepare(`INSERT INTO users (id, username, password_hash, role, status, created_at, updated_at,
+      auth_provider, github_user_id, github_login, github_authorization_status)
+      VALUES (?, ?, 'github-only', ?, ?, ?, ?, 'github', ?, ?, 'authorized')`)
+      .run(id, username, bootstrap ? 'admin' : 'user', bootstrap ? 'active' : 'pending',
+        t, t, identity.githubUserId, identity.login);
+    return { id, username, role: bootstrap ? 'admin' : 'user',
+      status: bootstrap ? 'active' : 'pending', createdAt: t };
+  }
+
+  getUserByGithubId(githubUserId: string): PublicUser | null {
+    const row = this.db.prepare('SELECT * FROM users WHERE github_user_id = ?')
+      .get(githubUserId) as Row | undefined;
+    return row ? publicUser(row) : null;
+  }
+
+  createGithubUserSession(userId: string): { user: PublicUser; token: string } {
+    const row = this.db.prepare(`SELECT * FROM users WHERE id = ? AND status = 'active'
+      AND auth_provider = 'github' AND github_authorization_status = 'authorized'`)
+      .get(userId) as Row | undefined;
+    if (!row) fail('active approved GitHub account required', 403);
+    return { user: publicUser(row), token: this.createUserSession(userId) };
+  }
+
+  resolveGithubProject(input: GithubProjectInput): GithubProjectMetadata {
+    if (!/^\d+$/.test(input.externalRepositoryId) || !/^\d+$/.test(input.installationId)) {
+      fail('GitHub repository and installation ids must be decimal strings', 400);
+    }
+    const existing = this.db.prepare(`SELECT * FROM projects
+      WHERE provider = 'github' AND external_repository_id = ?`).get(input.externalRepositoryId) as Row | undefined;
+    const t = Date.now();
+    if (existing) {
+      this.db.prepare(`UPDATE projects SET full_name = ?, installation_id = ?, visibility = ?, authorization_source = ?
+        WHERE id = ?`).run(input.fullName, input.installationId, input.visibility, input.authorizationSource, existing.id as string);
+      return { ...input, id: existing.id as string, provider: 'github', createdAt: Number(existing.created_at) };
+    }
+    const id = randomUUID();
+    this.db.prepare(`INSERT INTO projects (id, created_by, created_at, provider, external_repository_id,
+      full_name, installation_id, visibility, authorization_source) VALUES (?, ?, ?, 'github', ?, ?, ?, ?, ?)`)
+      .run(id, input.createdBy ?? null, t, input.externalRepositoryId, input.fullName,
+        input.installationId, input.visibility, input.authorizationSource);
+    return { ...input, id, provider: 'github', createdAt: t };
+  }
+
+  getGithubProject(externalRepositoryId: string): GithubProjectMetadata | null {
+    const row = this.db.prepare(`SELECT * FROM projects WHERE provider = 'github' AND external_repository_id = ?`)
+      .get(externalRepositoryId) as Row | undefined;
+    if (!row) return null;
+    return {
+      id: row.id as string, provider: 'github', externalRepositoryId: row.external_repository_id as string,
+      fullName: row.full_name as string, installationId: row.installation_id as string,
+      visibility: row.visibility as GithubProjectInput['visibility'],
+      authorizationSource: row.authorization_source as 'github-app', createdBy: (row.created_by as string) ?? null,
+      createdAt: Number(row.created_at),
+    };
+  }
+
+  getGithubProjectById(projectId: string): GithubProjectMetadata | null {
+    const row = this.db.prepare(`SELECT external_repository_id FROM projects
+      WHERE id = ? AND provider = 'github'`).get(projectId) as Row | undefined;
+    return row ? this.getGithubProject(row.external_repository_id as string) : null;
+  }
+
+  grantGithubProjectAccess(projectId: string, userId: string, permission: string, expiresAt: number): ProjectMember {
+    const role: MemberRole = permission.toUpperCase() === 'ADMIN' ? 'owner' : 'member';
+    const user = this.db.prepare('SELECT username FROM users WHERE id = ? AND status = ?').get(userId, 'active') as Row | undefined;
+    if (!user) notFound('user not found');
+    const existing = this.db.prepare(`SELECT authorization_source, role, created_at FROM project_members
+      WHERE project_id = ? AND user_id = ?`).get(projectId, userId) as Row | undefined;
+    if (existing && existing.authorization_source !== 'github-app') {
+      return { userId, username: user.username as string, role: existing.role as MemberRole,
+        createdAt: Number(existing.created_at), authorizationSource: 'manual' };
+    }
+    const t = Date.now();
+    this.db.prepare(`INSERT INTO project_members (project_id, user_id, role, created_at, authorization_source,
+      repository_permission, authorization_expires_at) VALUES (?, ?, ?, ?, 'github-app', ?, ?)
+      ON CONFLICT(project_id, user_id) DO UPDATE SET role = excluded.role, authorization_source = 'github-app',
+      repository_permission = excluded.repository_permission, authorization_expires_at = excluded.authorization_expires_at`)
+      .run(projectId, userId, role, t, permission, expiresAt);
+    return { userId, username: user.username as string, role, createdAt: t, authorizationSource: 'github-app',
+      repositoryPermission: permission, authorizationExpiresAt: expiresAt };
+  }
+
   // Auto-creation path for agents: first session on an unknown id creates it
   // with the acting user as owner. Never validates the slug — the id already
   // came from a client that may predate the rule.
@@ -606,13 +948,17 @@ export class Store {
   }
 
   listMembers(projectId: string): ProjectMember[] {
-    return (this.db.prepare(`SELECT m.user_id, m.role, m.created_at, u.username
+    return (this.db.prepare(`SELECT m.user_id, m.role, m.created_at, m.authorization_source,
+      m.repository_permission, m.authorization_expires_at, u.username
       FROM project_members m JOIN users u ON u.id = m.user_id
       WHERE m.project_id = ? ORDER BY m.role, u.username`).all(projectId) as Row[]).map((r) => ({
         userId: r.user_id as string,
         username: r.username as string,
         role: r.role as MemberRole,
         createdAt: Number(r.created_at),
+        authorizationSource: r.authorization_source === 'github-app' ? 'github-app' : 'manual',
+        repositoryPermission: (r.repository_permission as string) ?? null,
+        authorizationExpiresAt: r.authorization_expires_at == null ? null : Number(r.authorization_expires_at),
       }));
   }
 
@@ -666,95 +1012,8 @@ export class Store {
     return { ok: true };
   }
 
-  // ---- pairing (device-flow-lite; see AGENTS.md "Pairing") ----
-
-  private prunePairRequests(): void {
-    this.db.prepare('DELETE FROM pair_requests WHERE expires_at < ?').run(Date.now());
-  }
-
-  createPairRequest(input: PairRequestInput): { requestId: string; expiresAt: number } {
-    this.prunePairRequests();
-    const t = Date.now();
-    const id = randomUUID();
-    const expiresAt = t + PAIR_REQUEST_TTL_MS;
-    // code is UNIQUE; retry on the (vanishingly rare) collision
-    for (let attempt = 0; ; attempt++) {
-      const code = [...randomBytes(CODE_LENGTH)].map((b) => CODE_ALPHABET[b % CODE_ALPHABET.length]).join('');
-      try {
-        this.db.prepare(`INSERT INTO pair_requests (id, code, agent, machine, developer, created_at, expires_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?)`)
-          .run(id, code, input.agent, input.machine ?? null, input.developer ?? null, t, expiresAt);
-        return { requestId: id, expiresAt };
-      } catch (err) {
-        if (attempt >= 5) throw err;
-      }
-    }
-  }
-
-  // Approve-to-reveal: the code is withheld until a human approves, so a rogue
-  // agent that can read this list still cannot pair itself.
-  listPendingPairRequests(): PairRequest[] {
-    this.prunePairRequests();
-    return (this.db.prepare(`SELECT p.*, u.username AS approver FROM pair_requests p
-      LEFT JOIN users u ON u.id = p.approved_by ORDER BY p.created_at`).all() as Row[]).map((r) => ({
-        id: r.id as string,
-        code: r.approved_by == null ? null : (r.code as string),
-        agent: r.agent as string,
-        machine: (r.machine as string) ?? null,
-        developer: (r.developer as string) ?? null,
-        approvedBy: (r.approver as string) ?? null,
-        createdAt: Number(r.created_at),
-        expiresAt: Number(r.expires_at),
-      }));
-  }
-
-  // First approver wins; the same user may re-read the code, anyone else 409s.
-  approvePairRequest(id: string, user: PublicUser): { code: string; approvedBy: string } {
-    this.prunePairRequests();
-    const row = this.db.prepare('SELECT * FROM pair_requests WHERE id = ?').get(id) as Row | undefined;
-    if (!row) notFound('pairing request not found or expired');
-    if (row.approved_by != null && row.approved_by !== user.id) {
-      const other = this.db.prepare('SELECT username FROM users WHERE id = ?').get(row.approved_by as string) as Row | undefined;
-      fail(`already approved by ${(other?.username as string) ?? 'another user'}`, 409);
-    }
-    if (row.approved_by == null) {
-      this.db.prepare('UPDATE pair_requests SET approved_by = ?, approved_at = ? WHERE id = ?')
-        .run(user.id, Date.now(), id);
-    }
-    return { code: row.code as string, approvedBy: user.username };
-  }
-
-  denyPairRequest(id: string): { ok: true } {
-    const res = this.db.prepare('DELETE FROM pair_requests WHERE id = ?').run(id);
-    if (res.changes === 0) notFound('pairing request not found or expired');
-    return { ok: true };
-  }
-
-  redeemPairCode(code: string): { token: string; agent: string; developer: string | null; ownerUsername: string } {
-    this.prunePairRequests();
-    const row = this.db.prepare('SELECT * FROM pair_requests WHERE code = ?').get(code) as Row | undefined;
-    if (!row) notFound('invalid or expired pairing code');
-    if (row.approved_by == null) fail('pairing request not approved yet', 403);
-    const owner = this.db.prepare("SELECT id, username FROM users WHERE id = ? AND status = 'active'")
-      .get(row.approved_by as string) as Row | undefined;
-    if (!owner) fail('the approving user is no longer active — request pairing again', 403);
-    this.db.prepare('DELETE FROM pair_requests WHERE id = ?').run(row.id as string); // one-time
-    const t = Date.now();
-    const token = randomBytes(32).toString('base64url');
-    this.db.prepare(`INSERT INTO credentials (id, token, agent, machine, developer, user_id, created_at, last_used_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(randomUUID(), token, row.agent as string, (row.machine as string) ?? null,
-        (row.developer as string) ?? null, owner.id as string, t, t);
-    return {
-      token,
-      agent: row.agent as string,
-      developer: (row.developer as string) ?? null,
-      ownerUsername: owner.username as string,
-    };
-  }
-
   // Resolves ONLY when the credential is bound to an ACTIVE user: orphaned or
-  // disabled-owner credentials never authenticate (→ 401 "re-pair").
+  // disabled-owner credentials never authenticate (→ 401 "sign in again").
   getCredentialByToken(token: string): CredentialInfo | null {
     const row = this.db.prepare(`SELECT c.*, u.username AS owner_username FROM credentials c
       JOIN users u ON u.id = c.user_id AND u.status = 'active' WHERE c.token = ?`)
@@ -771,6 +1030,8 @@ export class Store {
       ownerUsername: row.owner_username as string,
       createdAt: Number(row.created_at),
       lastUsedAt: t,
+      authorizationSource: row.authorization_source === 'github-app' ? 'github-app' : 'manual',
+      githubUserId: (row.github_user_id as string) ?? null,
     };
   }
 
@@ -783,6 +1044,7 @@ export class Store {
   listCredentials(userId: string | null): CredentialInfo[] {
     // token values are never returned — a credential is only ever shown by id
     const sql = `SELECT c.id, c.agent, c.machine, c.developer, c.user_id, c.created_at, c.last_used_at,
+        c.authorization_source, c.github_user_id,
         u.username AS owner_username
       FROM credentials c LEFT JOIN users u ON u.id = c.user_id
       ${userId ? 'WHERE c.user_id = ?' : ''} ORDER BY c.created_at`;
@@ -796,6 +1058,8 @@ export class Store {
       ownerUsername: (r.owner_username as string) ?? '',
       createdAt: Number(r.created_at),
       lastUsedAt: Number(r.last_used_at),
+      authorizationSource: r.authorization_source === 'github-app' ? 'github-app' : 'manual',
+      githubUserId: (r.github_user_id as string) ?? null,
     }));
   }
 
@@ -849,6 +1113,86 @@ export class Store {
     return { ok: true, user: publicUser(row), token: this.createUserSession(row.id as string) };
   }
 
+  async loginDevice(rawUsername: string, password: string, machine: string | null): Promise<
+    { ok: true; token: string; user: PublicUser } | Exclude<LoginResult, { ok: true }>
+  > {
+    let username = '';
+    try { username = normalizeUsername(rawUsername); } catch { /* dummy verify below */ }
+    const row = username ? this.db.prepare('SELECT * FROM users WHERE username = ?').get(username) as Row | undefined : undefined;
+    const ok = await verifyPassword(password, (row?.password_hash as string) ?? DUMMY_HASH);
+    if (!row || !ok) return { ok: false, code: 401, error: 'invalid credentials' };
+    if (row.status === 'pending') return { ok: false, code: 403, error: 'account pending approval', status: 'pending' };
+    if (row.status === 'disabled') return { ok: false, code: 403, error: 'account disabled', status: 'disabled' };
+    const t = Date.now();
+    const token = randomBytes(32).toString('base64url');
+    this.db.prepare(`INSERT INTO credentials (id, token, agent, machine, developer, user_id, created_at, last_used_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(randomUUID(), token, 'device', machine, null, row.id as string, t, t);
+    return { ok: true, token, user: publicUser(row) };
+  }
+
+  createGithubDeviceCredential(userId: string, machine: string | null): { token: string; credentialId: string } {
+    const user = this.db.prepare(`SELECT github_user_id, github_authorization_status FROM users
+      WHERE id = ? AND status = 'active'`).get(userId) as Row | undefined;
+    if (!user || user.github_authorization_status !== 'authorized' || !user.github_user_id) {
+      fail('active GitHub authorization required', 403);
+    }
+    const token = randomBytes(32).toString('base64url');
+    const id = randomUUID();
+    const t = Date.now();
+    this.db.prepare(`INSERT INTO credentials (id, token, agent, machine, developer, user_id, created_at, last_used_at,
+      authorization_source, github_user_id) VALUES (?, ?, 'device', ?, NULL, ?, ?, ?, 'github-app', ?)`)
+      .run(id, token, machine, userId, t, t, user.github_user_id as string);
+    return { token, credentialId: id };
+  }
+
+  startGithubDeviceActivation(machine: string | null, ttlMs = 15 * 60_000): GithubDeviceActivation {
+    this.db.prepare('DELETE FROM github_device_activations WHERE expires_at <= ? OR redeemed_at IS NOT NULL').run(Date.now());
+    const requestId = randomUUID();
+    const secret = randomBytes(32).toString('base64url');
+    const userCode = randomBytes(5).toString('hex').toUpperCase();
+    const t = Date.now();
+    const expiresAt = t + ttlMs;
+    this.db.prepare(`INSERT INTO github_device_activations
+      (id, secret_hash, user_code, machine, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(requestId, capabilityHash(secret), userCode, machine, t, expiresAt);
+    return { requestId, secret, userCode, expiresAt };
+  }
+
+  bindGithubDeviceActivation(requestId: string, userCode: string, githubUserId: string): void {
+    if (!/^\d+$/.test(githubUserId)) fail('invalid GitHub user id', 400);
+    const result = this.db.prepare(`UPDATE github_device_activations SET github_user_id = ?, bound_at = ?
+      WHERE id = ? AND user_code = ? AND expires_at > ? AND redeemed_at IS NULL`)
+      .run(githubUserId, Date.now(), requestId, userCode.toUpperCase(), Date.now());
+    if (result.changes === 0) notFound('device activation not found or expired');
+  }
+
+  githubDeviceActivationStatus(requestId: string, secret: string):
+    'waiting-for-github' | 'waiting-for-approval' | 'ready' | 'invalid' {
+    const row = this.db.prepare(`SELECT a.github_user_id, u.status, u.github_authorization_status
+      FROM github_device_activations a LEFT JOIN users u ON u.github_user_id = a.github_user_id
+      WHERE a.id = ? AND a.secret_hash = ? AND a.expires_at > ? AND a.redeemed_at IS NULL`)
+      .get(requestId, capabilityHash(secret), Date.now()) as Row | undefined;
+    if (!row) return 'invalid';
+    if (!row.github_user_id) return 'waiting-for-github';
+    if (row.status !== 'active' || row.github_authorization_status !== 'authorized') return 'waiting-for-approval';
+    return 'ready';
+  }
+
+  redeemGithubDeviceActivation(requestId: string, secret: string): { token: string; credentialId: string; userId: string } {
+    const row = this.db.prepare(`SELECT a.*, u.id AS user_id FROM github_device_activations a
+      JOIN users u ON u.github_user_id = a.github_user_id
+        AND u.status = 'active' AND u.github_authorization_status = 'authorized'
+      WHERE a.id = ? AND a.secret_hash = ? AND a.expires_at > ? AND a.redeemed_at IS NULL`)
+      .get(requestId, capabilityHash(secret), Date.now()) as Row | undefined;
+    if (!row) fail('device activation is invalid, expired, or not authorized', 403);
+    const redeemed = this.db.prepare(`UPDATE github_device_activations SET redeemed_at = ?
+      WHERE id = ? AND redeemed_at IS NULL`).run(Date.now(), row.id as string);
+    if (redeemed.changes === 0) fail('device activation already redeemed', 403);
+    const credential = this.createGithubDeviceCredential(row.user_id as string, (row.machine as string) ?? null);
+    return { ...credential, userId: row.user_id as string };
+  }
+
   private createUserSession(userId: string): string {
     const token = randomBytes(32).toString('base64url');
     const t = Date.now();
@@ -900,7 +1244,15 @@ export class Store {
     }
     this.db.prepare('UPDATE users SET role = ?, status = ?, updated_at = ? WHERE id = ?')
       .run(role, status, Date.now(), id);
-    if (status !== 'active') this.clearUserSessions(id); // disabling kills existing sessions
+    if (status !== 'active') {
+      this.clearUserSessions(id);
+      if (row.github_user_id) {
+        this.invalidateGithubAuthorization({
+          userId: id, githubUserId: row.github_user_id as string, reason: 'Mediation account disabled',
+        });
+      }
+    }
+    if (role === 'admin' && status === 'active') this.backfillAlpha();
     return publicUser({ ...row, role, status });
   }
 
@@ -909,6 +1261,11 @@ export class Store {
     if (!row) notFound('user not found');
     if (this.isLastActiveAdmin(row)) fail('cannot remove the last active admin', 409);
     this.clearUserSessions(id);
+    if (row.github_user_id) {
+      this.invalidateGithubAuthorization({
+        userId: id, githubUserId: row.github_user_id as string, reason: 'Mediation account deleted',
+      });
+    }
     this.db.prepare('DELETE FROM users WHERE id = ?').run(id);
     return { ok: true };
   }

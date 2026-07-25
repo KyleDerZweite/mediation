@@ -3,6 +3,7 @@
 // Imports core only for types (see AGENTS.md boundaries).
 
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { hostname } from 'node:os';
 import type {
   SessionCreate,
@@ -35,13 +36,14 @@ commands:
 
 global flags / env:
   --server URL     MEDIATION_SERVER   (default http://localhost:4100)
-  --token TOKEN    MEDIATION_TOKEN    (paired agent bearer credential; required)
-  --project P      MEDIATION_PROJECT  (default: the git remote's repo name)
+  --token TOKEN    MEDIATION_TOKEN    (global device Bearer; required)
+  --project P      MEDIATION_PROJECT  (legacy manual-mode compatibility only)
   --session ID     MEDIATION_SESSION
+  --capability C   MEDIATION_SESSION_CAPABILITY (required for session mutations)
 
-Projects are private: you must be a member (403 otherwise) — an owner adds you
-in the dashboard. An unknown project id is created by the first session you
-start on it, and you become its owner.
+Projects are private. In AUTH_MODE=github-app, use repository initialization
+and the server-returned binding; never accept a model-provided project id.
+AUTH_MODE=manual retains explicit membership and this legacy path argument.
 
 claim status values: investigating | in-progress | testing | blocked
 bug severity values: low | medium | high | critical | unknown`;
@@ -69,6 +71,7 @@ function need(name: string, value: string | null | undefined): string {
 
 const SERVER = arg('--server') || process.env.MEDIATION_SERVER || 'http://localhost:4100';
 const TOKEN = arg('--token') || process.env.MEDIATION_TOKEN || '';
+const CAPABILITY = arg('--capability') || process.env.MEDIATION_SESSION_CAPABILITY || '';
 
 // ---- git helpers ----
 
@@ -82,39 +85,71 @@ function git(...args: string[]): string | null {
   }
 }
 
-// Deliberate duplicate of parseRemoteSlug/derivedProject in
+// Deliberate duplicate of push-remote resolution in
 // clients/mediation-mcp.mjs — that client ships to user machines as a single
 // standalone file and cannot import from here. Keep the two in sync.
-function parseRemoteSlug(url: string): string | null {
-  const last = String(url || '').trim().replace(/\/+$/, '').split(/[/:]/).pop() || '';
-  const slug = last.replace(/\.git$/i, '').toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64);
-  return /^[a-z0-9][a-z0-9._-]{0,63}$/.test(slug) ? slug : null;
-}
-
-function derivedProject(): { id: string; source: string } | null {
-  const origin = git('config', '--get', 'remote.origin.url');
-  const fromOrigin = origin ? parseRemoteSlug(origin) : null;
-  if (fromOrigin) return { id: fromOrigin, source: `git remote origin: ${origin}` };
-  for (const line of (git('remote', '-v') || '').split('\n')) {
-    const url = line.split(/\s+/)[1];
-    const id = url ? parseRemoteSlug(url) : null;
-    if (id) return { id, source: `git remote: ${url}` };
+function parseGitHubRemote(raw: string): { owner: string; repo: string } | null {
+  const value = raw.trim();
+  let owner: string;
+  let repo: string;
+  const scp = /^(?:[^@]+@)?github\.com:([^/]+)\/(.+)$/i.exec(value);
+  if (scp) {
+    [, owner, repo] = scp;
+  } else {
+    try {
+      const u = new URL(value);
+      if (u.hostname.toLowerCase() !== 'github.com') return null;
+      const parts = u.pathname.replace(/^\/+|\/+$/g, '').split('/');
+      if (parts.length !== 2) return null;
+      [owner, repo] = parts;
+    } catch {
+      return null;
+    }
   }
-  return null;
+  repo = repo.replace(/\.git$/i, '');
+  return /^[A-Za-z0-9_.-]+$/.test(owner) && /^[A-Za-z0-9_.-]+$/.test(repo) ? { owner, repo } : null;
 }
 
-// --project → MEDIATION_PROJECT → the git remote's repo name (never the
-// directory name). The chosen id is echoed so a wrong guess is obvious.
+function projectSlug(owner: string, repo: string): string {
+  const raw = `gh-${owner.toLowerCase()}--${repo.toLowerCase()}`;
+  if (raw.length <= 64) return raw;
+  const hash = createHash('sha256').update(`${owner}/${repo}`.toLowerCase()).digest('hex').slice(0, 10);
+  return `${raw.slice(0, 53).replace(/[._-]+$/g, '')}-${hash}`;
+}
+
+function derivedProject(): { id?: string; source?: string; error?: string } {
+  const branch = git('symbolic-ref', '--quiet', '--short', 'HEAD');
+  const remote = (branch && git('config', '--get', `branch.${branch}.pushRemote`))
+    || git('config', '--get', 'remote.pushDefault')
+    || (branch && git('config', '--get', `branch.${branch}.remote`))
+    || 'origin';
+  if (remote === '.') return { error: 'the Git push remote is local, not GitHub' };
+  const values = git('config', '--get-all', `remote.${remote}.pushurl`)
+    || git('config', '--get-all', `remote.${remote}.url`) || '';
+  const urls = [...new Set(values.split('\n').map((x) => x.trim()).filter(Boolean))];
+  if (!urls.length) return { error: `Git remote "${remote}" has no push URL` };
+  if (urls.length > 1) return { error: `Git remote "${remote}" has multiple distinct push URLs` };
+  const repository = parseGitHubRemote(urls[0]);
+  if (!repository) return { error: `Git push remote "${remote}" is not a supported github.com repository` };
+  return {
+    id: projectSlug(repository.owner, repository.repo),
+    source: `Git push remote ${remote}: github.com/${repository.owner}/${repository.repo}`,
+  };
+}
+
+// Legacy manual-mode compatibility: --project → MEDIATION_PROJECT → a derived
+// path id. GitHub App mode must use repository initialization/server binding,
+// not expose this helper to a model-facing workflow.
 const project = (): string => {
   const explicit = arg('--project') || process.env.MEDIATION_PROJECT;
   if (explicit) return encodeURIComponent(explicit);
   const derived = derivedProject();
-  if (derived) {
-    console.error(`# project: ${derived.id} (${derived.source})`);
+  if (derived.id) {
+    console.error(`# legacy manual project: ${derived.id} (${derived.source})`);
     return encodeURIComponent(derived.id);
   }
-  return encodeURIComponent(need('--project (or MEDIATION_PROJECT, or a git remote)', null));
+  console.error(`error: ${derived.error}`);
+  return encodeURIComponent(need('--project (or MEDIATION_PROJECT, or a GitHub push remote)', null));
 };
 
 const session = (): string =>
@@ -129,8 +164,10 @@ async function call<T = any>(method: string, path: string, body?: unknown): Prom
       method,
       headers: {
         'content-type': 'application/json',
-        // Project routes require an identity; pair once and export the token.
+        // Project routes require the global device identity. Session-scoped
+        // mutations additionally require the capability returned by connect.
         ...(TOKEN ? { authorization: `Bearer ${TOKEN}` } : {}),
+        ...(CAPABILITY ? { 'x-mediation-session': CAPABILITY } : {}),
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
@@ -159,9 +196,9 @@ const commands: Record<string, () => Promise<void>> = {
       developer: arg('--developer'),
       machine: arg('--machine') || hostname(),
     };
-    const s = await call<{ id: string }>('POST', `/api/projects/${project()}/sessions`, body);
+    const s = await call<{ id: string; capability: string }>('POST', `/api/projects/${project()}/sessions`, body);
     out(s);
-    console.error(`\n# save this:\nexport MEDIATION_SESSION=${s.id}`);
+    console.error(`\n# save these for this process only:\nexport MEDIATION_SESSION=${s.id}\nexport MEDIATION_SESSION_CAPABILITY=${s.capability}`);
   },
 
   async heartbeat() {

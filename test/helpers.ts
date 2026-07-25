@@ -1,6 +1,5 @@
-// Shared test rig. Since the Alpha milestone both identity kinds take setup:
-// a human user must exist and be approved, and pairing needs a human approval
-// before the code is revealed — so every suite builds identities the same way.
+// Shared test rig. A human user must exist and be active before a narrow device
+// credential can be issued, so every suite builds identities the same way.
 import { Store } from '../src/server/store.ts';
 import { buildApp } from '../src/server/app.ts';
 
@@ -47,9 +46,9 @@ export async function activeUser(req: Req, adminCookie: string, username: string
   return { id: user.id, username: user.username, cookie: cookieOf(login) };
 }
 
-/** Full pairing flow over the API: request → the human approves → redeem. */
+/** Narrow global device bearer; password is exchanged and never persisted. */
 export async function pair(req: Req, cookie: string, agent: string, developer?: string): Promise<string> {
-  const { requestId } = await jb(await req('POST', '/api/auth/request', { agent, developer: developer ?? null }));
-  const { code } = await jb(await req('POST', `/api/auth/pending/${requestId}/approve`, undefined, { cookie }));
-  return (await jb(await req('POST', '/api/auth/redeem', { code }))).token;
+  void agent; void developer;
+  const username = (await jb(await req('GET', '/api/users/me', undefined, { cookie }))).user.username;
+  return (await jb(await req('POST', '/api/auth/device-login', { username, password: PW }))).token;
 }

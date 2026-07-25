@@ -5,15 +5,16 @@ are working on **right now**, before their work reaches Git. Check it before you
 start work so you never duplicate effort.
 
 Base URL: the server root, e.g. `http://localhost:4100`. Project endpoints
-(`/api/projects/*`) require an identity: send a paired **Bearer credential**
-(`Authorization: Bearer <token>`, see Pairing below) — or, if a human is driving
+(`/api/projects/*`) require an identity: send a device **Bearer credential**
+(`Authorization: Bearer <token>`, see Device login below) — or, if a human is driving
 the dashboard, an active user session cookie works too. Unauthenticated requests
 get `401` with a `WWW-Authenticate: Bearer resource_metadata="/auth.md"` hint;
-the full auth contract is at `/auth.md`. Requests are keyed by a shared project
-identifier. All bodies are JSON; errors come back as `{ "error": "..." }` with a
+the full auth contract is at `/auth.md`. The MCP client resolves one repository
+binding at initialization; models never supply a project identifier to
+operational tools. All bodies are JSON; errors come back as `{ "error": "..." }` with a
 proper HTTP status (validation failures are 400 with Zod issue details).
 
-`GET /api/health` → `{ "ok": true, "now": ..., "version": "0.3.0-alpha" }` — use
+`GET /api/health` → `{ "ok": true, "now": ..., "version": "0.3.0-alpha", "authMode": "github-app" }` — use
 it to verify the server is up.
 `GET /api/projects` → the projects **you** may see, with live counts:
 
@@ -23,25 +24,35 @@ GET /api/projects
       "conflicts": 0, "agents": ["claude", "codex"], "lastActivityAt": 1753257600000 } ]
 ```
 
-## Projects
+Mediation is advisory infrastructure, never a prerequisite for completing the
+user's coding task. If the server cannot be reached, times out, or returns
+`404` while establishing the coordination session, report the outage once and
+continue without coordination. Do not retry in a loop or guess another project.
+This fallback does not apply to an explicit authentication or membership denial
+from a reachable server.
 
-A project id is a real object, not a free-text label, and it is **private**:
-only its members (and instance admins) can read or write anything under
-`/api/projects/{project}/`.
+## Repository binding and projects
 
-- **One project per repository.** The id is the repository name from the git
-  remote — `git config --get remote.origin.url`, take the last path component,
-  strip `.git`, lowercase, replace anything outside `[a-z0-9._-]` with `-`.
-  Never derive it from the directory name (stale, renamed, generic). With no
-  git remote, **ask your human** which project this is.
-- **Ids created from now on** must match `^[a-z0-9][a-z0-9._-]{0,63}$`
-  (trimmed + lowercased); older ids are grandfathered.
-- **Auto-create:** `POST /api/projects/{project}/sessions` on an id that does
-  not exist creates it, with the user owning your credential as its owner.
-  That is the only creation path an agent has — everything else answers `404`.
-- **Membership is human-managed.** Agents cannot add members, remove members,
-  create projects through `POST /api/projects`, or delete a project: those
-  answer `403 { "error": "project administration is human-only" }`.
+A project is a server-owned object, not a free-text label, and it is private.
+The client sends normalized GitHub `owner/repository` only during repository
+initialization. The server returns an internal project/session binding used by
+later calls. Models must not choose or persist a project id.
+
+- **One project per push target.** Resolve Git's actual push remote
+  (`branch.<name>.pushRemote` → `remote.pushDefault` → branch remote →
+  `origin`), then normalize the GitHub **owner and repository**.
+  This intentionally keeps a fork separate from its upstream. Reject
+  ambiguous multiple push URLs. Never derive an id from the fetch remote or
+  directory name. With no supported GitHub push remote, **ask your human**.
+- **GitHub App mode (`AUTH_MODE=github-app`):** the server verifies the
+  browser-linked human’s remote permission. The agent never receives or stores
+  a GitHub token.
+- **Manual mode (`AUTH_MODE=manual`):** repository authorization is explicitly
+  unverified; a project owner grants membership. It remains fully functional
+  without a GitHub App.
+- A local `gh`/push check is a doctor diagnostic only; it never authorizes
+  Mediation because an agent can forge local output.
+- Agents cannot administer projects or membership.
 - **Not a member** of an existing project → `403`:
   `{ "error": "not a member of project \"x\"", "project", "hint", "docs": "/auth.md" }`.
   Relay the `hint` to your human verbatim and **stop**: do not retry, do not
@@ -52,17 +63,35 @@ only its members (and instance admins) can read or write anything under
 - Your session's `developer` is overwritten with the username that owns your
   credential: attribution is verified, not self-declared.
 
+### GitHub repository integration
+
+In GitHub App mode the official client calls:
+
+```
+POST /api/repositories/github/session
+{ "owner": "acme", "repository": "widget", "agent": "claude-code", "machine": "host" }
+```
+
+The server resolves the App installation, immutable repository ID and the
+linked GitHub user's exact `write` or `admin` permission before it returns a
+server-selected project, session, process-local capability and five-minute
+authorization metadata. The client persists only `{ server, repository }`.
+Path-based project creation is manual-mode compatibility only.
+
 ## Workflow
 
 ### 1. Connect (once per session)
 
 ```
-POST /api/projects/{project}/sessions
-{ "agent": "<your-name>", "developer": "<human-name>", "machine": "<host>" }
-→ { "id": "<sessionId>", "agent": ..., "createdAt": ..., ... }
+repository initialization → `{ "repository": { "owner": "<owner>", "repo": "<repo>" },
+"agent": "<harness>", "machine": "<host>" }`
+→ `{ "project": "<internal binding>", "id": "<sessionId>", "capability": "<secret>", ... }`
 ```
 
-Keep `sessionId`. You must heartbeat or your session and claims expire.
+Keep `sessionId` and the secret `capability`. Send the capability as
+`X-Mediation-Session` on every request that names that session or its claims
+or bugs, including `check?sessionId=...`.
+You must heartbeat or your session and claims expire.
 
 ### 2. Check before you start work
 
@@ -153,13 +182,13 @@ completed feed. Disconnecting releases your remaining claims.
 ## CLI shortcut
 
 `src/cli/mediation-agent.ts` (installed as `mediation-agent`, or run with
-`node src/cli/mediation-agent.ts`) wraps all of the above. Server/project/
-session come from `--server`/`--project`/`--session` flags or the
-`MEDIATION_SERVER`/`MEDIATION_PROJECT`/`MEDIATION_SESSION` env vars.
+`node src/cli/mediation-agent.ts`) wraps all of the above. Server/session come
+from initialization. `--project` is legacy compatibility only; new automation
+uses the server-returned binding rather than accepting a model-provided id.
 
 ```
 mediation-agent connect --project P --agent NAME
-export MEDIATION_SESSION=<id> MEDIATION_PROJECT=P
+export MEDIATION_SESSION=<id> MEDIATION_SESSION_CAPABILITY=<capability> MEDIATION_PROJECT=P
 mediation-agent heartbeat --watch 30 &        # keep alive every 30s
 mediation-agent repo                          # auto-detects branch/revision/dirty from git
 mediation-agent check --files src/x.js --task "BUG-1"   # exit code 3 = overlap
@@ -176,32 +205,38 @@ Run `mediation-agent` with no arguments for full usage. Exit codes: `0` ok,
 `1` request/server error, `2` missing/unknown arguments, `3` (check only)
 overlap detected — gate on it in scripts.
 
-## Pairing (persistent credentials)
+## Device login (persistent credentials)
 
-Instead of raw sessions, an agent can pair once per machine/user and reuse a
-durable credential (the MCP client automates this via `mediation_init`):
-
-```
-POST /api/auth/request   { "agent": "claude-code@host", "machine": "host", "developer": "kyle" }
-→ { "requestId": "...", "expiresAt": 1710000000000 }
-```
-
-The human opens the dashboard's **Agents** page and clicks **Approve** on the
-pending request. Only then does an 8-character code appear, which they relay:
+An agent logs in once per server/machine and reuses a durable, narrow device
+credential (the MCP client automates this via `mediation_login`):
 
 ```
-POST /api/auth/redeem    { "code": "AB2CD3EF" }
-→ { "token": "<bearer token>", "agent": "...", "developer": "...", "ownerUsername": "kyle" }
+Manual mode: `POST /api/auth/device-login { "username": "kyle", "password": "...", "machine": "host" }`
+→ { "token": "<bearer token>", "user": { "username": "kyle", ... } }
 ```
 
-Redeeming before approval is `403 { "error": "pairing request not approved yet" }`
-— ask the human to click Approve; do not spin. The credential belongs to the
-approving user and acts as them.
+Pending accounts receive `403 { "status": "pending" }`; ask an admin to
+activate the account. In GitHub App mode, the human authorizes in a browser;
+the device receives only a narrow Mediation token. Do not persist a password or
+any GitHub token.
+
+GitHub App machine activation:
+
+```
+POST /api/auth/device/start  { "machine": "host" }
+→ { "requestId", "secret", "userCode", "verificationUri", "expiresAt" }
+
+POST /api/auth/device/redeem { "requestId", "secret" }
+→ 202 { "status": "waiting-for-github" | "waiting-for-approval" }
+→ 200 { "token": "<mediation bearer>", "user": { ... } }
+```
+
+The activation secret stays on the initiating machine. The human opens the
+verification URL, signs into GitHub, and confirms the displayed code.
 
 The token is a durable `Authorization: Bearer` credential (revocable from the
-dashboard). Codes are one-time and expire after ~15 minutes. Send this token on
-every project request — it is now required (unauthenticated project calls get
-401). `GET /api/auth/me` validates a stored credential. Full auth reference,
+dashboard). Send it on every project request — unauthenticated project calls
+get 401. `GET /api/auth/me` validates a stored credential. Full auth reference,
 including the human user-account flow and the authorization matrix: `/auth.md`.
 
 ## MCP install (recommended for agents)
@@ -217,14 +252,13 @@ This registers the `mediation` MCP server (tools `mediation_init`,
 `mediation_check`, `mediation_claim`, `mediation_update`,
 `mediation_complete`, `mediation_bug`, `mediation_state`, `mediation_status`)
 in claude-code, codex and kimi, and installs a skill teaching the workflow.
-`<server>/uninstall.sh` reverses all of it (per-project `.mediation.json`
-files are left alone — they hold credentials).
-Per-project pairing state lives in `.mediation.json` (gitignore it —
-`mediation_confirm` checks with `git check-ignore` and tells you). It is read
-and written in the project directory: the git toplevel of wherever the client
-was started, or the `directory` argument / `MEDIATION_DIR` env var if the
-harness starts the MCP server somewhere else.
-`mediation_init` takes the project id as an *optional* argument: by default it
-derives it from the git remote and reports which id and which source it used —
-state that to your human before they approve, so a wrong id is corrected
-before it becomes a project nobody else can see.
+Re-run the install command to update. `<server>/uninstall.sh` reverses the
+manifest-owned harness changes and removes global device auth by default
+(`--keep-auth` preserves it). Per-project `.mediation.json` contains only the
+server/repository mapping; the device credential lives in platform config (XDG on Linux,
+Application Support on macOS, APPDATA on Windows). Project state is read and
+written in the git toplevel of wherever the client was started, or the
+`directory` argument / `MEDIATION_DIR` env var when explicitly set.
+`mediation_init` has no project-name override. It derives the repository from
+the GitHub push remote and reports its source — state that to your human before
+work starts.

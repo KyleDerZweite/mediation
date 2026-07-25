@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased Alpha — global device identity
+
+- Per-agent pairing and relay codes are removed. After an administrator
+  activates a registered user, the agent exchanges that user's password once
+  for a narrow, revocable device token shared by the installed harnesses on
+  the machine. Legacy bearer credentials and pending pairing requests are
+  revoked during migration.
+- Every running agent receives a distinct short-lived session id and secret
+  capability. A process cannot heartbeat, end, update, or complete another
+  process's session-scoped work merely because both share the device token.
+- Global auth follows platform conventions (XDG config on Linux, Application
+  Support on macOS, APPDATA on Windows). `.mediation.json` is secret-free.
+- The dependency-free installer is manifest-owned, transactional, idempotent,
+  supports wizard and headless flags, and configures Claude Code, Codex, Kimi
+  Code, and legacy Kimi CLI. Re-running updates; uninstall removes only owned
+  changes and removes global auth unless `--keep-auth` is supplied.
+- Project derivation now follows Git's push-remote precedence and includes the
+  GitHub owner as well as the repository, so a fork no longer silently shares
+  its upstream's basename-only namespace.
+
+Not yet Alpha-complete: the server still needs independent GitHub permission
+verification before agent-driven project creation is a security boundary.
+Until that lands, a valid device bearer can present a guessed project slug.
+
 ## 0.3.0-alpha — private projects
 
 **Projects are now real, private objects.** A project has an owner and members;

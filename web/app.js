@@ -143,11 +143,11 @@ const state = {
   states: new Map(),       // pid -> ProjectState
   stateErrors: new Map(),  // pid -> HTTP status of the last failed state fetch (403 = not a member)
   members: new Map(),      // pid -> ProjectMember[]
-  authPending: [],         // pending pairing requests (code only once approved)
-  authCredentials: [],     // approved credentials (no token values)
+  authCredentials: [],     // device credentials (no token values)
   me: null,                // logged-in user { id, username, role, status } or null
   users: [],               // admin Users view: PublicUser[]
-  authMode: 'login',       // login | register (logged-out view)
+  authView: 'login',       // login | register (manual-mode logged-out view)
+  serverAuthMode: 'manual',
   authMsg: '',             // message shown on the login/register card
   copied: null,            // key of the element that just copied, for feedback
   armed: null,             // key of a destructive button armed for its second click
@@ -220,9 +220,6 @@ async function refresh() {
         await getJSON(`/api/projects/${encodeURIComponent(r.pid)}/members`).catch(() => []));
     }
 
-    // pairing state: pending always (feeds the Agents nav badge), credentials
-    // only where shown. Tolerate older servers without these endpoints.
-    state.authPending = await getJSON('/api/auth/pending').catch(() => []);
     if (r.view === 'agents' || r.view === 'settings') {
       state.authCredentials = await getJSON('/api/auth/credentials').catch(() => []);
     }
@@ -271,10 +268,8 @@ function renderSidebar() {
   const nav = state.me?.role === 'admin' ? [...NAV, ['users', 'Users', 'shield', '#/users']] : NAV;
   morph($('sideNav'), nav.map(([key, label, ic, href]) => {
     const active = r.view === key;
-    const badge = key === 'agents' && state.authPending.length
-      ? `<span class="nav-badge">${state.authPending.length}</span>` : '';
     return `<a class="side-nav-item${active ? ' active' : ''}" href="${href}">
-      ${icon(ic, active ? '#8fc0ff' : '#7b8496', 18)}<span>${label}</span>${badge}</a>`;
+      ${icon(ic, active ? '#8fc0ff' : '#7b8496', 18)}<span>${label}</span></a>`;
   }).join(''));
 
   const liveTotal = state.projects.reduce((n, p) => n + p.sessions, 0);
@@ -728,32 +723,14 @@ function renderInstanceActivity() {
   </div>`;
 }
 
-function renderPairingPanels() {
+function renderDeviceCredentials() {
   const now = Date.now();
-  const pending = state.authPending.length
-    ? state.authPending.map((q) => `<div class="pair-row">
-        <span class="avatar" style="background:${AVATAR_FALLBACK}">${esc(initials(q.agent))}</span>
-        <div class="pair-who">
-          <div class="pair-agent">${esc(q.agent)}</div>
-          <div class="pair-meta">${q.machine ? esc(q.machine) + ' · ' : ''}requested ${ago(q.createdAt, now)} ago · expires in ${Math.max(0, Math.round((q.expiresAt - now) / 60000))}m</div>
-        </div>
-        ${q.code
-          ? `<span class="pair-approved">approved by ${esc(q.approvedBy || '—')}</span>
-             <button class="pair-code" type="button" data-copy="${esc(q.code)}" data-copy-key="pair-${esc(q.id)}"
-               title="Click to copy, then read this code to the agent">
-               ${state.copied === `pair-${q.id}` ? 'copied' : esc(q.code)}
-             </button>`
-          : `<button class="user-act-btn" type="button" data-approve="${esc(q.id)}">Approve</button>
-             <button class="user-act-btn danger" type="button" data-deny="${esc(q.id)}">Deny</button>`}
-      </div>`).join('')
-    : `<div class="empty-note">No pending requests. An agent asking to connect (via <span class="mono">mediation_init</span>) appears here — approve it to reveal its code.</div>`;
-
   const creds = state.authCredentials.length
     ? state.authCredentials.map((cr) => `<div class="pair-row">
         <span class="avatar" style="background:${AVATAR_FALLBACK}">${esc(initials(cr.agent))}</span>
         <div class="pair-who">
           <div class="pair-agent">${esc(cr.agent)}${cr.developer ? ` <span class="pair-dev">for ${esc(cr.developer)}</span>` : ''}</div>
-          <div class="pair-meta">owner ${esc(cr.ownerUsername || 'unbound')}${cr.machine ? ' · ' + esc(cr.machine) : ''} · paired ${ago(cr.createdAt, now)} ago · last used ${ago(cr.lastUsedAt, now)} ago</div>
+          <div class="pair-meta">owner ${esc(cr.ownerUsername || 'unbound')}${cr.machine ? ' · ' + esc(cr.machine) : ''} · signed in ${ago(cr.createdAt, now)} ago · last used ${ago(cr.lastUsedAt, now)} ago</div>
         </div>
         ${cr.ownerUsername === state.me?.username || state.me?.role === 'admin'
           ? `<button class="revoke-btn${state.armed === `rv-${cr.id}` ? ' armed' : ''}" type="button" data-revoke="${esc(cr.id)}">
@@ -761,16 +738,12 @@ function renderPairingPanels() {
             </button>`
           : ''}
       </div>`).join('')
-    : `<div class="empty-note">No paired agent credentials yet.</div>`;
+    : `<div class="empty-note">No device credentials yet. Install Mediation, register an account, wait for admin approval, then sign in once from an agent.</div>`;
 
   return `<div class="settings-section" style="margin-bottom:22px">
-      <h3>Pending pairing requests${state.authPending.length ? ` <span class="count-tag">${state.authPending.length}</span>` : ''}</h3>
-      <div class="pair-note">Approve a request to reveal its 8-character code, then read the code to the
-        agent. The credential is bound to you — the agent acts as you on the projects you belong to.</div>
-      ${pending}
-    </div>
-    <div class="settings-section" style="margin-bottom:22px">
-      <h3>${state.me?.role === 'admin' ? 'All agents' : 'My agents'}</h3>
+      <h3>${state.me?.role === 'admin' ? 'All device credentials' : 'My device credentials'}</h3>
+      <div class="pair-note">A device credential is shared by the installed harnesses on one machine.
+        Each running agent still gets its own short-lived session identity.</div>
       ${creds}
     </div>`;
 }
@@ -787,8 +760,8 @@ function renderInstanceAgents() {
     </div>`;
   }).join('');
   return `<div class="view-activity" style="max-width:960px">
-    <div class="view-note">Agent pairing and every live session across the instance.</div>
-    ${renderPairingPanels()}
+    <div class="view-note">Device credentials and every live agent session across the instance.</div>
+    ${renderDeviceCredentials()}
     <div class="settings-section" style="margin-bottom:12px"><h3>Live sessions</h3></div>
     ${sections || emptyCard('No live agent sessions anywhere. See <a href="#/settings">Settings</a> for how to connect one.')}
   </div>`;
@@ -820,16 +793,15 @@ function renderSettings() {
         <span class="dp-title">Install for your agents</span>
       </div>
       <div class="dp-note" style="margin:0 0 8px">One command on each developer machine. Detects and registers the
-        Mediation MCP server for <b>claude-code</b> and <b>codex</b> (default: both) and installs a skill that
-        teaches agents the workflow.</div>
+        Mediation MCP server for <b>Claude Code</b>, <b>Codex</b>, <b>Kimi Code</b>, and legacy <b>Kimi CLI</b>,
+        and installs a skill that teaches agents the workflow.</div>
       <div class="snippet-wrap">
         <pre class="snippet" id="installSnippet">${esc(installCmd)}</pre>
         <button class="copy-btn" type="button" data-copy="${esc(installCmd)}" data-copy-key="install">${state.copied === 'install' ? 'Copied' : 'Copy'}</button>
       </div>
-      <div class="dp-note">Then, in a project directory, ask the agent to <i>“set up mediation”</i> — it
-        derives the project id from the git remote and tells you which one it picked (correct it if it is
-        wrong), then requests pairing. Click <b>Approve</b> on the <a href="#/agents">Agents page</a>, read
-        the revealed 8-character code to the agent, and it is paired for that directory for good.</div>
+      <div class="dp-note">Then ask the agent to <i>“register and set up mediation at ${esc(origin)}”</i>.
+        It registers a user account, waits for an administrator to activate it on the
+        <a href="#/users">Users page</a>, signs in once for the machine, and maps the current repository.</div>
     </div>
 
     <div class="dark-panel">
@@ -847,7 +819,7 @@ function renderSettings() {
         <pre class="snippet" id="cliSnippet">${esc(snippet)}</pre>
         <button class="copy-btn" id="copyBtn" type="button">${state.copied === 'cli' ? 'Copied' : 'Copy'}</button>
       </div>
-      <div class="dp-note">Agents authenticate to <span class="mono">/api</span> with a paired Bearer credential; the
+      <div class="dp-note">Agents authenticate to <span class="mono">/api</span> with a global device Bearer; the
         dashboard uses your user session. Protocol reference: <a href="/AGENT.md" target="_blank" rel="noopener">/AGENT.md</a> ·
         auth: <a href="/auth.md" target="_blank" rel="noopener">/auth.md</a>.</div>
     </div>
@@ -903,7 +875,16 @@ function renderUsers() {
 /* ---------------- auth (logged-out) ---------------- */
 
 function renderAuth() {
-  const reg = state.authMode === 'register';
+  if (state.serverAuthMode === 'github-app') {
+    return `<div class="auth-wrap"><div class="auth-card">
+      <div class="auth-brand">Mediation</div>
+      <div class="auth-title">Sign in with GitHub</div>
+      ${state.authMsg ? `<div class="auth-msg">${esc(state.authMsg)}</div>` : ''}
+      <a class="auth-btn" href="/api/github/login" style="display:block;text-align:center;text-decoration:none">Continue with GitHub</a>
+      <div class="auth-toggle">Mediation requests repository metadata only. Repository code is not accessible to the app.</div>
+    </div></div>`;
+  }
+  const reg = state.authView === 'register';
   return `<div class="auth-wrap">
     <div class="auth-card">
       <div class="auth-brand">Mediation</div>
@@ -958,7 +939,7 @@ async function doRegister(username, password) {
     const body = await res.json().catch(() => ({}));
     if (res.ok) {
       if (body.bootstrap) { await doLogin(username, password); return; } // first account: active admin, log straight in
-      state.authMode = 'login';
+      state.authView = 'login';
       state.authMsg = 'Account created — an administrator must approve it before you can sign in.';
     } else {
       state.authMsg = (body.issues ? 'Check username (3-32 chars) and password (min 8).' : body.error) || `Registration failed (${res.status})`;
@@ -1017,7 +998,7 @@ document.addEventListener('click', async (e) => {
     e.preventDefault();
     const act = authEl.dataset.auth;
     if (act === 'toggle') {
-      state.authMode = state.authMode === 'register' ? 'login' : 'register';
+      state.authView = state.authView === 'register' ? 'login' : 'register';
       state.authMsg = '';
       showAuth();
       return;
@@ -1032,7 +1013,7 @@ document.addEventListener('click', async (e) => {
   if (e.target.closest('[data-logout]')) {
     try { await fetch('/api/users/logout', { method: 'POST' }); } catch { /* ignore */ }
     state.me = null;
-    state.authMode = 'login';
+    state.authView = 'login';
     state.authMsg = 'Signed out.';
     showAuth();
     return;
@@ -1088,21 +1069,6 @@ document.addEventListener('click', async (e) => {
     const id = revokeEl.dataset.revoke;
     if (!arm(`rv-${id}`)) return; // first click arms, second confirms
     await send('DELETE', `/api/auth/credentials/${encodeURIComponent(id)}`);
-    refresh();
-    return;
-  }
-
-  const approveEl = e.target.closest('[data-approve]');
-  if (approveEl) {
-    await send('POST', `/api/auth/pending/${encodeURIComponent(approveEl.dataset.approve)}/approve`);
-    refresh();
-    return;
-  }
-
-  const denyEl = e.target.closest('[data-deny]');
-  if (denyEl) {
-    if (!confirm('Deny this pairing request? The agent has to ask again.')) return;
-    await send('DELETE', `/api/auth/pending/${encodeURIComponent(denyEl.dataset.deny)}`);
     refresh();
     return;
   }
@@ -1175,6 +1141,15 @@ function onRoute() {
 
 async function checkAuth() {
   try {
+    const health = await fetch('/api/health', { headers: { Accept: 'application/json' } });
+    if (health.ok) {
+      const info = await health.json();
+      state.serverAuthMode = info.authMode || 'manual';
+      state.version = info.version || '';
+    }
+    const auth = new URLSearchParams(location.search).get('auth');
+    if (auth === 'pending') state.authMsg = 'GitHub identity confirmed. An administrator must approve this Mediation account; then sign in again.';
+    if (auth === 'error') state.authMsg = new URLSearchParams(location.search).get('message') || 'GitHub sign-in failed.';
     const res = await fetch('/api/users/me', { headers: { Accept: 'application/json' } });
     if (res.ok) { state.me = (await res.json()).user; return; }
   } catch { /* server unreachable — treat as logged out */ }

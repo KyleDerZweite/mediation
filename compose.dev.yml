@@ -1,0 +1,21 @@
+# Development: local manual authentication, no GitHub App and no tunnel.
+# Copy .dev.env.example to .dev.env, then:
+# docker compose --env-file .dev.env -f compose.dev.yml up --build
+
+services:
+  mediation:
+    build:
+      context: .
+      dockerfile: Containerfile
+    ports:
+      - "${PORT:-4100}:${PORT:-4100}"
+    volumes:
+      - ./data/dev:/data:Z
+    env_file: .dev.env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch(`http://127.0.0.1:$${process.env.PORT || 4100}/api/health`).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

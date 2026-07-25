@@ -10,34 +10,55 @@ before anything reaches Git. The `mediation_*` MCP tools talk to it. Conflicts
 are **warnings, not locks** — never refuse work because of one; surface it and
 let the user decide.
 
-## One-time setup per project directory
+## Service unavailable
+
+Coordination must never block the user's coding work because the Mediation
+service is offline. If a `mediation_*` call cannot connect, times out, or
+returns `404` for the coordination endpoint/project session:
+
+1. State once that live coordination is unavailable.
+2. Continue the requested work without Mediation.
+3. Do not retry repeatedly, guess another project, or treat the outage as a
+   coding-task failure.
+
+Authentication or membership denials from a reachable server are not outages;
+follow the access instructions below for those responses.
+
+## One-time account and project setup
+
+Mediation has two server-selected authorization modes. In `AUTH_MODE=github-app`
+the human completes browser-based GitHub App authorization; the server verifies
+repository access and the agent never receives or stores a GitHub token. In
+`AUTH_MODE=manual`, register with the username/password the user provides; a
+new account waits for an instance admin to activate it and a project owner adds
+membership explicitly. In both modes, `mediation_login` stores only a narrow
+Mediation device token globally for this server, never in a repository.
+
+If the user asks to update Mediation, re-run the server's `install.sh`; the
+manifest-owned install is idempotent. If they ask to uninstall it, run the
+server's `uninstall.sh`. Uninstall removes the global device credential by
+default; pass `--keep-auth` only when the user explicitly wants to preserve it.
 
 If `mediation_status` says the directory is not initialized (no `.mediation.json`):
 
-1. Call `mediation_init` — **without** a project id unless the user gave you
-   one. It defaults to the repository name from the git remote (one project per
-   repository, so every clone of the repo shares it). Never use the directory
-   name.
-2. **State the chosen project id and its source to the user in your reply**
-   (the tool tells you both) and ask them to correct it *before* they approve —
-   after pairing, a wrong id means a project nobody else can see.
-3. Relay the rest verbatim: the user opens the dashboard's Agents page, clicks
-   **Approve** on the pending request, and reads you the 8-character code that
-   appears only after approval.
-4. When the user gives you the code, call `mediation_confirm`. The credential
-   is stored in `.mediation.json` — the tool tells you whether it is gitignored;
-   if it is not, fix that. Setup never needs repeating for this directory.
+1. Call `mediation_init`. It has no project-name override: it independently
+   resolves the GitHub owner/repository from Git's actual push remote and sends
+   that coordinate only during initialization. A checkout that pushes to a fork
+   coordinates on that fork. Never use the directory name or assume `origin`
+   is the push target.
+2. State the resolved repository and its source to the user in your reply.
+   `.mediation.json` records only the server/repository mapping; it contains no
+   secret and no model-selected project id.
 
 `mediation_status` reports the directory it resolved. If that is not the
 project you are working in (some harnesses start MCP servers elsewhere), pass
-`directory: "<absolute path>"` to `mediation_status`, `mediation_init` and
-`mediation_confirm` — otherwise the credential lands in the wrong place, and
-the tools say so loudly when the target is not a git repository.
+`directory: "<absolute path>"` to `mediation_status` and `mediation_init`.
 
-Projects are private. If any `mediation_*` tool returns **not a member of
-project "x"**, relay the `NEXT STEP` hint to the user verbatim and **stop**:
-do not retry, do not switch project ids, do not create a new project. Only a
-project owner (or an instance admin) can add you, in the dashboard.
+Projects are private. In GitHub App mode, a reachable authorization denial
+means the linked human lacks verified access; in manual mode it means a project
+owner must add them. Relay the `NEXT STEP` hint verbatim and **stop**: do not
+retry, switch repositories, or create a new project. A local `gh`/push check is
+diagnostic only; it never authorizes Mediation access.
 
 ## Every coding task
 

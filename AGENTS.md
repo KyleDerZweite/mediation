@@ -36,9 +36,9 @@ violating this direction is wrong regardless of convenience.
 ## API (v1)
 
 Enforcement is strict (single point in `src/server/app.ts`; matrix in
-`docs/auth.md`, served at `/auth.md`). Identity is a paired **agent Bearer
-credential** (bound to the user who approved it) and/or a **human user session
-cookie**. Levels below: PUBLIC (none), A|U (agent bearer OR active user),
+`docs/auth.md`, served at `/auth.md`). Identity is a global **device Bearer**
+(issued after the user account is active) and/or a **human user session
+cookie**. Levels below: PUBLIC (none), A|U (device bearer OR active user),
 MEMBER (member of the project, or instance-admin cookie), OWNER (project owner
 or instance-admin cookie, human only), USER (active user, human only), ADMIN
 (active admin user).
@@ -46,9 +46,14 @@ or instance-admin cookie, human only), USER (active user, human only), ADMIN
 | Level | Method | Path | Body schema (`src/core/schemas.ts`) |
 | --- | --- | --- | --- |
 | PUBLIC | GET | `/api/health` | — |
+| PUBLIC | POST | `/api/auth/device/start` | `deviceStart` (GitHub App mode) |
+| PUBLIC | POST | `/api/auth/device/redeem` | `deviceRedeem` (GitHub App mode) |
+| PUBLIC | GET | `/api/github/login`, `/api/github/callback` | browser OAuth |
+| PUBLIC | POST | `/api/github/webhook` | signed GitHub webhook |
 | A\|U | GET | `/api/projects` | — (ProjectSummary[], filtered to the actor; `role` per row) |
+| A\|U | POST | `/api/repositories/github/session` | `githubRepositorySession` → verified repository-bound session |
 | USER | POST | `/api/projects` | `projectCreate` → creates + owner membership (409 taken, 400 bad slug) |
-| MEMBER | POST | `/api/projects/:p/sessions` | `sessionCreate` (auto-creates an unknown project; `developer` forced to the credential owner) |
+| MEMBER | POST | `/api/projects/:p/sessions` | `sessionCreate` (manual mode only; auto-creates an unknown project) |
 | MEMBER | POST | `/api/projects/:p/sessions/:id/heartbeat` | `heartbeat` |
 | MEMBER | DELETE | `/api/projects/:p/sessions/:id` | — |
 | MEMBER | POST | `/api/projects/:p/sessions/:id/repo` | `repoReport` |
@@ -64,22 +69,19 @@ or instance-admin cookie, human only), USER (active user, human only), ADMIN
 | OWNER | PATCH | `/api/projects/:p/members/:uid` | `memberPatch` (409 last owner) |
 | OWNER | DELETE | `/api/projects/:p/members/:uid` | — (a member may remove themselves; 409 last owner) |
 | OWNER | DELETE | `/api/projects/:p` | — cascades sessions/claims/bugs/events/members |
-| PUBLIC | POST | `/api/users/register` | `userRegister` → `{ user, bootstrap }` (first ever = active admin, else pending) |
-| PUBLIC | POST | `/api/users/login` | `userLogin` → `{ user }` + cookie \| 401 \| 403 pending/disabled |
+| PUBLIC | POST | `/api/users/register` | `userRegister` (manual mode only) |
+| PUBLIC | POST | `/api/users/login` | `userLogin` (manual mode only) |
 | PUBLIC | POST | `/api/users/logout` | — clears cookie |
+| PUBLIC | POST | `/api/auth/device-login` | `deviceLogin` → narrow global device token (manual mode only) |
 | USER | GET | `/api/users/me` | — active user identity |
 | ADMIN | GET | `/api/users` | — (PublicUser[]) |
 | ADMIN | PATCH | `/api/users/:id` | `userPatch` (role?/status?; final-admin protected 409) |
 | ADMIN | DELETE | `/api/users/:id` | — (final-admin protected 409) |
-| PUBLIC | POST | `/api/auth/request` | `authRequest` → `{ requestId, expiresAt }` (code visible only in dashboard) |
-| PUBLIC | POST | `/api/auth/redeem` | `authRedeem` → `{ token, agent, developer }` (one-time; 404 wrong/expired code) |
 | PUBLIC | GET | `/api/auth/me` | Bearer token → identity, 401 if invalid |
-| USER | GET | `/api/auth/pending` | — pending pairing requests; `code` is null until approved |
-| USER | POST | `/api/auth/pending/:id/approve` | — → `{ code, approvedBy }` (first approver wins, 409 otherwise) |
-| USER | DELETE | `/api/auth/pending/:id` | deny/remove a pending request |
 | USER | GET | `/api/auth/credentials` | — own credentials (all, for an admin), incl. `ownerUsername` |
 | USER | DELETE | `/api/auth/credentials/:id` | revoke (owner or admin, else 403) |
 | PUBLIC | GET | `/install.sh` | installer script, `__MEDIATION_URL__` templated from request proto+host |
+| PUBLIC | GET | `/install.ps1` | Windows installer bootstrap, URL templated likewise |
 | PUBLIC | GET | `/install/mediation-mcp.mjs` | dependency-free MCP client (stdio), served from `clients/` |
 | PUBLIC | GET | `/install/SKILL.md` | agent skill file, served from `clients/skills/mediation/` |
 
@@ -94,15 +96,17 @@ Schema changes are **additive and self-migrating**: new tables use
 duplicate `ADD COLUMN`). A live database must upgrade by restarting the
 container, never by hand.
 
-## Pairing + enforcement
+## Device identity + enforcement
 
-Device-flow-lite, approve-to-reveal: agent POSTs `/api/auth/request` →
-dashboard (#/agents) shows the pending request **without** a code → a human
-clicks Approve (`POST /api/auth/pending/:id/approve`), which reveals an 8-char
-one-time code (15 min TTL) and stamps the approver → the human relays the code
-→ agent POSTs `/api/auth/redeem` → durable bearer token **owned by the
-approver**. A credential without an active owning user never authenticates
-(401 `credential must be re-paired`).
+`AUTH_MODE=manual` registers the human account, waits for an administrator to
+activate it, then exchanges the password once at `/api/auth/device-login`.
+`AUTH_MODE=github-app` is browser/user-driven: the server verifies GitHub
+access and issues only a narrow Mediation device token. No GitHub token, App
+private key, browser cookie, or password belongs in a client/repository map.
+All harnesses on that machine share the device token.
+Every process creates a distinct short-lived server session and receives a
+session capability; mutations for that session, its claims, and its bugs must
+present `X-Mediation-Session`.
 
 Enforcement summary (all of it in the one `/api/*` middleware in
 `src/server/app.ts` — don't scatter permission checks beyond it):
@@ -116,10 +120,14 @@ Enforcement summary (all of it in the one `/api/*` middleware in
 - Deny by default: **any** future route under `/api/projects/:p/` is
   member-gated by construction. Adding a route needs no new check; making one
   *less* restricted is the change that needs thought.
-- Human-only surfaces (members, project create/delete, pairing approval) reject
+- Human-only surfaces (members and project create/delete) reject
   agents explicitly instead of falling through to a tier that might allow them.
 - 403 = exists but you are not a member (with a `hint` for the human); 404 =
   unknown project (with the list of projects the actor can access).
+- GitHub App binding is `POST /api/repositories/github/session` with
+  `{ owner, repository, agent, machine }`; the server returns its internal
+  project/session/capability binding. A local `gh`/push check is doctor-only,
+  never authorization.
 
 ## Clients (`clients/`)
 
@@ -129,7 +137,9 @@ Enforcement summary (all of it in the one `/api/*` middleware in
   git calls resolve against one base directory (`directory` argument >
   `MEDIATION_DIR` > git toplevel of cwd > cwd) — never bare `process.cwd()`.
 - `clients/install.sh` — installer template; server serves it with
-  `__MEDIATION_URL__` replaced. Detects claude-code + codex + kimi (Kimi Code
+  `__MEDIATION_URL__` replaced. Its dependency-free Node helper performs
+  transactional, manifest-owned changes and supports wizard or headless use.
+  Detects claude-code + codex + kimi (Kimi Code
   CLI `~/.kimi-code`, legacy Kimi CLI `~/.kimi`; both take an `mcpServers`
   JSON at `<dir>/mcp.json` and a skill at `<dir>/skills/`), registers the MCP
   server, installs the skill. Idempotent.
@@ -137,7 +147,8 @@ Enforcement summary (all of it in the one `/api/*` middleware in
   verbatim at `/uninstall.sh` (no URL templating needed). Blocks appended to
   harness config files carry `>>> mediation >>>` / `<<< mediation <<<` markers
   so they can be removed surgically — keep them in sync with install.sh.
-  Never deletes per-project `.mediation.json` (they hold credentials).
+  Never deletes per-project `.mediation.json` (they contain only repository
+  mappings). Global device auth is removed unless `--keep-auth` is passed.
 - `clients/skills/mediation/SKILL.md` — teaches agents the workflow
   (init → check → claim → update findings → complete).
 
@@ -153,13 +164,14 @@ Enforcement summary (all of it in the one `/api/*` middleware in
   are kept (`status: 'done'`).
 - Errors: JSON `{ error }` with proper status; validation failures are 400 with
   Zod issue details.
-- Auth is a single module: agent Bearer credentials (pairing) + human user
+- Auth is a single module: global device Bearers + human user
   accounts/sessions + project membership (`docs/auth.md`), enforced once in the
   `/api/*` middleware. Invitations and an audit trail from `docs/PRODUCT.md`
   are still later work — don't scatter permission checks around.
-- Project ids identify a **repository** (derived from the git remote by the
-  clients), one project per repo. The slug rule applies to newly created ids
-  only; pre-Alpha ids are grandfathered.
+- Project ids identify the actual GitHub **push target**. Clients follow Git's
+  push-remote precedence and include owner+repository, so forks do not collide
+  with upstream. The slug rule applies only to new ids; pre-Alpha ids remain
+  grandfathered.
 
 ## Commands
 

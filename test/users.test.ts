@@ -127,7 +127,7 @@ test('project route: 401 with WWW-Authenticate when unauthenticated', async () =
   assert.equal((await jb(res)).auth, '/auth.md');
 });
 
-test('project route works with a paired agent bearer token', async () => {
+test('project route works with a global device bearer token', async () => {
   const { req } = ctx();
   const token = await pair(req, await bootstrap(req), 'claude');
   assert.equal((await req('GET', '/api/projects', undefined, { token })).status, 200);
@@ -154,15 +154,15 @@ test('expired user session → 401 (backdated expires_at)', async () => {
   assert.equal((await req('GET', '/api/users/me', undefined, { cookie })).status, 401);
 });
 
-test('agent bearer never grants user/admin surfaces: GET /api/users and /api/auth/pending → 401', async () => {
+test('device bearer never grants user/admin surfaces or removed legacy auth routes', async () => {
   const { req } = ctx();
   const token = await pair(req, await bootstrap(req), 'claude');
   assert.equal((await req('GET', '/api/users', undefined, { token })).status, 401);
-  assert.equal((await req('GET', '/api/auth/pending', undefined, { token })).status, 401);
+  assert.equal((await req('GET', '/api/auth/pending', undefined, { token })).status, 404);
   assert.equal((await req('POST', '/api/projects', { id: 'agent-made' }, { token })).status, 403); // human-only
 });
 
-test('anonymous GET /api/auth/pending → 401 (pairing-code leak guard)', async () => {
+test('anonymous removed legacy auth route remains unavailable', async () => {
   const { req } = ctx();
   assert.equal((await req('GET', '/api/auth/pending')).status, 401);
 });

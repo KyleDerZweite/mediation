@@ -81,7 +81,7 @@ function tmpFile(name: string): string {
   return path.join(mkdtempSync(path.join(tmpdir(), 'mediation-migrate-')), name);
 }
 
-test('pre-Alpha database upgrades in place: projects, ownership, credential binding', () => {
+test('pre-Alpha database upgrades in place: projects, ownership, legacy credentials revoked', () => {
   const file = tmpFile('legacy.db');
   makeLegacyDb(file, [['u-kyle', 'kyle', 'admin', 'active'], ['u-gang', 'gang', 'user', 'active']]);
 
@@ -100,12 +100,10 @@ test('pre-Alpha database upgrades in place: projects, ownership, credential bind
   assert.equal(store.memberRole('mediation', 'u-kyle'), 'owner');
   assert.equal(store.memberRole('sidequest', 'u-kyle'), 'owner');
 
-  // 3. credentials bound by developer/username match; the rest to the admin
-  assert.equal(row<{ user_id: string }>('SELECT user_id FROM credentials WHERE id = ?', 'cr-kyle').user_id, 'u-kyle');
-  assert.equal(row<{ user_id: string }>('SELECT user_id FROM credentials WHERE id = ?', 'cr-gang').user_id, 'u-gang');
-  assert.equal(row<{ user_id: string }>('SELECT user_id FROM credentials WHERE id = ?', 'cr-ghost').user_id, 'u-kyle');
+  // 3. old self-declared bearer credentials are never upgraded into authority.
+  assert.equal(row<{ n: number }>('SELECT COUNT(*) AS n FROM credentials').n, 0);
 
-  // 4. grandfathered membership keeps already-paired directories working
+  // 4. grandfathered membership preserves known legacy contributors
   assert.equal(store.memberRole('sidequest', 'u-gang'), 'member');
   assert.equal(store.memberRole('mediation', 'u-gang'), null);
 
@@ -134,7 +132,8 @@ test('no active admin: backfill is skipped and the orphaned credentials 401', as
   const app = buildApp(store);
   const res = await app.request('/api/projects', { headers: { authorization: 'Bearer token-cr-gang' } });
   assert.equal(res.status, 401);
-  assert.equal(((await res.json()) as { error: string }).error, 'credential must be re-paired');
+  assert.equal(((await res.json()) as { error: string }).error,
+    'credential owner is unavailable; sign in again after reactivation');
   store.close();
   rmSync(path.dirname(file), { recursive: true, force: true });
 });
@@ -150,7 +149,7 @@ test('the first admin to register adopts a legacy database that had no users', a
   assert.equal(bootstrap, true);
   assert.equal(store.memberRole('mediation', user.id), 'owner');
   assert.equal(store.memberRole('sidequest', user.id), 'owner');
-  assert.equal((store.db.prepare('SELECT user_id FROM credentials WHERE id = ?').get('cr-kyle') as { user_id: string }).user_id, user.id);
+  assert.equal((store.db.prepare('SELECT COUNT(*) AS n FROM credentials').get() as { n: number }).n, 0);
   store.close();
   rmSync(path.dirname(file), { recursive: true, force: true });
 });

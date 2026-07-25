@@ -1,106 +1,29 @@
-import { test, before } from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Store } from '../src/server/store.ts';
-import { buildApp } from '../src/server/app.ts';
+import { bootstrap, cookieOf, ctx, jb, PW } from './helpers.ts';
 
-const store = new Store({ dbPath: ':memory:' });
-const app = buildApp(store);
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const jb = async (r: Response): Promise<any> => r.json();
-
-const json = (method: string, path: string, body?: unknown, token?: string, cookie?: string) =>
-  app.request(path, {
-    method,
-    headers: {
-      'content-type': 'application/json',
-      ...(token ? { authorization: `Bearer ${token}` } : {}),
-      ...(cookie ? { cookie } : {}),
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-
-// The pairing dashboard endpoints (pending/credentials) now require a human
-// user session — bootstrap an admin once and reuse its cookie.
-let adminCookie = '';
-before(async () => {
-  await json('POST', '/api/users/register', { username: 'admin', password: 'password123' });
-  const res = await json('POST', '/api/users/login', { username: 'admin', password: 'password123' });
-  adminCookie = (res.headers.get('set-cookie') ?? '').match(/mediation_user=[^;]+/)?.[0] ?? '';
-});
-
-test('pairing: request -> approve reveals code -> redeem -> me', async () => {
-  const req = await json('POST', '/api/auth/request', { agent: 'claude-code@box', machine: 'box', developer: 'kyle' });
-  assert.equal(req.status, 200);
-  const { requestId, expiresAt } = await jb(req);
-  assert.ok(requestId);
-  assert.ok(expiresAt > Date.now());
-
-  const pending = await jb(await json('GET', '/api/auth/pending', undefined, undefined, adminCookie));
-  const listed = pending.find((p: { id: string }) => p.id === requestId);
-  assert.ok(listed, 'request appears in pending list');
-  assert.equal(listed.code, null, 'code is withheld until a human approves');
-  assert.equal(listed.approvedBy, null);
-
-  const approved = await json('POST', `/api/auth/pending/${requestId}/approve`, undefined, undefined, adminCookie);
-  assert.equal(approved.status, 200);
-  const mine = await jb(approved);
-  assert.match(mine.code, /^[A-HJ-NP-Z2-9]{8}$/);
-  assert.equal(mine.approvedBy, 'admin');
-
-  const redeem = await json('POST', '/api/auth/redeem', { code: mine.code });
-  assert.equal(redeem.status, 200);
-  const { token, agent } = await jb(redeem);
+test('device login mints a revocable bearer only for an active user', async () => {
+  const { req } = ctx();
+  const admin = await bootstrap(req);
+  const pending = await jb(await req('POST', '/api/users/register', { username: 'alice', password: PW }));
+  assert.equal((await req('POST', '/api/auth/device-login', { username: 'alice', password: PW })).status, 403);
+  await req('PATCH', `/api/users/${pending.user.id}`, { status: 'active' }, { cookie: admin });
+  const alice = { cookie: cookieOf(await req('POST', '/api/users/login', { username: 'alice', password: PW })) };
+  const login = await req('POST', '/api/auth/device-login', { username: 'alice', password: PW, machine: 'box' });
+  assert.equal(login.status, 200);
+  const { token } = await jb(login);
   assert.ok(token.length > 30);
-  assert.equal(agent, 'claude-code@box');
-
-  const me = await json('GET', '/api/auth/me', undefined, token);
-  assert.equal(me.status, 200);
-  assert.equal((await jb(me)).developer, 'kyle');
-
-  // one-time: same code fails now
-  assert.equal((await json('POST', '/api/auth/redeem', { code: mine.code })).status, 404);
+  assert.equal((await req('GET', '/api/auth/me', undefined, { token })).status, 200);
+  const credentials = await jb(await req('GET', '/api/auth/credentials', undefined, { cookie: alice.cookie }));
+  assert.equal(credentials[0].agent, 'device');
+  assert.equal(credentials[0].token, undefined);
+  assert.equal((await req('DELETE', `/api/auth/credentials/${credentials[0].id}`, undefined, { cookie: alice.cookie })).status, 200);
+  assert.equal((await req('GET', '/api/auth/me', undefined, { token })).status, 401);
+  assert.equal((await req('POST', '/api/auth/device-login', { username: 'alice', password: 'wrong' })).status, 401);
 });
 
-test('redeem: wrong code is 404', async () => {
-  assert.equal((await json('POST', '/api/auth/redeem', { code: 'ZZZZZZZZ' })).status, 404);
-});
-
-test('expired requests are pruned and not redeemable', async () => {
-  const { requestId } = await jb(await json('POST', '/api/auth/request', { agent: 'stale-agent' }));
-  const { code } = await jb(await json('POST', `/api/auth/pending/${requestId}/approve`, undefined, undefined, adminCookie));
-  // reach into the store to expire it — TTL is not configurable by design
-  (store as unknown as { db: { prepare(sql: string): { run(...a: unknown[]): unknown } } })
-    .db.prepare('UPDATE pair_requests SET expires_at = ? WHERE id = ?').run(Date.now() - 1, requestId);
-  assert.equal((await json('POST', '/api/auth/redeem', { code })).status, 404);
-  const after = await jb(await json('GET', '/api/auth/pending', undefined, undefined, adminCookie));
-  assert.equal(after.find((p: { id: string }) => p.id === requestId), undefined);
-});
-
-test('enforcement: invalid token 401; absent identity 401 on project routes', async () => {
-  assert.equal((await json('GET', '/api/projects', undefined, 'bogus')).status, 401);
-  assert.equal((await json('GET', '/api/projects')).status, 401); // enforcement is now strict
-  assert.equal((await json('GET', '/api/projects', undefined, undefined, adminCookie)).status, 200); // user cookie works
-  assert.equal((await json('GET', '/api/auth/me')).status, 401);
-});
-
-test('credentials: list hides tokens; revoke invalidates', async () => {
-  const { requestId } = await jb(await json('POST', '/api/auth/request', { agent: 'revoke-me' }));
-  const { code } = await jb(await json('POST', `/api/auth/pending/${requestId}/approve`, undefined, undefined, adminCookie));
-  const { token } = await jb(await json('POST', '/api/auth/redeem', { code }));
-
-  const creds = await jb(await json('GET', '/api/auth/credentials', undefined, undefined, adminCookie));
-  const cred = creds.find((c: { agent: string }) => c.agent === 'revoke-me');
-  assert.ok(cred);
-  assert.equal(cred.token, undefined, 'token value never exposed');
-  assert.equal(cred.ownerUsername, 'admin'); // credentials are bound to their approver
-
-  assert.equal((await json('DELETE', `/api/auth/credentials/${cred.id}`, undefined, undefined, adminCookie)).status, 200);
-  assert.equal((await json('GET', '/api/auth/me', undefined, token)).status, 401);
-  assert.equal((await json('DELETE', `/api/auth/credentials/${cred.id}`, undefined, undefined, adminCookie)).status, 404);
-});
-
-test('validation: bad auth bodies are 400', async () => {
-  assert.equal((await json('POST', '/api/auth/request', {})).status, 400);
-  assert.equal((await json('POST', '/api/auth/redeem', { code: 'x' })).status, 400);
+test('legacy pairing endpoints are unavailable', async () => {
+  const { req } = ctx();
+  assert.equal((await req('POST', '/api/auth/request', {})).status, 401);
+  assert.equal((await req('POST', '/api/auth/redeem', {})).status, 401);
 });

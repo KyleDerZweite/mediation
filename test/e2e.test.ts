@@ -21,13 +21,14 @@ let tmp: string;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const jb = async (r: Response): Promise<any> => r.json();
 
-const json = (method: string, url: string, body?: unknown, token?: string, cookie?: string) =>
+const json = (method: string, url: string, body?: unknown, token?: string, cookie?: string, capability?: string) =>
   fetch(url, {
     method,
     headers: {
       'content-type': 'application/json',
       ...(token ? { authorization: `Bearer ${token}` } : {}),
       ...(cookie ? { cookie } : {}),
+      ...(capability ? { 'x-mediation-session': capability } : {}),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
@@ -84,6 +85,7 @@ let token = '';
 let credId = '';
 let firstClaimId = '';
 let adminCookie = '';
+const capabilities = new Map<string, string>();
 
 test('user auth: bootstrap admin, pending approval, login/me/logout over TCP', async () => {
   // First registration bootstraps an active admin.
@@ -120,33 +122,16 @@ test('user auth: bootstrap admin, pending approval, login/me/logout over TCP', a
   assert.equal((await json('GET', `${BASE}/api/users/me`, undefined, undefined, bobCookie)).status, 401);
 });
 
-test('pairing: request -> approve -> redeem -> me; bogus bearer 401', async () => {
-  const { requestId } = await jb(await json('POST', `${BASE}/api/auth/request`, {
-    agent: 'e2e-agent@box', machine: 'box', developer: 'kyle',
+test('device login issues a bearer after account activation; bogus bearer 401', async () => {
+  const deviceLogin = await jb(await json('POST', `${BASE}/api/auth/device-login`, {
+    username: 'admin', password: 'password123', machine: 'box',
   }));
-  assert.ok(requestId);
-
-  const pending = await jb(await json('GET', `${BASE}/api/auth/pending`, undefined, undefined, adminCookie));
-  const listed = pending.find((p: { id: string }) => p.id === requestId);
-  assert.ok(listed, 'request appears in pending');
-  assert.equal(listed.code, null, 'code withheld until approval');
-
-  // unapproved codes cannot be redeemed even if guessed
-  assert.equal((await json('POST', `${BASE}/api/auth/redeem`, { code: 'AAAAAAAA' })).status, 404);
-
-  const approved = await jb(await json('POST', `${BASE}/api/auth/pending/${requestId}/approve`,
-    undefined, undefined, adminCookie));
-  assert.match(approved.code, /^[A-HJ-NP-Z2-9]{8}$/);
-  assert.equal(approved.approvedBy, 'admin');
-
-  const redeemed = await jb(await json('POST', `${BASE}/api/auth/redeem`, { code: approved.code }));
-  token = redeemed.token;
+  token = deviceLogin.token;
   assert.ok(token.length > 30);
-  assert.equal(redeemed.ownerUsername, 'admin');
 
   const me = await json('GET', `${BASE}/api/auth/me`, undefined, token);
   assert.equal(me.status, 200);
-  assert.equal((await jb(me)).developer, 'kyle');
+  assert.equal((await jb(me)).ownerUsername, 'admin');
 
   // bogus bearer is rejected on a normal /api route
   assert.equal((await json('GET', `${BASE}/api/projects`, undefined, 'not-a-real-token')).status, 401);
@@ -155,20 +140,22 @@ test('pairing: request -> approve -> redeem -> me; bogus bearer 401', async () =
 test('session + claim flow surfaces overlap conflicts', async () => {
   const a = await jb(await json('POST', `${P}/sessions`, { agent: 'agent-a' }, token));
   assert.ok(a.id);
+  capabilities.set(a.id, a.capability);
 
-  const hb = await json('POST', `${P}/sessions/${a.id}/heartbeat`, { activity: 'exploring' }, token);
+  const hb = await json('POST', `${P}/sessions/${a.id}/heartbeat`, { activity: 'exploring' }, token, undefined, capabilities.get(a.id));
   assert.equal(hb.status, 200);
 
   const first = await jb(await json('POST', `${P}/claims`, {
     sessionId: a.id, intent: 'Fix crash in tokenizer', files: ['src/tokenizer.ts'],
-  }, token));
+  }, token, undefined, capabilities.get(a.id)));
   firstClaimId = first.claim.id;
   assert.equal(first.conflicts.length, 0);
 
   const b = await jb(await json('POST', `${P}/sessions`, { agent: 'agent-b' }, token));
+  capabilities.set(b.id, b.capability);
   const second = await jb(await json('POST', `${P}/claims`, {
     sessionId: b.id, intent: 'Investigate tokenizer crash', files: ['src/tokenizer.ts'],
-  }, token));
+  }, token, undefined, capabilities.get(b.id)));
   assert.ok(second.conflicts.length >= 1, 'overlapping claim warns');
   assert.equal(second.conflicts[0].claimId, firstClaimId);
 });
@@ -183,7 +170,7 @@ test('check endpoint reports overlap', async () => {
 test('complete claim then state shows it done', async () => {
   const done = await jb(await json('POST', `${P}/claims/${firstClaimId}/complete`, {
     commits: ['abc1234'], summary: 'fixed lookahead',
-  }, token));
+  }, token, undefined, capabilities.get([...capabilities.keys()][0])));
   assert.equal(done.status, 'done');
 
   const state = await jb(await json('GET', `${P}/state`, undefined, token));
@@ -244,6 +231,14 @@ test('static assets serve over http', async () => {
   const installer = await json('GET', `${BASE}/install.sh`);
   assert.equal(installer.status, 200);
   assert.match(await installer.text(), new RegExp(`${HOST}:${PORT}`));
+
+  const helper = await json('GET', `${BASE}/install/mediation-installer.mjs`);
+  assert.equal(helper.status, 200);
+  assert.match(helper.headers.get('content-type') ?? '', /javascript/);
+
+  const powershell = await json('GET', `${BASE}/install.ps1`);
+  assert.equal(powershell.status, 200);
+  assert.match(await powershell.text(), new RegExp(`${HOST}:${PORT}`));
 });
 
 // Served verbatim (no URL templating) — the uninstaller only touches local paths.
@@ -253,15 +248,16 @@ test('uninstaller serves over http', async () => {
   assert.match(res.headers.get('content-type') ?? '', /shellscript/);
   const script = await res.text();
   assert.match(script, /^#!\/usr\/bin\/env bash/);
-  // it must know about every harness install.sh writes to
-  for (const marker of ['.claude/skills/mediation', '.codex/config.toml', '.kimi-code', '.kimi']) {
-    assert.ok(script.includes(marker), `uninstaller misses ${marker}`);
-  }
+  assert.match(script, /mediation-installer\.mjs/);
+
+  const powershell = await json('GET', `${BASE}/uninstall.ps1`);
+  assert.equal(powershell.status, 200);
+  assert.match(await powershell.text(), /mediation-installer\.mjs/);
 });
 
 test('revoking the credential invalidates the token', async () => {
   const creds = await jb(await json('GET', `${BASE}/api/auth/credentials`, undefined, undefined, adminCookie));
-  const cred = creds.find((c: { agent: string }) => c.agent === 'e2e-agent@box');
+  const cred = creds.find((c: { agent: string }) => c.agent === 'device');
   assert.ok(cred);
   credId = cred.id;
 

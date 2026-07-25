@@ -10,6 +10,9 @@ let app: Hono;
 let token = ''; // agent bearer — project routes now require an identity
 const P = '/api/projects/api-test';
 const auth = () => ({ authorization: `Bearer ${token}` });
+const capabilities = new Map<string, string>();
+const claimCapabilities = new Map<string, string>();
+const bugCapabilities = new Map<string, string>();
 
 before(async () => {
   const c = ctx({ sessionTtlMs: 60_000 });
@@ -22,16 +25,29 @@ after(() => store.close());
 
 // Responses are intentionally untyped (any): the tests assert the wire shape.
 async function post(path: string, body: unknown, method = 'POST'): Promise<{ status: number; body: any }> {
+  const sessionId = /\/sessions\/([^/]+)/.exec(path)?.[1]
+    ?? (body as { sessionId?: string } | undefined)?.sessionId;
+  const claimId = /\/claims\/([^/]+)/.exec(path)?.[1];
+  const bugId = /\/bugs\/([^/]+)/.exec(path)?.[1];
+  const capability = sessionId ? capabilities.get(sessionId) : (claimId ? claimCapabilities.get(claimId) : bugCapabilities.get(bugId || ''));
   const res = await app.request(path, {
     method,
-    headers: { 'content-type': 'application/json', ...auth() },
+    headers: { 'content-type': 'application/json', ...auth(), ...(capability ? { 'x-mediation-session': capability } : {}) },
     body: JSON.stringify(body),
   });
-  return { status: res.status, body: await res.json() };
+  const result: { status: number; body: any } = { status: res.status, body: await res.json() };
+  if (path.endsWith('/sessions') && result.status === 200) capabilities.set(result.body.id, result.body.capability);
+  if (path.endsWith('/claims') && result.status === 200) claimCapabilities.set(result.body.claim.id, capabilities.get(result.body.claim.sessionId)!);
+  if (path.endsWith('/bugs') && result.status === 200) bugCapabilities.set(result.body.id, capabilities.get((body as { sessionId: string }).sessionId)!);
+  return result;
 }
 
 async function get(path: string): Promise<{ status: number; body: any }> {
-  const res = await app.request(path, { headers: auth() });
+  const sessionId = new URL(path, 'http://test').searchParams.get('sessionId');
+  const capability = sessionId ? capabilities.get(sessionId) : undefined;
+  const res = await app.request(path, {
+    headers: { ...auth(), ...(capability ? { 'x-mediation-session': capability } : {}) },
+  });
   return { status: res.status, body: await res.json() };
 }
 
@@ -47,7 +63,7 @@ test('session lifecycle: create, heartbeat, repo, end', async () => {
   const created = await post(`${P}/sessions`, { agent: 'alpha', developer: 'ada' });
   assert.equal(created.status, 200);
   assert.ok(created.body.id);
-  assert.equal(created.body.agent, 'alpha');
+  assert.match(created.body.agent, /^alpha-[0-9a-f]{8}@admin$/);
 
   const hb = await post(`${P}/sessions/${created.body.id}/heartbeat`, { activity: 'exploring' });
   assert.equal(hb.status, 200);
@@ -109,7 +125,7 @@ test('bugs: report and patch', async () => {
   });
   assert.equal(bug.status, 200);
   assert.equal(bug.body.status, 'open');
-  assert.equal(bug.body.reporter, 'agent-c');
+  assert.match(bug.body.reporter, /^agent-c-[0-9a-f]{8}@admin$/);
 
   const patched = await post(`${P}/bugs/${bug.body.id}`, { status: 'claimed' }, 'PATCH');
   assert.equal(patched.status, 200);

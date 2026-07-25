@@ -83,6 +83,36 @@ export const userLogin = z.object({
   password: str,
 });
 
+// Exchanges a password once for a narrow, revocable device bearer. The client
+// must discard the password; it is never persisted by Mediation.
+export const deviceLogin = z.object({
+  username: str,
+  password: str,
+  machine: optStr,
+});
+
+// GitHub App mode enrolls a machine through a browser-authenticated human.
+// The opaque request secret is proof held by the initiating client; GitHub
+// credentials never cross this protocol boundary.
+export const deviceStart = z.object({
+  machine: optStr,
+});
+
+export const deviceRedeem = z.object({
+  requestId: str,
+  secret: str,
+});
+
+// The official client derives these two names from Git's push remote. There
+// is deliberately no project id in this request.
+const githubName = z.string().min(1).max(100).regex(/^[A-Za-z0-9_.-]+$/);
+export const githubRepositorySession = z.object({
+  owner: githubName,
+  repository: githubName,
+  agent: str,
+  machine: optStr,
+});
+
 export const userPatch = z.object({
   role: z.enum(['user', 'admin']).optional(),
   status: z.enum(['active', 'disabled']).optional(), // approving = 'active'; 'pending' is never settable
@@ -107,18 +137,6 @@ export const memberPatch = z.object({
   role: memberRole,
 });
 
-// ---- agent pairing (device-flow-lite; see AGENTS.md "Pairing") ----
-
-export const authRequest = z.object({
-  agent: str,
-  machine: optStr,
-  developer: optStr,
-});
-
-export const authRedeem = z.object({
-  code: z.string().min(4).max(12),
-});
-
 export type SessionCreate = z.infer<typeof sessionCreate>;
 export type Heartbeat = z.infer<typeof heartbeat>;
 export type RepoReport = z.infer<typeof repoReport>;
@@ -130,6 +148,9 @@ export type BugPatch = z.infer<typeof bugPatch>;
 export type UserRegister = z.infer<typeof userRegister>;
 export type UserLogin = z.infer<typeof userLogin>;
 export type UserPatch = z.infer<typeof userPatch>;
+export type DeviceStart = z.infer<typeof deviceStart>;
+export type DeviceRedeem = z.infer<typeof deviceRedeem>;
+export type GithubRepositorySession = z.infer<typeof githubRepositorySession>;
 export type ProjectCreate = z.infer<typeof projectCreate>;
 export type MemberAdd = z.infer<typeof memberAdd>;
 export type MemberPatch = z.infer<typeof memberPatch>;

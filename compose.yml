@@ -1,8 +1,12 @@
-# Mediation + Pangolin Newt tunnel client.
+# Production: Mediation with GitHub App authorization + Pangolin Newt.
 #
-# `podman-compose up -d --build` runs both. Mediation runs standalone:
+# Copy .env.example to .env, populate it and create the three files under
+# ./secrets before starting. `docker compose up -d --build` and
+# `podman compose up -d --build` both use this file by default.
+#
+# Mediation runs standalone:
 # newt has NO depends_on into it and mediation has no depends_on on newt, so
-# `podman-compose up mediation` works alone and newt simply crash-loops until
+# `docker compose up mediation` works alone and newt simply crash-loops until
 # you fill PANGOLIN_ENDPOINT / NEWT_ID / NEWT_SECRET in .env.
 
 services:
@@ -11,14 +15,17 @@ services:
       context: .
       dockerfile: Containerfile
     ports:
-      - "4100:4100"
+      - "${PORT:-4100}:${PORT:-4100}"
     volumes:
-      - ./data:/data:Z        # SQLite persistence (DB_PATH=/data/mediation.db)
+      - ./data:/data:Z
+      - ./secrets/github-app.pem:/run/secrets/github-app.pem:ro,Z
+      - ./secrets/github-client-secret:/run/secrets/github-client-secret:ro,Z
+      - ./secrets/github-webhook-secret:/run/secrets/github-webhook-secret:ro,Z
     env_file: .env
     restart: unless-stopped
     healthcheck:
       # alpine node image has no curl/wget; use node's built-in fetch.
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4100/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch(`http://127.0.0.1:$${process.env.PORT || 4100}/api/health`).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 5s
       retries: 3

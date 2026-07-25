@@ -5,3 +5,5 @@ data/
 *.log
 .mediation.json
 .env
+.dev.env
+secrets/

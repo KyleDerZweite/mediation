@@ -26,7 +26,7 @@ const ROUTES: [method: string, suffix: string][] = [
   ['DELETE', ''], // the project itself
 ];
 
-// alice owns project "acme"; bob is a stranger. Both have a paired agent.
+// alice owns project "acme"; bob is a stranger. Both have a device bearer.
 async function fixture() {
   const { store, req } = ctx();
   const adminCookie = await bootstrap(req);
@@ -204,7 +204,7 @@ test('disabling the owning user kills their agent credential (401)', async () =>
   assert.equal((await req('PATCH', `/api/users/${alice.id}`, { status: 'disabled' }, { cookie: adminCookie })).status, 200);
   const res = await req('GET', '/api/projects/acme/state', undefined, { token: aliceToken });
   assert.equal(res.status, 401);
-  assert.equal((await jb(res)).error, 'credential must be re-paired');
+  assert.equal((await jb(res)).error, 'credential owner is unavailable; sign in again after reactivation');
   assert.equal(store.getCredentialByToken(aliceToken), null);
 });
 
@@ -216,7 +216,7 @@ test('orphaned credential (user_id NULL) is 401 everywhere', async () => {
     assert.equal(res.status, 401, path);
   }
   const res = await req('GET', '/api/projects', undefined, { token: aliceToken });
-  assert.equal((await jb(res)).error, 'credential must be re-paired');
+  assert.equal((await jb(res)).error, 'credential owner is unavailable; sign in again after reactivation');
 });
 
 test('project id slug rule applies to creation only', async () => {
@@ -229,67 +229,10 @@ test('project id slug rule applies to creation only', async () => {
   assert.equal((await jb(ok)).id, 'my.project_1'); // trimmed + lowercased
 });
 
-test('pairing approval: no code in the list, unapproved redeem 403, second approver 409, deny removes', async () => {
-  const { req, adminCookie, alice, bob } = await fixture();
-  const { requestId } = await jb(await req('POST', '/api/auth/request', { agent: 'fresh-agent' }));
-
-  const pending = await jb(await req('GET', '/api/auth/pending', undefined, { cookie: alice.cookie }));
-  const row = pending.find((p: { id: string }) => p.id === requestId);
-  assert.equal(row.code, null);
-  assert.equal(row.approvedBy, null);
-
-  assert.equal((await req('POST', '/api/auth/redeem', { code: 'AAAAAAAA' })).status, 404); // guessing fails
-
-  const approved = await jb(await req('POST', `/api/auth/pending/${requestId}/approve`, undefined, { cookie: alice.cookie }));
-  assert.match(approved.code, /^[A-HJ-NP-Z2-9]{8}$/);
-  assert.equal(approved.approvedBy, 'alice');
-
-  // idempotent for the same user, 409 for anyone else (including an admin)
-  assert.equal((await jb(await req('POST', `/api/auth/pending/${requestId}/approve`, undefined,
-    { cookie: alice.cookie }))).code, approved.code);
-  const clash = await req('POST', `/api/auth/pending/${requestId}/approve`, undefined, { cookie: bob.cookie });
-  assert.equal(clash.status, 409);
-  assert.equal((await req('POST', `/api/auth/pending/${requestId}/approve`, undefined, { cookie: adminCookie })).status, 409);
-
-  // approved list now shows who approved it
-  const after = await jb(await req('GET', '/api/auth/pending', undefined, { cookie: bob.cookie }));
-  assert.equal(after.find((p: { id: string }) => p.id === requestId).approvedBy, 'alice');
-
-  // redeem binds the credential to the approver
-  const red = await jb(await req('POST', '/api/auth/redeem', { code: approved.code }));
-  assert.equal(red.ownerUsername, 'alice');
-  const me = await jb(await req('GET', '/api/auth/me', undefined, { token: red.token }));
-  assert.equal(me.ownerUsername, 'alice');
-
-  // deny deletes a request
-  const { requestId: second } = await jb(await req('POST', '/api/auth/request', { agent: 'denied-agent' }));
-  assert.equal((await req('DELETE', `/api/auth/pending/${second}`, undefined, { cookie: alice.cookie })).status, 200);
-  assert.equal((await req('DELETE', `/api/auth/pending/${second}`, undefined, { cookie: alice.cookie })).status, 404);
-  const list = await jb(await req('GET', '/api/auth/pending', undefined, { cookie: alice.cookie }));
-  assert.equal(list.find((p: { id: string }) => p.id === second), undefined);
-});
-
-test('redeeming an unapproved request is 403 (code taken straight from the DB)', async () => {
-  const { req, store } = await fixture();
-  const { requestId } = await jb(await req('POST', '/api/auth/request', { agent: 'sneaky' }));
-  const code = (store.db.prepare('SELECT code FROM pair_requests WHERE id = ?').get(requestId) as { code: string }).code;
-  const res = await req('POST', '/api/auth/redeem', { code });
-  assert.equal(res.status, 403);
-  assert.equal((await jb(res)).error, 'pairing request not approved yet');
-});
-
-test('agents cannot approve or deny pairing requests', async () => {
-  const { req, aliceToken } = await fixture();
-  const { requestId } = await jb(await req('POST', '/api/auth/request', { agent: 'self-approver' }));
-  assert.equal((await req('POST', `/api/auth/pending/${requestId}/approve`, undefined, { token: aliceToken })).status, 401);
-  assert.equal((await req('DELETE', `/api/auth/pending/${requestId}`, undefined, { token: aliceToken })).status, 401);
-  assert.equal((await req('POST', `/api/auth/pending/${requestId}/approve`)).status, 401);
-});
-
 test('credentials are scoped: users see only their own, admin sees all, revoke is owner-or-admin', async () => {
   const { req, adminCookie, alice, bob } = await fixture();
   const mine = await jb(await req('GET', '/api/auth/credentials', undefined, { cookie: alice.cookie }));
-  assert.deepEqual(mine.map((c: { agent: string }) => c.agent), ['alice-agent']);
+  assert.deepEqual(mine.map((c: { agent: string }) => c.agent), ['device']);
   assert.equal(mine[0].ownerUsername, 'alice');
 
   const all = await jb(await req('GET', '/api/auth/credentials', undefined, { cookie: adminCookie }));
