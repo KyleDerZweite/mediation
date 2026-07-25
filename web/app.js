@@ -1299,7 +1299,7 @@ function renderDesignSystem() {
 function renderAuth() {
   if (state.serverAuthMode === 'github-app') {
     return `<div class="auth-wrap"><div class="auth-card">
-      <div class="auth-brand"><img src="/web/logo.svg" alt="" class="auth-logo">Mediation</div>
+      <div class="auth-brand"><img src="/web/logo.png" alt="" class="auth-logo">Mediation</div>
       <div class="auth-title">Sign in with GitHub</div>
       ${state.authMsg ? `<div class="auth-msg">${esc(state.authMsg)}</div>` : ''}
       <a class="auth-btn" href="/api/github/login" style="display:block;text-align:center;text-decoration:none">Continue with GitHub</a>
@@ -1309,7 +1309,7 @@ function renderAuth() {
   const reg = state.authView === 'register';
   return `<div class="auth-wrap">
     <div class="auth-card">
-      <div class="auth-brand"><img src="/web/logo.svg" alt="" class="auth-logo">Mediation</div>
+      <div class="auth-brand"><img src="/web/logo.png" alt="" class="auth-logo">Mediation</div>
       <div class="auth-title">${reg ? 'Create account' : 'Sign in'}</div>
       ${state.authMsg ? `<div class="auth-msg">${esc(state.authMsg)}</div>` : ''}
       <input class="auth-input" id="authUser" placeholder="username" autocomplete="username">
