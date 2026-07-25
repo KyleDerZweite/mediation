@@ -2,6 +2,18 @@
 
 ## 0.4.0-alpha: names humans recognise
 
+- **GitHub denials now say what to do.** `GitHub App cannot access this
+  repository` was a dead end: the fix (install the App on that repository) was
+  discoverable only by reading the server source. The four distinct causes are
+  now four messages, each with a `hint` the agent relays verbatim, and the two
+  install-related ones carry the App's own install URL, discovered from
+  `GET /app` and cached. `GET /api/*` error bodies pass `hint` through.
+- Settings no longer offers the `mediation-agent` CLI on a GitHub App
+  instance, where sessions exist only through a verified repository binding
+  and those commands answer 403. That panel now lists the MCP tools in the
+  order an agent calls them; the CLI stays on manual-mode instances, labelled
+  as such.
+
 - **Fixed: no coordination tool worked in a fresh install.** The MCP client
   never awaited session creation, so `mediation_check`, `claim`, `update`,
   `complete`, `bug` and `state` all failed with "session binding is not
@@ -87,9 +99,12 @@
   GitHub owner as well as the repository, so a fork no longer silently shares
   its upstream's basename-only namespace.
 
-Not yet Alpha-complete: the server still needs independent GitHub permission
-verification before agent-driven project creation is a security boundary.
-Until that lands, a valid device bearer can present a guessed project slug.
+Historical note: this section shipped before independent GitHub permission
+verification existed. It landed in 0.4.0-alpha's GitHub App mode, where the
+server resolves the repository and checks the caller's collaborator permission
+before binding a session, so a device bearer can no longer reach a project by
+guessing a slug. The caveat still applies to `AUTH_MODE=manual`, which is the
+development configuration.
 
 ## 0.3.0-alpha: private projects
 

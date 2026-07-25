@@ -579,3 +579,8 @@ input, button { font-family: inherit; }
 
 /* Signed out the shell is hidden, so give the page its own breathing room. */
 .view-design:only-child { min-height: 100vh; }
+
+/* Ordered tool list inside a dark panel (Settings: Connect an agent). */
+.dp-steps { margin: 0; padding: 0 0 0 18px; display: flex; flex-direction: column; gap: 7px; }
+.dp-steps li { font-size: 12px; color: #6b7488; }
+.dp-steps li .mono { color: #8fc0ff; font-size: 12px; margin-right: 8px; }

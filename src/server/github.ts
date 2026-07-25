@@ -43,9 +43,13 @@ export interface WebhookInvalidation {
 
 export class GitHubAppError extends Error {
   readonly statusCode: 400 | 403 | 502 | 503;
-  constructor(message: string, statusCode: 400 | 403 | 502 | 503 = 502) {
+  // Instruction for the human, passed through verbatim by the API and the MCP
+  // client. A denial the user cannot act on is a dead end, not an error.
+  readonly hint?: string;
+  constructor(message: string, statusCode: 400 | 403 | 502 | 503 = 502, hint?: string) {
     super(message);
     this.statusCode = statusCode;
+    this.hint = hint;
   }
 }
 
@@ -117,6 +121,7 @@ export class GitHubApp {
   private readonly config: GitHubAppConfig;
   private readonly installationTokens = new Map<string, InstallationToken>();
   private readonly permissions = new Map<string, PermissionCache>();
+  private slug: string | null | undefined; // undefined = not looked up yet
   private readonly oauth = new Map<string, OAuthPending>();
 
   constructor(config: GitHubAppConfig, options: { fetch?: FetchLike; now?: () => number } = {}) {
@@ -178,11 +183,28 @@ export class GitHubApp {
 
   async resolveRepository(owner: string, name: string): Promise<GitHubRepository> {
     if (!/^[A-Za-z0-9_.-]+$/.test(owner) || !/^[A-Za-z0-9_.-]+$/.test(name)) throw new GitHubAppError('invalid GitHub repository name');
+    const repositoryPath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`;
     // App JWTs discover installations; they are not used to read repository data.
-    const installation = await this.githubJson(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/installation`, { authorization: `Bearer ${this.appJwt()}` });
+    // A 404 here is the single most common first-run failure: the App exists
+    // but nobody installed it on this repository yet.
+    let installation;
+    try {
+      installation = await this.githubJson(`${repositoryPath}/installation`, { authorization: `Bearer ${this.appJwt()}` });
+    } catch (error) {
+      throw await this.explain(error, `the Mediation GitHub App is not installed on ${owner}/${name}`,
+        `Install the Mediation GitHub App on ${owner}/${name}`,
+        'On an organisation repository an owner may have to approve the installation. Then run the same command again.');
+    }
     const installationId = decimal(installation.id, 'installation id');
     const token = await this.installationToken(installationId);
-    const repo = await this.githubJson(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`, { authorization: `Bearer ${token}` });
+    let repo;
+    try {
+      repo = await this.githubJson(repositoryPath, { authorization: `Bearer ${token}` });
+    } catch (error) {
+      throw await this.explain(error, `the Mediation GitHub App installation cannot see ${owner}/${name}`,
+        `Grant the Mediation GitHub App access to ${owner}/${name}`,
+        'The App is installed but this repository is not in its selected repositories.');
+    }
     const repoOwner = object(repo.owner);
     const resolvedOwner = text(repoOwner.login, 'repository owner');
     const resolvedName = text(repo.name, 'repository name');
@@ -216,7 +238,14 @@ export class GitHubApp {
       return { permission: cached.permission!, verifiedAt: cached.verifiedAt, expiresAt: cached.expiresAt };
     }
     const token = await this.installationToken(repository.installationId);
-    const reply = await this.githubJson(`/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}/collaborators/${encodeURIComponent(identity.login)}/permission`, { authorization: `Bearer ${token}` });
+    let reply;
+    try {
+      reply = await this.githubJson(`/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}/collaborators/${encodeURIComponent(identity.login)}/permission`, { authorization: `Bearer ${token}` });
+    } catch (error) {
+      throw await this.explain(error,
+        `GitHub does not list ${identity.login} as a collaborator on ${repository.fullName}`,
+        null, `Ask a ${repository.fullName} admin for write access, then try again.`);
+    }
     const user = object(reply.user);
     if (decimal(user.id, 'permission user id') !== identity.id) throw new GitHubAppError('GitHub permission identity mismatch', 403);
     const permission = text(reply.permission, 'repository permission');
@@ -224,7 +253,11 @@ export class GitHubApp {
     const verifiedAt = this.now();
     const expiresAt = verifiedAt + CACHE_SKEW_MS;
     this.permissions.set(key, { allowed, permission: allowed ? permission : null, verifiedAt, expiresAt });
-    if (!allowed) throw new GitHubAppError('GitHub user lacks write permission', 403);
+    if (!allowed) {
+      throw new GitHubAppError('GitHub user lacks write permission', 403,
+        `Mediation coordinates work you can push: ${identity.login} needs write or admin on `
+        + `${repository.fullName}, but GitHub reports "${permission}".`);
+    }
     return { permission, verifiedAt, expiresAt };
   }
 
@@ -250,6 +283,27 @@ export class GitHubApp {
     this.permissions.clear();
     if (installationId) this.installationTokens.delete(installationId);
     return { event, action, installationId, repositoryIds: [...new Set(repositoryIds)], githubUserId };
+  }
+
+  /* Turn GitHub's flat "cannot access this repository" into the sentence the
+     human needs, with the App's own install URL. The slug comes from GET /app
+     and is cached; if that lookup fails the hint simply omits the link, and a
+     GitHub outage (5xx) still surfaces as an outage, not as a setup problem. */
+  private async explain(error: unknown, message: string, action: string | null, detail: string): Promise<unknown> {
+    if (!(error instanceof GitHubAppError) || error.statusCode !== 403) return error;
+    const url = action ? await this.installUrl() : null;
+    const act = action ? `${action}${url ? ` at ${url}` : ' from your GitHub App settings'}. ` : '';
+    return new GitHubAppError(message, 403, `${act}${detail}`);
+  }
+
+  private async installUrl(): Promise<string | null> {
+    if (this.slug === undefined) {
+      try {
+        const info = await this.githubJson('/app', { authorization: `Bearer ${this.appJwt()}` });
+        this.slug = typeof info.slug === 'string' && /^[A-Za-z0-9-]{1,60}$/.test(info.slug) ? info.slug : null;
+      } catch { this.slug = null; } // a hint lookup must never fail the request
+    }
+    return this.slug ? `https://github.com/apps/${this.slug}/installations/new` : null;
   }
 
   private async installationToken(installationId: string): Promise<string> {

@@ -860,19 +860,64 @@ function renderInstanceAgents() {
 
 /* ---------------- settings ---------------- */
 
-function renderSettings() {
-  const origin = location.origin && location.origin !== 'null' ? location.origin : 'http://localhost:4100';
+// How agents actually connect, which differs by the server's auth mode. In
+// github-app mode the path-based CLI cannot work: sessions only exist through
+// a verified repository binding, so showing its commands would hand people a
+// copy-paste that answers 403.
+function connectPanel(origin) {
+  const github = state.serverAuthMode === 'github-app';
   const pid = state.projects[0]?.id || 'my-project';
-  const snippet = [
-    '# start a session for this project (creates it if the id is new, and you become its owner)',
+  const steps = github
+    ? [
+      ['mediation_status', 'reports the repository it resolved and whether this machine is signed in'],
+      ['mediation_login', 'one browser confirmation, then the device credential is stored for this server'],
+      ['mediation_init', 'binds the repository GitHub says you can push to; no project id is ever typed'],
+      ['mediation_check', 'before touching files, then mediation_claim, mediation_complete'],
+    ]
+    : [
+      ['mediation_register / mediation_login', 'account, then a device credential for this machine'],
+      ['mediation_init', 'maps this repository'],
+      ['mediation_check', 'before touching files, then mediation_claim, mediation_complete'],
+    ];
+  const cli = [
+    '# manual mode only: the CLI addresses projects by id',
     `mediation-agent connect --project ${pid} --agent claude-code`,
     '',
     '# before touching files: check who else is there',
-    `mediation-agent check --files src/server/app.ts --task "fix session expiry"`,
+    'mediation-agent check --files src/server/app.ts --task "fix session expiry"',
     '',
     '# claim the work; overlaps come back as warnings, never locks',
-    `mediation-agent claim --intent "Fix session expiry" --files src/server/app.ts`,
+    'mediation-agent claim --intent "Fix session expiry" --files src/server/app.ts',
   ].join('\n');
+
+  return `<div class="dark-panel">
+    <div class="dark-panel-head">
+      <span class="dp-icon">${icon('plug', '#8fc0ff', 18)}</span>
+      <span class="dp-title">Connect an agent</span>
+    </div>
+    <div class="dp-grid">
+      <div><div class="dp-key">Server URL</div><div class="dp-val">${esc(origin)}</div></div>
+      <div><div class="dp-key">Identity</div><div class="dp-val">${github ? 'GitHub App' : 'username + password'}</div></div>
+    </div>
+    <div class="dp-key" style="margin-bottom:6px">${github ? 'MCP tools, in order' : 'MCP tools'}</div>
+    <ol class="dp-steps">${steps.map(([tool, what]) =>
+      `<li><span class="mono">${esc(tool)}</span><span>${esc(what)}</span></li>`).join('')}</ol>
+    ${github ? '' : `<div class="dp-key" style="margin:16px 0 6px">CLI</div>
+      <div class="snippet-wrap">
+        <pre class="snippet" id="cliSnippet">${esc(cli)}</pre>
+        <button class="copy-btn" id="copyBtn" type="button">${state.copied === 'cli' ? 'Copied' : 'Copy'}</button>
+      </div>`}
+    <div class="dp-note">Install the tools from the <a href="#/agents">Agents page</a>.
+      ${github
+        ? 'Sessions exist only through a verified GitHub repository binding, so there is nothing to type by hand.'
+        : 'The CLI talks to the same API with the machine device Bearer.'}
+      Protocol reference: <a href="/AGENT.md" target="_blank" rel="noopener">/AGENT.md</a> ·
+      auth: <a href="/auth.md" target="_blank" rel="noopener">/auth.md</a>.</div>
+  </div>`;
+}
+
+function renderSettings() {
+  const origin = location.origin && location.origin !== 'null' ? location.origin : 'http://localhost:4100';
   const health = connectionHealth();
 
   return `<div class="view-settings">
@@ -892,24 +937,7 @@ function renderSettings() {
         <a href="/api/health" target="_blank" rel="noopener">/api/health</a> is the raw endpoint.</div>
     </div>
 
-    <div class="dark-panel">
-      <div class="dark-panel-head">
-        <span class="dp-icon">${icon('plug', '#8fc0ff', 18)}</span>
-        <span class="dp-title">Connect an agent</span>
-      </div>
-      <div class="dp-grid">
-        <div><div class="dp-key">Server URL</div><div class="dp-val">${esc(origin)}</div></div>
-        <div><div class="dp-key">Project ID</div><div class="dp-val">${esc(pid)}</div></div>
-      </div>
-      <div class="dp-key" style="margin-bottom:6px">CLI</div>
-      <div class="snippet-wrap">
-        <pre class="snippet" id="cliSnippet">${esc(snippet)}</pre>
-        <button class="copy-btn" id="copyBtn" type="button">${state.copied === 'cli' ? 'Copied' : 'Copy'}</button>
-      </div>
-      <div class="dp-note">Agents authenticate to <span class="mono">/api</span> with a global device Bearer; the
-        dashboard uses your user session. Protocol reference: <a href="/AGENT.md" target="_blank" rel="noopener">/AGENT.md</a> ·
-        auth: <a href="/auth.md" target="_blank" rel="noopener">/auth.md</a>.</div>
-    </div>
+    ${connectPanel(origin)}
 
     <div class="settings-section">
       <h3>How coordination works</h3>

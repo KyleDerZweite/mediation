@@ -168,7 +168,10 @@ Enforcement summary (all of it in the one `/api/*` middleware in
   and reappears on the next event. Completed claims
   are kept (`status: 'done'`).
 - Errors: JSON `{ error }` with proper status; validation failures are 400 with
-  Zod issue details.
+  Zod issue details. A denial the human can act on also carries `hint`, which
+  agents relay verbatim; GitHub setup failures (App not installed, repository
+  not granted, not a collaborator, read-only) each get their own message and
+  hint, while a GitHub outage stays a hintless 503.
 - Auth is a single module: global device Bearers + human user
   accounts/sessions + project membership (`docs/auth.md`), enforced once in the
   `/api/*` middleware. Invitations and an audit trail from `docs/PRODUCT.md`

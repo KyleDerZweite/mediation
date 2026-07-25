@@ -53,3 +53,33 @@ test('GitHub mode creates only verified immutable-repository sessions', async ()
   assert.equal(bypass.status, 403);
   store.close();
 });
+
+test('a repository the App is not installed on answers 403 with an actionable hint', async () => {
+  const store = new Store({ dbPath: ':memory:' });
+  const user = store.findOrCreateGithubUser({
+    githubUserId: '42', login: 'octo', authorizationStatus: 'authorized',
+  }, 'octo');
+  const device = store.createGithubDeviceCredential(user.id, 'box');
+  // Every repository lookup 404s; only GET /app resolves, for the install URL.
+  const fetcher: FetchLike = async (url) => (url.endsWith('/app')
+    ? new Response(JSON.stringify({ slug: 'mediation-example' }), { status: 200, headers: { 'content-type': 'application/json' } })
+    : new Response(JSON.stringify({ message: 'Not Found' }), { status: 404, headers: { 'content-type': 'application/json' } }));
+  const key = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey
+    .export({ type: 'pkcs8', format: 'pem' }).toString();
+  const github = new GitHubApp({
+    publicUrl: 'https://mediation.example', appId: '1', clientId: 'client',
+    clientSecret: 'secret', privateKeyPem: key, webhookSecret: 'webhook',
+  }, { fetch: fetcher });
+  const app = buildApp(store, { authMode: 'github-app', publicUrl: 'https://mediation.example', github });
+
+  const response = await app.request('/api/repositories/github/session', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${device.token}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ owner: 'acme', repository: 'widgets', agent: 'codex', machine: 'box' }),
+  });
+  assert.equal(response.status, 403);
+  const body = await response.json() as { error: string; hint?: string };
+  assert.equal(body.error, 'the Mediation GitHub App is not installed on acme/widgets');
+  assert.match(body.hint || '', /https:\/\/github\.com\/apps\/mediation-example\/installations\/new/);
+  store.close();
+});

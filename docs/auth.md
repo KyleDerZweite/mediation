@@ -78,6 +78,13 @@ POST /api/repositories/github/session
 { "owner": "acme", "repository": "widget", "agent": "codex", "machine": "host" }
 ```
 
+A denial here is answered with an actionable `hint`, not just an error: the
+App not being installed on the repository, the installation not having been
+granted that repository, the caller not being a collaborator, and read-only
+access are four different messages, and the first two carry the App's own
+install URL (discovered from `GET /app`). A GitHub outage stays a `503` with
+no hint, because it is not a setup problem.
+
 The server finds the App installation, resolves the immutable repository id,
 queries GitHub's collaborator-permission endpoint for the bound GitHub
 identity, verifies the returned user id, and allows only exact `write` or

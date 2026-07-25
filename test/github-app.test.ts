@@ -85,3 +85,63 @@ test('revoked GitHub App authorization preserves the sender id as decimal text',
     event: 'github_app_authorization', action: 'revoked', installationId: null, repositoryIds: [], githubUserId: '9007199254740993',
   });
 });
+
+// Await a call that must be denied, and hand back the typed error.
+async function denial(work: Promise<unknown>): Promise<GitHubAppError> {
+  try { await work; } catch (error) {
+    if (error instanceof GitHubAppError) return error;
+    throw error;
+  }
+  throw new Error('expected a GitHubAppError');
+}
+
+// Responds by URL instead of in order: the hint path makes an extra GET /app.
+function router(routes: Array<[RegExp, number, Record<string, unknown>]>) {
+  const calls: string[] = [];
+  const fetch: FetchLike = async (url) => {
+    calls.push(url);
+    const hit = routes.find(([re]) => re.test(url));
+    const [, status, body] = hit ?? [null, 404, { message: 'Not Found' }];
+    return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+  };
+  return { fetch, calls };
+}
+
+test('an uninstalled App answers with the install URL instead of a dead end', async () => {
+  const mock = router([[/\/app$/, 200, { slug: 'mediation-kylehub' }]]); // repo installation lookup 404s
+  const error = await denial(app(mock.fetch)
+    .authorizeRepository('KyleDerZweite', 'mediation', { id: '42', login: 'Kyle' }));
+  assert.equal(error.statusCode, 403);
+  assert.equal(error.message, 'the Mediation GitHub App is not installed on KyleDerZweite/mediation');
+  assert.match(error.hint || '', /https:\/\/github\.com\/apps\/mediation-kylehub\/installations\/new/);
+  assert.match(error.hint || '', /organisation repository/);
+});
+
+test('the hint degrades gracefully when the slug lookup fails, and GitHub outages stay outages', async () => {
+  const noSlug = router([]); // even GET /app 404s
+  const denied = await denial(app(noSlug.fetch).resolveRepository('acme', 'widgets'));
+  assert.equal(denied.statusCode, 403);
+  assert.match(denied.hint || '', /from your GitHub App settings/);
+
+  const down = router([[/./, 503, { message: 'unavailable' }]]);
+  const outage = await denial(app(down.fetch).resolveRepository('acme', 'widgets'));
+  assert.equal(outage.statusCode, 503);
+  assert.equal(outage.hint, undefined, 'a GitHub outage is not a setup problem');
+});
+
+test('read-only collaborators are told exactly what access they need', async () => {
+  const repo = { id: '7', owner: 'org', name: 'repo', fullName: 'org/repo', visibility: 'private' as const, installationId: '8' };
+  const readOnly: Array<[RegExp, number, Record<string, unknown>]> = [
+    [/access_tokens$/, 200, { token: 'install-a', expires_at: '2099-01-01T00:00:00Z' }],
+    [/permission$/, 200, { permission: 'read', user: { id: 42 } }],
+    [/\/repos\/org\/repo\/installation$/, 200, { id: 8 }],
+    [/\/repos\/org\/repo$/, 200, { id: 7, name: 'repo', full_name: 'org/repo', visibility: 'private', owner: { login: 'org' } }],
+  ];
+  // canPush keeps answering false rather than throwing: it is the doctor check.
+  assert.equal(await app(router(readOnly).fetch).canPush(repo, { id: '42', login: 'octo' }), false);
+
+  const thrown = await denial(app(router(readOnly).fetch)
+    .authorizeRepository('org', 'repo', { id: '42', login: 'octo' }));
+  assert.equal(thrown.statusCode, 403);
+  assert.match(thrown.hint || '', /needs write or admin on org\/repo, but GitHub reports "read"/);
+});

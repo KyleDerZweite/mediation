@@ -103,10 +103,13 @@ export function buildApp(store: Store, options: AppOptions = {}): Hono {
   const oauthContexts = new Map<string, { requestId: string | null; userCode: string | null; expiresAt: number }>();
 
   app.onError((err, c) => {
-    const e = err as Error & { statusCode?: number; issues?: unknown };
+    const e = err as Error & { statusCode?: number; issues?: unknown; hint?: string };
     const status = (e.statusCode ?? (e instanceof GitHubAppError ? 502 : 500)) as ContentfulStatusCode;
     const body: Record<string, unknown> = { error: e.message };
     if (e.issues) body.issues = e.issues;
+    // Agents relay `hint` to the human verbatim, so a GitHub setup problem
+    // arrives as an instruction instead of a dead end.
+    if (e.hint) body.hint = e.hint;
     return c.json(body, status);
   });
 
