@@ -724,7 +724,7 @@ async function handle(req) {
       return reply({
         protocolVersion: params?.protocolVersion || '2024-11-05',
         capabilities: { tools: {} },
-        serverInfo: { name: 'mediation', version: '0.4.1' },
+        serverInfo: { name: 'mediation', version: '0.4.2' },
       });
     case 'notifications/initialized':
     case 'notifications/cancelled':

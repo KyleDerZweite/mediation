@@ -114,7 +114,7 @@ function detect() {
 }
 async function download(url) { const r = await fetch(url); if (!r.ok) fail(`download failed (${r.status}): ${url}`); return r.text(); }
 function usage() {
-  return '## Mediation\n\nFor coding tasks, the installed `mediation` skill is recommended for the full task so concurrent work and findings stay visible.\n\nIf the skill or service is unavailable, mention it once and continue.';
+  return '## Mediation\n\nBefore coding or delegating in a repository that contains `.mediation.json`, you must use and follow the installed `mediation` skill for the full task.\n\nIf `.mediation.json` is absent, do not initialize Mediation unless the user explicitly asks. If the skill or service is unavailable, mention it once and continue.';
 }
 function expected(server, agent) {
   return { command: 'node', args: [clientFile], env: { MEDIATION_URL: server, MEDIATION_HARNESS: agent } };

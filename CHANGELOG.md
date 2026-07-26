@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.2: explicit coordination boundary
+
+- In repositories already initialized with `.mediation.json`, harness
+  instructions now require agents to use the installed `mediation` skill
+  before coding or delegating and to follow it for the full task.
+- Uninitialized repositories stay opt-in: agents must not call
+  `mediation_init` or create a mapping unless the user explicitly asks to set
+  up or connect Mediation.
+
 ## 0.4.1: agents keep coordination alive
 
 - The installer now gives Claude Code the same small, marker-owned instruction

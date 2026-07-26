@@ -1,6 +1,6 @@
 ---
 name: mediation
-description: Coordinate work through the Mediation live-coordination server so you never duplicate another developer's or agent's in-flight work. Use BEFORE starting any coding task (check for overlapping claims), when starting work (claim it), when discovering findings or bugs (report them), and when finishing (complete with commits). Also use when the user says "set up mediation", "connect to mediation", or asks what others are working on.
+description: Coordinate work through the Mediation live-coordination server so you never duplicate another developer's or agent's in-flight work. In a repository already initialized with .mediation.json, use BEFORE coding or delegating, while working, and when finishing. Never initialize a repository unless the user explicitly asks to set up or connect Mediation.
 ---
 
 # Mediation: live work coordination
@@ -9,6 +9,15 @@ Mediation shows what every developer and agent is working on *right now*,
 before anything reaches Git. The `mediation_*` MCP tools talk to it. Conflicts
 are **warnings, not locks**. Never refuse work because of one; surface it and
 let the user decide.
+
+## Activation boundary
+
+In a repository that contains `.mediation.json`, this workflow is required for
+every coding task, including work delegated to subagents.
+
+If `.mediation.json` is absent, do not call `mediation_init`, create a mapping,
+or otherwise initialize Mediation unless the user explicitly asks to set up or
+connect it. Continue the coding task without Mediation.
 
 ## Service unavailable
 
@@ -39,7 +48,8 @@ manifest-owned install is idempotent. If they ask to uninstall it, run the
 server's `uninstall.sh`. Uninstall removes the global device credential by
 default; pass `--keep-auth` only when the user explicitly wants to preserve it.
 
-If `mediation_status` says the directory is not initialized (no `.mediation.json`):
+Only when the user explicitly asks to set up or connect Mediation and
+`mediation_status` says the directory is not initialized:
 
 1. Call `mediation_init`. It has no project-name override: it independently
    resolves the GitHub owner/repository from Git's actual push remote and sends

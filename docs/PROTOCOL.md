@@ -14,7 +14,7 @@ binding at initialization; models never supply a project identifier to
 operational tools. All bodies are JSON; errors come back as `{ "error": "..." }` with a
 proper HTTP status (validation failures are 400 with Zod issue details).
 
-`GET /api/health` → `{ "ok": true, "now": ..., "version": "0.4.1", "authMode": "github-app" }`. Use
+`GET /api/health` → `{ "ok": true, "now": ..., "version": "0.4.2", "authMode": "github-app" }`. Use
 it to verify the server is up.
 `GET /api/projects` → the projects **you** may see, with live counts:
 

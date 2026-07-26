@@ -51,7 +51,7 @@ test('installer is idempotent and uninstaller preserves unrelated configuration'
   assert.equal(existsSync(installedSkill), true);
 });
 
-test('Claude receives the skill recommendation without losing its own instructions', async () => {
+test('Claude receives the initialized-repository skill rule without losing its own instructions', async () => {
   const home = join(root, 'claude');
   const claudeHome = join(home, '.claude');
   const bin = join(home, 'bin');
@@ -69,7 +69,8 @@ test('Claude receives the skill recommendation without losing its own instructio
   assert.equal(result.status, 0, result.stderr);
   const instructions = readFileSync(join(claudeHome, 'CLAUDE.md'), 'utf8');
   assert.match(instructions, /^# Mine/m);
-  assert.match(instructions, /installed `mediation` skill is recommended for the full task/);
+  assert.match(instructions, /you must use and follow the installed `mediation` skill/);
+  assert.match(instructions, /do not initialize Mediation unless the user explicitly asks/);
   assert.equal((instructions.match(/>>> mediation >>>/g) || []).length, 1);
 
   result = await run(home, ['--uninstall', '--keep-auth'], env);
