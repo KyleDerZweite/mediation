@@ -157,7 +157,9 @@ const session = (): string =>
 
 // ---- HTTP ----
 
-async function call<T = any>(method: string, path: string, body?: unknown): Promise<T> {
+// One-shot commands exit on failure. `fatal: false` throws instead, for the
+// heartbeat watch, where a single failed request must not end the loop.
+async function call<T = any>(method: string, path: string, body?: unknown, { fatal = true } = {}): Promise<T> {
   let res: Response;
   try {
     res = await fetch(`${SERVER}${path}`, {
@@ -172,12 +174,15 @@ async function call<T = any>(method: string, path: string, body?: unknown): Prom
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
   } catch {
-    console.error(`error: cannot reach ${SERVER}. Is the mediation server running?`);
+    const message = `cannot reach ${SERVER}. Is the mediation server running?`;
+    if (!fatal) throw new Error(message);
+    console.error(`error: ${message}`);
     process.exit(1);
   }
   const data: any = await res.json().catch(() => ({}));
   if (!res.ok) {
     const detail = data.issues ? ` ${JSON.stringify(data.issues)}` : '';
+    if (!fatal) throw new Error(`${res.status}: ${data.error || res.statusText}${detail}`);
     console.error(`error ${res.status}: ${data.error || res.statusText}${detail}`);
     if (data.hint) console.error(`hint: ${data.hint}`); // membership/spelling guidance from the server
     process.exit(1);
@@ -207,12 +212,16 @@ const commands: Record<string, () => Promise<void>> = {
     const watch = arg('--watch');
     if (watch !== null) {
       const interval = Math.max(1, Number(watch) || 30) * 1000;
-      const beat = (): Promise<void> =>
-        call('POST', path, body).then(() => {
-          console.error(`heartbeat ${new Date().toISOString()}`);
-        });
-      await beat();
-      setInterval(beat, interval);
+      const stamp = (): void => console.error(`heartbeat ${new Date().toISOString()}`);
+      // The first beat is fatal: it proves the session and capability work.
+      await call('POST', path, body);
+      stamp();
+      // Later ones are not. Ending the watch on a dropped request expires the
+      // session and releases its claims while the agent is still working.
+      setInterval(() => {
+        call('POST', path, body, { fatal: false }).then(stamp)
+          .catch((error: Error) => console.error(`heartbeat failed: ${error.message}`));
+      }, interval);
       return;
     }
     out(await call('POST', path, body));

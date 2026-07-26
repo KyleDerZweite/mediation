@@ -57,6 +57,7 @@ test('health', async () => {
   assert.equal(body.ok, true);
   assert.ok(body.now > 0);
   assert.match(body.version, /^\d+\.\d+\.\d+/); // from package.json
+  assert.ok(body.sessionTtlMs > 0); // clients pace their heartbeat against this
 });
 
 test('session lifecycle: create, heartbeat, repo, end', async () => {

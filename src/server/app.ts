@@ -262,8 +262,12 @@ export function buildApp(store: Store, options: AppOptions = {}): Hono {
     ? authMode === 'manual'
     : process.env.DESIGN_SYSTEM_PUBLIC === '1';
 
+  // `sessionTtlMs` is published so a client paces its heartbeat against this
+  // deployment's expiry instead of a compiled-in guess that a lowered
+  // SESSION_TTL_MS would silently invalidate.
   app.get('/api/health', (c) => c.json({
     ok: true, now: Date.now(), version: pkg.version, authMode, designSystemPublic,
+    sessionTtlMs: store.sessionTtlMs,
   }));
 
   // ---- GitHub App identity + machine activation ----
@@ -533,7 +537,11 @@ export function buildApp(store: Store, options: AppOptions = {}): Hono {
     const existing = store.getGithubSessionAuthorization(projectId, sessionId);
     if (existing) {
       if (existing.userId !== actorId(c)) return c.json({ error: 'session belongs to another user' }, 403);
-      if (existing.expiresAt - Date.now() <= 30_000) {
+      // Renew inside a window wide enough to contain a beat (clients beat at a
+      // quarter of the session TTL). Renewing later means the grant lapses
+      // between two beats, and every non-heartbeat call from a working agent
+      // gets "not a member of project" until the next one lands.
+      if (existing.expiresAt - Date.now() <= Math.min(90_000, store.sessionTtlMs / 2)) {
         try {
           const project = store.getGithubProjectById(projectId);
           const identity = store.getGithubIdentity(existing.userId);
@@ -544,7 +552,7 @@ export function buildApp(store: Store, options: AppOptions = {}): Hono {
           if (!owner || !repository) throw new GitHubAppError('stored GitHub repository identity is invalid', 403);
           const authorization = await options.github!.authorizeRepository(owner, repository, {
             id: identity.githubUserId, login: identity.login,
-          });
+          }, { fresh: true });
           if (authorization.repository.id !== project.externalRepositoryId) {
             throw new GitHubAppError('GitHub repository identity changed', 403);
           }

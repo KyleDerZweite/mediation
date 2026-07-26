@@ -214,9 +214,14 @@ export class GitHubApp {
     return { id: decimal(repo.id, 'repository id'), owner: resolvedOwner, name: resolvedName, fullName, visibility, installationId };
   }
 
-  async authorizeRepository(owner: string, name: string, identity: GitHubIdentity): Promise<RepositoryAuthorization> {
+  // `fresh` bypasses the permission cache. A cached answer carries the cached
+  // expiry, so re-checking a grant shortly before it lapses would hand back the
+  // same instant and extend nothing; a heartbeat renewing its session must ask
+  // GitHub again to actually move the expiry forward.
+  async authorizeRepository(owner: string, name: string, identity: GitHubIdentity,
+    { fresh = false } = {}): Promise<RepositoryAuthorization> {
     const repository = await this.resolveRepository(owner, name);
-    return { repository, ...await this.permission(repository, identity) };
+    return { repository, ...await this.permission(repository, identity, fresh) };
   }
 
   async canPush(repository: GitHubRepository, identity: GitHubIdentity): Promise<boolean> {
@@ -227,13 +232,14 @@ export class GitHubApp {
     }
   }
 
-  private async permission(repository: GitHubRepository, identity: GitHubIdentity): Promise<Omit<RepositoryAuthorization, 'repository'>> {
+  private async permission(repository: GitHubRepository, identity: GitHubIdentity,
+    fresh = false): Promise<Omit<RepositoryAuthorization, 'repository'>> {
     if (!/^\d+$/.test(repository.id) || !/^\d+$/.test(repository.installationId) || !/^\d+$/.test(identity.id) || !identity.login) {
       throw new GitHubAppError('invalid GitHub authorization input');
     }
     const key = `${repository.id}:${identity.id}`;
     const cached = this.permissions.get(key);
-    if (cached && cached.expiresAt > this.now()) {
+    if (!fresh && cached && cached.expiresAt > this.now()) {
       if (!cached.allowed) throw new GitHubAppError('GitHub user lacks write permission', 403);
       return { permission: cached.permission!, verifiedAt: cached.verifiedAt, expiresAt: cached.expiresAt };
     }

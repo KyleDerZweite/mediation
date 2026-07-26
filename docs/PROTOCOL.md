@@ -139,8 +139,11 @@ PATCH /api/projects/{project}/claims/{claimId}                { "status": "in-pr
 
 Expiry semantics:
 
-- Sessions expire after **~2 minutes** without a heartbeat (`SESSION_TTL_MS`,
-  default 300 000 ms); their claims are released.
+- Sessions expire without a heartbeat (`SESSION_TTL_MS`, default 300 000 ms,
+  published as `sessionTtlMs` by `GET /api/health`); their claims are released.
+  Beat at roughly a quarter of that TTL and keep beating after a failed one: a
+  client that gives up on the first network error expires a session whose agent
+  is still working.
 - Claims with no updates expire after **45 minutes** of inactivity.
 - Completed claims are kept (`status: "done"`).
 

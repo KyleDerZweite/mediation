@@ -83,3 +83,54 @@ test('a repository the App is not installed on answers 403 with an actionable hi
   assert.match(body.hint || '', /https:\/\/github\.com\/apps\/mediation-example\/installations\/new/);
   store.close();
 });
+
+// The permission cache hands back the expiry it was created with, so renewing a
+// grant from cache moved nothing: the grant lapsed on schedule and every call
+// except the heartbeat answered "not a member of project" until a later beat
+// re-verified. The renewal must reach GitHub and actually push the expiry out.
+test('a heartbeat renews the GitHub grant before it lapses', async () => {
+  const store = new Store({ dbPath: ':memory:' });
+  const user = store.findOrCreateGithubUser({
+    githubUserId: '42', login: 'octo', authorizationStatus: 'authorized',
+  }, 'octo');
+  const device = store.createGithubDeviceCredential(user.id, 'box');
+  let permissionChecks = 0;
+  let offset = 0;
+  const fetcher: FetchLike = async (url) => {
+    const body = url.endsWith('/installation') ? { id: 88 }
+      : url.endsWith('/access_tokens') ? { token: 'installation-token', expires_at: '2099-01-01T00:00:00Z' }
+        : url.endsWith('/permission') ? (permissionChecks += 1, { permission: 'write', user: { id: 42 } })
+          : { id: 9_001, name: 'repo', full_name: 'Org/repo', visibility: 'private', owner: { login: 'Org' } };
+    return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  const key = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey
+    .export({ type: 'pkcs8', format: 'pem' }).toString();
+  const github = new GitHubApp({
+    publicUrl: 'https://mediation.example', appId: '1', clientId: 'client',
+    clientSecret: 'secret', privateKeyPem: key, webhookSecret: 'webhook',
+  }, { fetch: fetcher, now: () => Date.now() + offset });
+  const app = buildApp(store, { authMode: 'github-app', publicUrl: 'https://mediation.example', github });
+  const headers = { authorization: `Bearer ${device.token}`, 'content-type': 'application/json' };
+
+  // Create the session four minutes in the past, so its five-minute grant is
+  // inside the renewal window the moment the clock catches up.
+  offset = -4 * 60_000;
+  const created = await (await app.request('/api/repositories/github/session', {
+    method: 'POST', headers,
+    body: JSON.stringify({ owner: 'org', repository: 'repo', agent: 'codex', machine: 'box' }),
+  })).json() as { project: { id: string }; session: { id: string }; capability: string };
+  offset = 0;
+  const before = store.getGithubSessionAuthorization(created.project.id, created.session.id)!.expiresAt;
+  assert.equal(permissionChecks, 1);
+
+  const beat = await app.request(`/api/projects/${created.project.id}/sessions/${created.session.id}/heartbeat`, {
+    method: 'POST', headers: { ...headers, 'x-mediation-session': created.capability }, body: '{}',
+  });
+  assert.equal(beat.status, 200);
+  assert.equal(permissionChecks, 2, 'the renewal answered from cache instead of asking GitHub');
+  const after = store.getGithubSessionAuthorization(created.project.id, created.session.id)!.expiresAt;
+  assert.ok(after > before, `grant did not extend: ${after} <= ${before}`);
+  // The member row backs every non-heartbeat call, so it must move too.
+  assert.equal(store.githubMemberRole(created.project.id, user.id), 'member');
+  store.close();
+});

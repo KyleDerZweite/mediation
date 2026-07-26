@@ -198,6 +198,11 @@ function derivedProject() {
 let session = null; // { id, capability, project, heartbeat }; never persisted
 let sessionPromise = null;
 let authMode = null;
+// Beat well inside the server's session TTL: an agent that claims work and then
+// codes for ten minutes without calling another tool has only these beats
+// keeping its claims alive, so several must be able to drop without expiring
+// the session. /api/health reports the real TTL; this is the fallback.
+let heartbeatMs = 60_000;
 
 async function api(method, apiPath, body, { auth = true, sessionCapability = session?.capability } = {}) {
   const credential = readCredentials();
@@ -224,6 +229,8 @@ async function serverAuthMode() {
   if (authMode) return authMode;
   const health = await api('GET', '/api/health', undefined, { auth: false });
   authMode = health.authMode || 'manual';
+  const ttl = Number(health.sessionTtlMs);
+  if (Number.isFinite(ttl) && ttl > 0) heartbeatMs = Math.min(60_000, Math.max(2_000, Math.round(ttl / 4)));
   return authMode;
 }
 
@@ -267,11 +274,17 @@ async function ensureSession() {
   current.heartbeat = setInterval(() => {
     api('POST', `/api/projects/${encodeURIComponent(current.project)}/sessions/${current.id}/heartbeat`, {},
       { sessionCapability: current.capability })
-      .catch(() => {
+      .catch((error) => {
+        // A dropped beat is a network event, not a verdict. Giving up on the
+        // first one leaves the agent working under a session the server then
+        // expires, releasing its claims to everyone else. Only the server
+        // saying this session is gone or refused ends it here.
+        console.error(`mediation: heartbeat failed: ${error.message}`);
+        if (error.status !== 401 && error.status !== 403 && error.status !== 404) return;
         if (session === current) session = null;
         clearInterval(current.heartbeat);
       });
-  }, 120_000);
+  }, heartbeatMs);
   current.heartbeat.unref?.();
   return current.id;
   })();
