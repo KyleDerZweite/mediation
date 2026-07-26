@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.1: agents keep coordination alive
+
+- The installer now gives Claude Code the same small, marker-owned instruction
+  Codex and Kimi Code receive: for coding tasks, use the installed `mediation`
+  skill for the full task. The workflow remains in one place, `SKILL.md`, and
+  uninstall removes the instruction without touching surrounding user content.
+- MCP heartbeats follow the server-advertised session TTL and keep running
+  after transient failures instead of silently abandoning a live claim.
+- Any agent can claim or resolve any project bug with
+  `mediation_bug_resolve`. High and critical bugs may open a linked GitHub
+  issue when `gh` is available; a closed linked issue resolves the Mediation
+  bug on the next `mediation_state`.
+
 ## 0.4.0-alpha: names humans recognise
 
 - **Fixed: your own project showed a "not a member" badge.** The card's role

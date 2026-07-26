@@ -97,7 +97,10 @@ function tomlConfig(file, expected, remove = false) {
 }
 function targetPaths(agent) {
   if (agent === 'codex') return [{ file: path.join(process.env.CODEX_HOME || path.join(home, '.codex'), 'config.toml'), kind: 'toml' }, { file: path.join(process.env.CODEX_HOME || path.join(home, '.codex'), 'AGENTS.md'), kind: 'md' }, { skill: path.join(process.env.CODEX_HOME || path.join(home, '.codex'), 'skills', 'mediation', 'SKILL.md') }];
-  if (agent === 'claude-code') return [{ skill: path.join(process.env.CLAUDE_HOME || path.join(home, '.claude'), 'skills', 'mediation', 'SKILL.md') }];
+  if (agent === 'claude-code') {
+    const dir = process.env.CLAUDE_HOME || path.join(home, '.claude');
+    return [{ file: path.join(dir, 'CLAUDE.md'), kind: 'md' }, { skill: path.join(dir, 'skills', 'mediation', 'SKILL.md') }];
+  }
   const dir = agent === 'kimi-code' ? (process.env.KIMI_CODE_HOME || path.join(home, '.kimi-code')) : (process.env.KIMI_SHARE_DIR || path.join(home, '.kimi'));
   return [{ file: path.join(dir, 'mcp.json'), kind: 'json' }, { skill: path.join(dir, 'skills', 'mediation', 'SKILL.md') }, ...(agent === 'kimi-code' ? [{ file: path.join(dir, 'AGENTS.md'), kind: 'md' }] : [])];
 }
@@ -110,8 +113,8 @@ function detect() {
   return out;
 }
 async function download(url) { const r = await fetch(url); if (!r.ok) fail(`download failed (${r.status}): ${url}`); return r.text(); }
-function usage(server) {
-  return `## Mediation (live work coordination)\n\nThis machine has the \`mediation\` MCP server. Before coding, check and claim work. Server: ${server}\n\nIf Mediation cannot connect, times out, or returns 404 for coordination, mention the outage once and continue without it. Never let an unavailable coordination service block the coding task.`;
+function usage() {
+  return '## Mediation\n\nFor coding tasks, the installed `mediation` skill is recommended for the full task so concurrent work and findings stay visible.\n\nIf the skill or service is unavailable, mention it once and continue.';
 }
 function expected(server, agent) {
   return { command: 'node', args: [clientFile], env: { MEDIATION_URL: server, MEDIATION_HARNESS: agent } };
@@ -166,7 +169,7 @@ async function install(opt) {
   const configs = new Map((prior.configs || []).map((c) => [c.file, c]));
   for (const agent of selected) for (const t of targetPaths(agent)) {
     if (t.skill) { writes.set(t.skill, ensureSkill(t.skill, skill, prior)); ownedSkills.add(t.skill); continue; }
-    const before = read(t.file) || ''; const body = t.kind === 'toml' ? `[mcp_servers.mediation]\ncommand = "node"\nargs = [${JSON.stringify(clientFile)}]\nenv = { MEDIATION_URL = ${JSON.stringify(server)} }` : usage(server);
+    const before = read(t.file) || ''; const body = t.kind === 'toml' ? `[mcp_servers.mediation]\ncommand = "node"\nargs = [${JSON.stringify(clientFile)}]\nenv = { MEDIATION_URL = ${JSON.stringify(server)} }` : usage();
     const oldAgent = configs.get(t.file)?.agent || agent;
     const oldServer = prior.server || server;
     if (t.kind === 'toml') {

@@ -60,6 +60,7 @@ if command -v claude >/dev/null 2>&1; then
   case "$claude_entry" in *"$client"*) claude mcp remove --scope user mediation >/dev/null 2>&1 || true;; esac
 fi
 drop_skill "$HOME/.claude/skills/mediation"
+drop_block "${CLAUDE_HOME:-$HOME/.claude}/CLAUDE.md" "$begin_md" "$end_md"
 drop_block "${CODEX_HOME:-$HOME/.codex}/config.toml" "$begin_toml" "$end_toml"
 drop_block "${CODEX_HOME:-$HOME/.codex}/AGENTS.md" "$begin_md" "$end_md"
 for dir in "${KIMI_CODE_HOME:-$HOME/.kimi-code}" "${KIMI_SHARE_DIR:-$HOME/.kimi}"; do

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { after, before, test } from 'node:test';
 import { createServer } from 'node:http';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
@@ -49,6 +49,32 @@ test('installer is idempotent and uninstaller preserves unrelated configuration'
   assert.equal(readFileSync(join(home, '.codex', 'config.toml'), 'utf8').trim(), '# mine');
   assert.equal(JSON.parse(readFileSync(join(auth, 'credentials.json'), 'utf8'))['https://other.example'].token, 'keep-me');
   assert.equal(existsSync(installedSkill), true);
+});
+
+test('Claude receives the skill recommendation without losing its own instructions', async () => {
+  const home = join(root, 'claude');
+  const claudeHome = join(home, '.claude');
+  const bin = join(home, 'bin');
+  mkdirSync(claudeHome, { recursive: true });
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(claudeHome, 'CLAUDE.md'), '# Mine\n');
+  const fakeClaude = join(bin, 'claude');
+  writeFileSync(fakeClaude, '#!/bin/sh\n[ "$1" = "--version" ] && exit 0\n[ "$1 $2" = "mcp get" ] && exit 1\nexit 0\n');
+  chmodSync(fakeClaude, 0o700);
+
+  const env = { CLAUDE_HOME: claudeHome, PATH: `${bin}:${process.env.PATH}` };
+  let result = await run(home, ['--server', origin, '--agent', 'claude-code', '--yes', '--no-login'], env);
+  assert.equal(result.status, 0, result.stderr);
+  result = await run(home, ['--server', origin, '--agent', 'claude-code', '--yes', '--no-login'], env);
+  assert.equal(result.status, 0, result.stderr);
+  const instructions = readFileSync(join(claudeHome, 'CLAUDE.md'), 'utf8');
+  assert.match(instructions, /^# Mine/m);
+  assert.match(instructions, /installed `mediation` skill is recommended for the full task/);
+  assert.equal((instructions.match(/>>> mediation >>>/g) || []).length, 1);
+
+  result = await run(home, ['--uninstall', '--keep-auth'], env);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(readFileSync(join(claudeHome, 'CLAUDE.md'), 'utf8').trim(), '# Mine');
 });
 
 test('malformed JSON and marker files remain untouched', async () => {
