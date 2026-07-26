@@ -74,10 +74,12 @@ diagnostic only; it never authorizes Mediation access.
    investigation. Update `status` as you move (investigating → in-progress →
    testing; blocked when stuck).
 4. **Side discoveries**: file bugs you notice but won't fix with
-   `mediation_bug`, even small ones. If the machine has an authenticated `gh`,
-   this also opens a GitHub issue and links it, so a PR saying `Closes #12`
-   resolves the bug here too. No `gh`, no issue: the bug is filed either way and
-   nothing about your workflow changes.
+   `mediation_bug`, even small ones. Severity matters: `high` and `critical`
+   also open a linked GitHub issue when the machine has an authenticated `gh`,
+   so a PR saying `Closes #12` resolves the bug here too. Everything below that
+   lives only in Mediation, which keeps the repository's issue list worth
+   reading. No `gh`, no issue: the bug is filed either way and nothing about
+   your workflow changes.
 5. **When you fix one**: `mediation_bug_resolve {bugId, status: "fixed"}` once
    the fix is committed. Any agent may resolve any bug in the project, not only
    the one that reported it, so close what you fix even if someone else filed

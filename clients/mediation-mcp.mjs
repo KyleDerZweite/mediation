@@ -152,6 +152,13 @@ function gh(args, { timeout = 15_000 } = {}) {
   }
 }
 
+/* Only work worth tracking in public earns an issue. Agents are told to file
+   bugs liberally, "even small ones", which is right for a coordination feed and
+   wrong for a repository's issue list: promote everything and the tracker fills
+   with drive-by observations until nobody reads it. Low, medium and the
+   `unknown` default stay in Mediation, where cheap and chatty is the point. */
+const ISSUE_WORTHY = new Set(['high', 'critical']);
+
 let ghReady = null; // null = not asked yet; sticky for the life of the process
 function ghAuthenticated() {
   // `gh auth token` answers from local config without a network round trip.
@@ -338,6 +345,24 @@ const proj = () => {
   if (!session?.project) throw new Error('session binding is not established');
   return { state, base: `/api/projects/${encodeURIComponent(session.project)}` };
 };
+
+/* Opens the tracking issue for a bug that has earned one and links it back.
+   Returns null whenever GitHub is unavailable for any reason: the caller has
+   already filed the bug, which is the part that must not fail. */
+async function openTrackingIssue(base, sessionId, bug) {
+  const slug = repoSlug();
+  if (!slug || !ghAuthenticated()) return null;
+  const body = [
+    bug.description,
+    bug.files?.length ? `Files: ${bug.files.join(', ')}` : null,
+    `Severity: ${bug.severity}. Reported by ${bug.reporter} via Mediation (bug ${bug.id}).`,
+  ].filter(Boolean).join('\n\n');
+  const printed = gh(['issue', 'create', '--repo', slug, '--title', bug.title, '--body', body]);
+  const issueUrl = /^https:\/\/github\.com\/\S+\/issues\/\d+$/m.exec(printed || '')?.[0];
+  if (!issueUrl) return null;
+  await api('PATCH', `${base}/bugs/${encodeURIComponent(bug.id)}`, { sessionId, issueUrl }).catch(() => {});
+  return issueUrl;
+}
 
 /* A PR that says "Closes #12" closes the GitHub issue, and nothing tells
    Mediation. So whenever an agent orients itself, let the closed issues resolve
@@ -621,19 +646,14 @@ const TOOLS = [
       // top of it, and its id gives the issue something to point back at.
       const bug = await api('POST', `${base}/bugs`, { sessionId: sid, ...input });
       const head = `Bug filed: "${bug.title}" (${bug.severity}, id ${bug.id}).`;
-      const slug = repoSlug();
-      if (!slug || !ghAuthenticated()) return `${head} No GitHub issue: gh is not signed in here.`;
-      const body = [
-        input.description,
-        input.files?.length ? `Files: ${input.files.join(', ')}` : null,
-        `Severity: ${bug.severity}. Reported by ${bug.reporter} via Mediation (bug ${bug.id}).`,
-      ].filter(Boolean).join('\n\n');
-      const url = gh(['issue', 'create', '--repo', slug, '--title', bug.title, '--body', body]);
-      const issueUrl = /^https:\/\/github\.com\/\S+\/issues\/\d+$/m.exec(url || '')?.[0];
-      if (!issueUrl) return `${head} GitHub issue could not be created; the bug is filed either way.`;
-      await api('PATCH', `${base}/bugs/${encodeURIComponent(bug.id)}`, { sessionId: sid, issueUrl })
-        .catch(() => {});
-      return `${head} Tracking issue: ${issueUrl}`;
+      if (!ISSUE_WORTHY.has(bug.severity)) {
+        return `${head} Tracked in Mediation only; ${bug.severity} severity does not open a GitHub issue.`;
+      }
+      if (!ghAuthenticated()) return `${head} No GitHub issue: gh is not signed in here.`;
+      const issueUrl = await openTrackingIssue(base, sid, bug);
+      return issueUrl
+        ? `${head} Tracking issue: ${issueUrl}`
+        : `${head} GitHub issue could not be created; the bug is filed either way.`;
     },
   },
   {
@@ -653,6 +673,12 @@ const TOOLS = [
       const { base } = proj();
       const bug = await api('PATCH', `${base}/bugs/${encodeURIComponent(bugId)}`, { sessionId: sid, ...patch });
       const head = `Bug "${bug.title}" is now ${bug.status} (${bug.severity}).`;
+      // Raising a bug to high is the same judgement as filing it high, so it
+      // earns the same tracking issue; the rule is about severity, not timing.
+      if (bug.status !== 'fixed' && !bug.issueUrl && ISSUE_WORTHY.has(bug.severity)) {
+        const issueUrl = await openTrackingIssue(base, sid, bug);
+        if (issueUrl) return `${head} Now ${bug.severity}, so it has a tracking issue: ${issueUrl}`;
+      }
       // Keep the tracking issue in step, so the two lists never disagree.
       if (bug.status !== 'fixed' || !bug.issueUrl || !ghAuthenticated()) return head;
       const closed = gh(['issue', 'close', bug.issueUrl]) !== null;

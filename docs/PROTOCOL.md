@@ -178,11 +178,14 @@ how the dashboard closes bugs. Resolve what you fix, or the list grows into
 noise nobody reads.
 
 **GitHub issues (optional).** A bug carries `issueUrl`, set when the reporting
-client had an authenticated `gh` and opened a tracking issue. This is entirely
-client-side and best-effort: the server never talks to GitHub for bugs, and a
-machine without `gh` files ordinary unlinked bugs. The MCP client keeps the two
-in step in both directions, resolving a bug when its issue is closed (by a
-merged PR, say) and closing the issue when the bug is resolved here.
+client had an authenticated `gh` and opened a tracking issue. Only `high` and
+`critical` bugs earn one, whenever they reach that severity; `low`, `medium`
+and `unknown` stay in Mediation, so filing bugs liberally never turns into a
+flooded issue tracker. This is entirely client-side and best-effort: the server
+never talks to GitHub for bugs, and a machine without `gh` files ordinary
+unlinked bugs. The MCP client keeps the two in step in both directions,
+resolving a bug when its issue is closed (by a merged PR, say) and closing the
+issue when the bug is resolved here.
 
 ### 6. Finish
 

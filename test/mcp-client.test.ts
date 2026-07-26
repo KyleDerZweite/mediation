@@ -24,6 +24,7 @@ let failNextHeartbeat = false;
 let ghBin = '';        // fake `gh` that answers as if signed in
 let ghDeadBin = '';    // fake `gh` that fails every call, like a signed-out one
 const patches: any[] = [];
+let stubIssueUrl: string | null = ISSUE; // what the stub says a patched bug is linked to
 
 before(async () => {
   server = createServer((req, res) => {
@@ -47,17 +48,25 @@ before(async () => {
       return send({ ok: true });
     }
     if (req.url === `/api/projects/${PROJECT_ID}/bugs`) {
-      return send({ id: 'bug-1', title: 'flaky billing test', status: 'open', severity: 'high', reporter: 'codex@acme' });
+      let raw = '';
+      req.on('data', (c) => { raw += c; });
+      return req.on('end', () => send({
+        id: 'bug-1', title: 'flaky billing test', status: 'open', reporter: 'codex@acme',
+        description: null, files: [],
+        severity: (JSON.parse(raw || '{}').severity as string) || 'unknown',
+      }));
     }
     if (req.url?.startsWith(`/api/projects/${PROJECT_ID}/bugs/`)) {
       let raw = '';
       req.on('data', (c) => { raw += c; });
       return req.on('end', () => {
         patches.push({ url: req.url, body: JSON.parse(raw || '{}') });
+        const body = JSON.parse(raw || '{}');
         send({
-          id: 'bug-1', title: 'flaky billing test', severity: 'high',
-          status: JSON.parse(raw || '{}').status || 'open',
-          issueUrl: ISSUE,
+          id: 'bug-1', title: 'flaky billing test', description: null, files: [],
+          severity: body.severity || 'high',
+          status: body.status || 'open',
+          issueUrl: body.issueUrl ?? stubIssueUrl,
         });
       });
     }
@@ -182,6 +191,17 @@ test('mediation_bug opens and links a GitHub issue when gh is signed in', async 
   assert.equal(patches.at(-1)?.body.issueUrl, ISSUE, JSON.stringify(patches));
 });
 
+// Agents are told to file even small bugs; promoting all of them would bury the
+// repository's issue list, so only high and critical earn an issue.
+test('mediation_bug leaves a low-severity bug in Mediation only', async () => {
+  patches.length = 0;
+  const out = await callTool('mediation_bug', { title: 'flaky billing test', severity: 'low' },
+    { PATH: `${ghBin}:${process.env.PATH}` });
+  assert.match(out, /Bug filed/);
+  assert.match(out, /Tracked in Mediation only; low severity does not open a GitHub issue/);
+  assert.equal(patches.length, 0, 'a low-severity bug must not be linked to an issue');
+});
+
 test('mediation_bug still files the bug when gh is not signed in', async () => {
   patches.length = 0;
   const out = await callTool('mediation_bug', { title: 'flaky billing test', severity: 'high' },
@@ -212,6 +232,22 @@ test('mediation_bug_resolve closes a bug this session did not report, and its is
 // The client used to clear its own heartbeat interval on the first failed beat,
 // so one hiccup on the link expired the session and released the agent's claims
 // while it was still working.
+// Severity is a judgement that can change: a bug raised to high afterwards
+// earns the same issue as one filed that way, or the rule would depend on the
+// order events happened in.
+test('mediation_bug_resolve opens an issue for a bug escalated to high', async () => {
+  patches.length = 0;
+  stubIssueUrl = null; // not linked yet
+  try {
+    const out = await callTool('mediation_bug_resolve', { bugId: 'bug-1', severity: 'high' },
+      { PATH: `${ghBin}:${process.env.PATH}` });
+    assert.match(out, /Now high, so it has a tracking issue: https:\/\/github\.com\/acme\/widgets\/issues\/12/);
+    assert.equal(patches.at(-1)?.body.issueUrl, ISSUE);
+  } finally {
+    stubIssueUrl = ISSUE;
+  }
+});
+
 test('a failed heartbeat does not stop the beats after it', async () => {
   heartbeats = 0;
   failNextHeartbeat = true;
