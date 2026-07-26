@@ -137,6 +137,34 @@ function git(args, cwd) {
   }
 }
 
+/* GitHub issues are a NICE-TO-HAVE built on whatever `gh` the developer already
+   has. Every call here may fail (no gh, not signed in, issues disabled on the
+   repository, offline) and every failure is silent: Mediation is the source of
+   truth and filing a bug must never depend on GitHub being reachable. */
+function gh(args, { timeout = 15_000 } = {}) {
+  try {
+    return execFileSync('gh', args, {
+      cwd: baseDir().dir,
+      encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout,
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
+let ghReady = null; // null = not asked yet; sticky for the life of the process
+function ghAuthenticated() {
+  // `gh auth token` answers from local config without a network round trip.
+  // Its output is a secret, so only the exit status is ever used.
+  if (ghReady === null) ghReady = gh(['auth', 'token'], { timeout: 5_000 }) !== null;
+  return ghReady;
+}
+
+function repoSlug() {
+  const r = readState()?.repository;
+  return r?.owner && r?.repository ? `${r.owner}/${r.repository}` : null;
+}
+
 function parseGitHubRemote(raw) {
   const value = String(raw || '').trim();
   let owner;
@@ -310,6 +338,32 @@ const proj = () => {
   if (!session?.project) throw new Error('session binding is not established');
   return { state, base: `/api/projects/${encodeURIComponent(session.project)}` };
 };
+
+/* A PR that says "Closes #12" closes the GitHub issue, and nothing tells
+   Mediation. So whenever an agent orients itself, let the closed issues resolve
+   their bugs: without this the two lists drift apart and the bug feed goes back
+   to listing work that is already done. One `gh` call, skipped entirely when no
+   open bug carries an issue. */
+async function reconcileClosedIssues(base, state, sessionId) {
+  const linked = state.bugs.filter((b) => b.status !== 'fixed' && b.issueUrl);
+  const slug = repoSlug();
+  if (!linked.length || !slug || !ghAuthenticated()) return 0;
+  let closed;
+  try {
+    closed = new Set(JSON.parse(gh(['issue', 'list', '--repo', slug, '--state', 'closed',
+      '--limit', '100', '--json', 'url']) || '[]').map((i) => i.url));
+  } catch {
+    return 0;
+  }
+  let n = 0;
+  for (const bug of linked) {
+    if (!closed.has(bug.issueUrl)) continue;
+    const ok = await api('PATCH', `${base}/bugs/${encodeURIComponent(bug.id)}`,
+      { sessionId, status: 'fixed' }).then(() => true, () => false);
+    if (ok) { bug.status = 'fixed'; n += 1; }
+  }
+  return n;
+}
 
 /* ---------------- rendering helpers ---------------- */
 
@@ -563,8 +617,46 @@ const TOOLS = [
     async run(input) {
       const sid = await ensureSession();
       const { base } = proj();
+      // The bug is filed first and unconditionally: the issue is decoration on
+      // top of it, and its id gives the issue something to point back at.
       const bug = await api('POST', `${base}/bugs`, { sessionId: sid, ...input });
-      return `Bug filed: "${bug.title}" (${bug.severity}, id ${bug.id}).`;
+      const head = `Bug filed: "${bug.title}" (${bug.severity}, id ${bug.id}).`;
+      const slug = repoSlug();
+      if (!slug || !ghAuthenticated()) return `${head} No GitHub issue: gh is not signed in here.`;
+      const body = [
+        input.description,
+        input.files?.length ? `Files: ${input.files.join(', ')}` : null,
+        `Severity: ${bug.severity}. Reported by ${bug.reporter} via Mediation (bug ${bug.id}).`,
+      ].filter(Boolean).join('\n\n');
+      const url = gh(['issue', 'create', '--repo', slug, '--title', bug.title, '--body', body]);
+      const issueUrl = /^https:\/\/github\.com\/\S+\/issues\/\d+$/m.exec(url || '')?.[0];
+      if (!issueUrl) return `${head} GitHub issue could not be created; the bug is filed either way.`;
+      await api('PATCH', `${base}/bugs/${encodeURIComponent(bug.id)}`, { sessionId: sid, issueUrl })
+        .catch(() => {});
+      return `${head} Tracking issue: ${issueUrl}`;
+    },
+  },
+  {
+    name: 'mediation_bug_resolve',
+    description: 'Close a bug once it is fixed, or claim one you are about to fix. Any agent may resolve any bug in the project, including one another agent reported: get ids from mediation_state.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        bugId: { ...str, description: 'Bug id from mediation_state' },
+        status: { ...str, enum: ['open', 'claimed', 'fixed'], description: 'fixed once the fix is committed; claimed while you work on it' },
+        severity: { ...str, enum: ['low', 'medium', 'high', 'critical', 'unknown'], description: 'Correct the severity if the reporter misjudged it' },
+      },
+      required: ['bugId'],
+    },
+    async run({ bugId, ...patch }) {
+      const sid = await ensureSession();
+      const { base } = proj();
+      const bug = await api('PATCH', `${base}/bugs/${encodeURIComponent(bugId)}`, { sessionId: sid, ...patch });
+      const head = `Bug "${bug.title}" is now ${bug.status} (${bug.severity}).`;
+      // Keep the tracking issue in step, so the two lists never disagree.
+      if (bug.status !== 'fixed' || !bug.issueUrl || !ghAuthenticated()) return head;
+      const closed = gh(['issue', 'close', bug.issueUrl]) !== null;
+      return `${head} ${closed ? `Closed ${bug.issueUrl}.` : `Could not close ${bug.issueUrl}; close it by hand.`}`;
     },
   },
   {
@@ -572,14 +664,18 @@ const TOOLS = [
     description: 'Full live picture of the project: active sessions, claims, conflicts, bugs, recently touched files, completed work. Use to orient before picking a task.',
     inputSchema: { type: 'object', properties: {} },
     async run() {
-      await ensureSession();
+      const sid = await ensureSession();
       const { base } = proj();
       const s = await api('GET', `${base}/state`);
+      const reconciled = await reconcileClosedIssues(base, s, sid);
       const out = [];
+      if (reconciled) out.push(`Resolved ${reconciled} bug(s) whose GitHub issue has been closed.`);
       out.push(`Sessions (${s.sessions.length}): ${s.sessions.map((x) => `${x.agent} (${ago(x.lastSeenAt)} ago)`).join(', ') || 'none'}`);
       out.push(`Active claims (${s.claims.length}):${s.claims.map((cl) => `\n- [${cl.status}] ${cl.agent}: ${cl.intent}${cl.files.length ? ` (${cl.files.join(', ')})` : ''} (id ${cl.id})`).join('') || ' none'}`);
       if (s.conflicts.length) out.push(`CONFLICTS (${s.conflicts.length}):${s.conflicts.map((k) => `\n- ${k.between[0].agent} <-> ${k.between[1].agent}: ${k.between[0].intent} / ${k.between[1].intent}`).join('')}`);
-      out.push(`Open bugs (${s.bugs.filter((b) => b.status !== 'fixed').length}):${s.bugs.filter((b) => b.status !== 'fixed').map((b) => `\n- [${b.severity}] ${b.title}`).join('') || ' none'}`);
+      // Ids are printed because mediation_bug_resolve needs them to close a bug.
+      const open = s.bugs.filter((b) => b.status !== 'fixed');
+      out.push(`Open bugs (${open.length}):${open.map((b) => `\n- [${b.severity}] ${b.title} (${b.status}, id ${b.id})${b.issueUrl ? ` ${b.issueUrl}` : ''}`).join('') || ' none'}`);
       if (s.completed.length) out.push(`Recently completed: ${s.completed.slice(0, 5).map((cl) => cl.intent).join('; ')}`);
       return out.join('\n');
     },

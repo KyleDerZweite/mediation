@@ -165,10 +165,24 @@ Update a bug when you pick it up or fix it:
 
 ```
 PATCH /api/projects/{project}/bugs/{bugId}
-{ "status": "claimed" }        # or "fixed"; may also change "severity"
+{ "sessionId": "<your own>", "status": "claimed" }   # or "fixed"; may also change "severity"
 ```
 
 Bug status values: `open`, `claimed`, `fixed`.
+
+A bug belongs to the project, not to the session that filed it: send **your
+own** `sessionId` (with its `X-Mediation-Session` capability) and you may
+resolve any bug in the project, including one another agent reported. A
+signed-in human sends no `sessionId` and is authorized by membership, which is
+how the dashboard closes bugs. Resolve what you fix, or the list grows into
+noise nobody reads.
+
+**GitHub issues (optional).** A bug carries `issueUrl`, set when the reporting
+client had an authenticated `gh` and opened a tracking issue. This is entirely
+client-side and best-effort: the server never talks to GitHub for bugs, and a
+machine without `gh` files ordinary unlinked bugs. The MCP client keeps the two
+in step in both directions, resolving a bug when its issue is closed (by a
+merged PR, say) and closing the issue when the bug is resolved here.
 
 ### 6. Finish
 
@@ -253,7 +267,8 @@ curl -fsSL <server>/install.sh | bash
 
 This registers the `mediation` MCP server (tools `mediation_init`,
 `mediation_check`, `mediation_claim`, `mediation_update`,
-`mediation_complete`, `mediation_bug`, `mediation_state`, `mediation_status`)
+`mediation_complete`, `mediation_bug`, `mediation_bug_resolve`,
+`mediation_state`, `mediation_status`)
 in claude-code, codex and kimi, and installs a skill teaching the workflow.
 Re-run the install command to update. `<server>/uninstall.sh` reverses the
 manifest-owned harness changes and removes global device auth by default

@@ -8,18 +8,19 @@ import { bootstrap, ctx, pair } from './helpers.ts';
 let store: Store;
 let app: Hono;
 let token = ''; // agent bearer, because project routes now require an identity
+let adminCookie = ''; // the human/dashboard identity
 const P = '/api/projects/api-test';
 const auth = () => ({ authorization: `Bearer ${token}` });
 const capabilities = new Map<string, string>();
 const claimCapabilities = new Map<string, string>();
-const bugCapabilities = new Map<string, string>();
 
 before(async () => {
   const c = ctx({ sessionTtlMs: 60_000 });
   store = c.store;
   app = c.app;
   // The credential's owner is the admin, so every project it creates is his.
-  token = await pair(c.req, await bootstrap(c.req), 'api-test-agent');
+  adminCookie = await bootstrap(c.req);
+  token = await pair(c.req, adminCookie, 'api-test-agent');
 });
 after(() => store.close());
 
@@ -28,8 +29,7 @@ async function post(path: string, body: unknown, method = 'POST'): Promise<{ sta
   const sessionId = /\/sessions\/([^/]+)/.exec(path)?.[1]
     ?? (body as { sessionId?: string } | undefined)?.sessionId;
   const claimId = /\/claims\/([^/]+)/.exec(path)?.[1];
-  const bugId = /\/bugs\/([^/]+)/.exec(path)?.[1];
-  const capability = sessionId ? capabilities.get(sessionId) : (claimId ? claimCapabilities.get(claimId) : bugCapabilities.get(bugId || ''));
+  const capability = sessionId ? capabilities.get(sessionId) : claimId ? claimCapabilities.get(claimId) : undefined;
   const res = await app.request(path, {
     method,
     headers: { 'content-type': 'application/json', ...auth(), ...(capability ? { 'x-mediation-session': capability } : {}) },
@@ -38,7 +38,6 @@ async function post(path: string, body: unknown, method = 'POST'): Promise<{ sta
   const result: { status: number; body: any } = { status: res.status, body: await res.json() };
   if (path.endsWith('/sessions') && result.status === 200) capabilities.set(result.body.id, result.body.capability);
   if (path.endsWith('/claims') && result.status === 200) claimCapabilities.set(result.body.claim.id, capabilities.get(result.body.claim.sessionId)!);
-  if (path.endsWith('/bugs') && result.status === 200) bugCapabilities.set(result.body.id, capabilities.get((body as { sessionId: string }).sessionId)!);
   return result;
 }
 
@@ -128,9 +127,35 @@ test('bugs: report and patch', async () => {
   assert.equal(bug.body.status, 'open');
   assert.match(bug.body.reporter, /^agent-c-[0-9a-f]{8}@admin$/);
 
-  const patched = await post(`${P}/bugs/${bug.body.id}`, { status: 'claimed' }, 'PATCH');
+  const patched = await post(`${P}/bugs/${bug.body.id}`, { sessionId: s.id, status: 'claimed' }, 'PATCH');
   assert.equal(patched.status, 200);
   assert.equal(patched.body.status, 'claimed');
+
+  // A bug belongs to the project. Gating resolution on the REPORTING session's
+  // capability made every bug permanently unresolvable once that session was
+  // swept, which is minutes after it was filed.
+  const other = (await post(`${P}/sessions`, { agent: 'agent-c2' })).body;
+  await post(`${P}/sessions/${s.id}`, undefined, 'DELETE'); // the reporter goes away
+  const closed = await post(`${P}/bugs/${bug.body.id}`, { sessionId: other.id, status: 'fixed' }, 'PATCH');
+  assert.equal(closed.status, 200, JSON.stringify(closed.body));
+  assert.equal(closed.body.status, 'fixed');
+
+  // The dashboard closes bugs with a member cookie and no sessionId at all.
+  const byHuman = await app.request(`${P}/bugs/${bug.body.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json', cookie: adminCookie },
+    body: JSON.stringify({ status: 'open' }),
+  });
+  assert.equal(byHuman.status, 200, await byHuman.clone().text());
+  assert.equal((await byHuman.json() as { status: string }).status, 'open');
+
+  // An agent still has to prove it is a live session; a bare bearer is not enough.
+  const bare = await app.request(`${P}/bugs/${bug.body.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json', ...auth() },
+    body: JSON.stringify({ status: 'open' }),
+  });
+  assert.equal(bare.status, 403);
 });
 
 test('check endpoint returns conflicts array from query params', async () => {
@@ -186,7 +211,9 @@ test('404s: unknown session, claim, bug, route', async () => {
   const c = await post(`${P}/claims/nope`, { status: 'testing' }, 'PATCH');
   assert.equal(c.status, 404);
 
-  const b = await post(`${P}/bugs/nope`, { status: 'fixed' }, 'PATCH');
+  // With a live session, so the 404 is about the bug and not the authorization.
+  const live = (await post(`${P}/sessions`, { agent: 'agent-404' })).body;
+  const b = await post(`${P}/bugs/nope`, { sessionId: live.id, status: 'fixed' }, 'PATCH');
   assert.equal(b.status, 404);
 
   const r = await app.request('/api/nope', { headers: auth() });

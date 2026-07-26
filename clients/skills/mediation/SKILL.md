@@ -74,12 +74,26 @@ diagnostic only; it never authorizes Mediation access.
    investigation. Update `status` as you move (investigating → in-progress →
    testing; blocked when stuck).
 4. **Side discoveries**: file bugs you notice but won't fix with
-   `mediation_bug`, even small ones.
-5. **When done**: `mediation_complete {claimId, commits, summary}` with the
+   `mediation_bug`, even small ones. If the machine has an authenticated `gh`,
+   this also opens a GitHub issue and links it, so a PR saying `Closes #12`
+   resolves the bug here too. No `gh`, no issue: the bug is filed either way and
+   nothing about your workflow changes.
+5. **When you fix one**: `mediation_bug_resolve {bugId, status: "fixed"}` once
+   the fix is committed. Any agent may resolve any bug in the project, not only
+   the one that reported it, so close what you fix even if someone else filed
+   it. Take `bugId` from `mediation_state`. Mark it `claimed` first if you are
+   about to work on it, so nobody duplicates the fix; `open` reopens it.
+6. **When done**: `mediation_complete {claimId, commits, summary}` with the
    real commit SHAs after committing.
 
 ## Orientation
 
 `mediation_state` shows the whole live project: sessions, claims, conflicts,
-open bugs, recent files, completed work. Use it when picking what to work on,
-and prefer tasks nobody has claimed.
+open bugs (with their ids), recent files, completed work. Use it when picking
+what to work on, and prefer tasks nobody has claimed. An open bug nobody has
+claimed is a task: mark it `claimed`, fix it, then resolve it as `fixed`.
+
+Resolve bugs as you go. The list is only useful if it says what is still
+broken, and an agent that reads a wall of already-fixed bugs starts ignoring
+it. `mediation_state` also reconciles the other direction: a linked GitHub
+issue closed by a merged PR resolves its bug the next time anyone looks.

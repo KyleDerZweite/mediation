@@ -62,11 +62,17 @@ export const bugCreate = z.object({
   description: optStr,
   files,
   severity: bugSeverity.default('unknown'),
+  issueUrl: optStr,
 });
 
+// A bug is shared project state, so any member may resolve it, not only the
+// session that filed it. Agents identify themselves with their own live
+// `sessionId`; a signed-in human sends none and is authorized by membership.
 export const bugPatch = z.object({
+  sessionId: optStr,
   status: bugStatus.optional(),
   severity: bugSeverity.optional(),
+  issueUrl: optStr,
 });
 
 // ---- user accounts (see docs/auth.md) ----

@@ -62,6 +62,9 @@ export interface Bug {
   severity: BugSeverity;
   status: BugStatus;
   createdAt: number;
+  // Set when the reporting client had an authenticated `gh` and opened a
+  // tracking issue; null when it did not, which is not an error.
+  issueUrl: string | null;
 }
 
 export type EventType = 'session' | 'claim' | 'finding' | 'bug' | 'completed' | 'activity';

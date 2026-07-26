@@ -626,8 +626,12 @@ function renderNowTab(ps, now) {
           <span class="bug-dot" style="background:${SEVERITY[b.severity] || SEVERITY.unknown}"></span>
           <div class="bug-body">
             <div class="bug-title"><span class="bug-id">${esc(b.id.slice(0, 8))}</span> ${esc(b.title)}</div>
-            <div class="bug-meta">${esc(b.reporter)} · ${esc(b.severity)} · ${esc(b.status)} · ${ago(b.createdAt, now)} ago</div>
+            <div class="bug-meta">${esc(b.reporter)} · ${esc(b.severity)} · ${esc(b.status)} · ${ago(b.createdAt, now)} ago${
+              b.issueUrl ? ` · <a class="bug-issue" href="${esc(b.issueUrl)}" target="_blank" rel="noreferrer noopener">issue #${esc(b.issueUrl.split('/').pop())}</a>` : ''}</div>
           </div>
+          <button class="user-act-btn bug-action" type="button" data-bugaction="${b.status === 'fixed' ? 'open' : 'fixed'}"
+            data-pid="${esc(pid)}" data-bug="${esc(b.id)}"
+          >${b.status === 'fixed' ? 'Reopen' : 'Mark fixed'}</button>
         </div>`).join('')
       : '<div class="empty-inline">No bugs reported.</div>'}</div>
   </div>`;
@@ -1598,6 +1602,15 @@ document.addEventListener('click', async (e) => {
     const id = revokeEl.dataset.revoke;
     if (!arm(`rv-${id}`)) return; // first click arms, second confirms
     await send('DELETE', `/api/auth/credentials/${encodeURIComponent(id)}`);
+    refresh();
+    return;
+  }
+
+  const bugEl = e.target.closest('[data-bugaction]');
+  if (bugEl) {
+    const { bugaction: status, pid, bug } = bugEl.dataset;
+    // No sessionId: a signed-in member is authorized by the cookie alone.
+    await send('PATCH', `/api/projects/${encodeURIComponent(pid)}/bugs/${encodeURIComponent(bug)}`, { status });
     refresh();
     return;
   }

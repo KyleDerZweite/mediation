@@ -6,11 +6,12 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const PROJECT_ID = '0f9a2f5c-1111-2222-3333-444455556666';
+const ISSUE = 'https://github.com/acme/widgets/issues/12';
 const CLIENT = 'clients/mediation-mcp.mjs';
 
 let server: Server;
@@ -20,6 +21,9 @@ let authHome = '';
 const seen: string[] = [];
 let heartbeats = 0;
 let failNextHeartbeat = false;
+let ghBin = '';        // fake `gh` that answers as if signed in
+let ghDeadBin = '';    // fake `gh` that fails every call, like a signed-out one
+const patches: any[] = [];
 
 before(async () => {
   server = createServer((req, res) => {
@@ -42,6 +46,27 @@ before(async () => {
       }
       return send({ ok: true });
     }
+    if (req.url === `/api/projects/${PROJECT_ID}/bugs`) {
+      return send({ id: 'bug-1', title: 'flaky billing test', status: 'open', severity: 'high', reporter: 'codex@acme' });
+    }
+    if (req.url?.startsWith(`/api/projects/${PROJECT_ID}/bugs/`)) {
+      let raw = '';
+      req.on('data', (c) => { raw += c; });
+      return req.on('end', () => {
+        patches.push({ url: req.url, body: JSON.parse(raw || '{}') });
+        send({
+          id: 'bug-1', title: 'flaky billing test', severity: 'high',
+          status: JSON.parse(raw || '{}').status || 'open',
+          issueUrl: ISSUE,
+        });
+      });
+    }
+    if (req.url === `/api/projects/${PROJECT_ID}/state`) {
+      return send({
+        sessions: [], claims: [], conflicts: [], completed: [], recentFiles: [],
+        bugs: [{ id: 'bug-1', title: 'flaky billing test', severity: 'high', status: 'open', issueUrl: ISSUE }],
+      });
+    }
     if (req.url?.startsWith(`/api/projects/${PROJECT_ID}/check`)) return send({ conflicts: [] });
     if (req.url?.startsWith(`/api/projects/${PROJECT_ID}/sessions/`)) return send({ ok: true });
     return send({ error: 'not found' }, 404);
@@ -57,6 +82,22 @@ before(async () => {
   writeFileSync(join(repo, '.mediation.json'), JSON.stringify({
     server: origin, repository: { owner: 'acme', repository: 'widgets' },
   }));
+  // A fake `gh` on PATH: the client must never need a real GitHub to work.
+  ghBin = mkdtempSync(join(tmpdir(), 'mediation-mcp-gh-'));
+  writeFileSync(join(ghBin, 'gh'), `#!/bin/sh
+case "$1 $2" in
+  "auth token") echo gho_fake ;;
+  "issue create") echo ${ISSUE} ;;
+  "issue list") echo '[{"url":"${ISSUE}"}]' ;;
+  "issue close") ;;
+  *) exit 1 ;;
+esac
+`, { mode: 0o755 });
+  chmodSync(join(ghBin, 'gh'), 0o755);
+  ghDeadBin = mkdtempSync(join(tmpdir(), 'mediation-mcp-nogh-'));
+  writeFileSync(join(ghDeadBin, 'gh'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+  chmodSync(join(ghDeadBin, 'gh'), 0o755);
+
   mkdirSync(authHome, { recursive: true });
   writeFileSync(join(authHome, 'credentials.json'),
     JSON.stringify({ [origin]: { token: 'device-token', username: 'gh-acme' } }));
@@ -66,14 +107,24 @@ after(() => {
   server.close();
   rmSync(repo, { recursive: true, force: true });
   rmSync(authHome, { recursive: true, force: true });
+  rmSync(ghBin, { recursive: true, force: true });
+  rmSync(ghDeadBin, { recursive: true, force: true });
 });
 
 // Minimal MCP client: initialize, then one tools/call, then hand the reply to
 // `onReply`. The caller owns the child, so a test can keep it running and watch
 // what it does on its own timers.
-function spawnClient(name: string, args: Record<string, unknown>, onReply: (text: string) => void): ChildProcess {
+function spawnClient(name: string, args: Record<string, unknown>, onReply: (text: string) => void,
+  extraEnv: Record<string, string> = {}): ChildProcess {
   const child = spawn('node', [CLIENT], {
-    env: { ...process.env, MEDIATION_URL: origin, MEDIATION_DIR: repo, MEDIATION_AUTH_HOME: authHome },
+    env: {
+      ...process.env,
+      MEDIATION_URL: origin, MEDIATION_DIR: repo, MEDIATION_AUTH_HOME: authHome,
+      // Never let a test reach the developer's real `gh`: the default is one
+      // that fails every call, and a test opts in to the working stub.
+      PATH: `${ghDeadBin}:${process.env.PATH}`,
+      ...extraEnv,
+    },
     stdio: ['pipe', 'pipe', 'ignore'],
   });
   let buf = '';
@@ -95,13 +146,14 @@ function spawnClient(name: string, args: Record<string, unknown>, onReply: (text
   return child;
 }
 
-function callTool(name: string, args: Record<string, unknown> = {}): Promise<string> {
+function callTool(name: string, args: Record<string, unknown> = {},
+  extraEnv: Record<string, string> = {}): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawnClient(name, args, (text) => {
       clearTimeout(timer);
       child.kill();
       resolve(text);
-    });
+    }, extraEnv);
     const timer = setTimeout(() => { child.kill(); reject(new Error('timed out')); }, 15_000);
     child.on('error', reject);
   });
@@ -117,6 +169,44 @@ test('mediation_check binds a GitHub session and reports no overlap', async () =
 test('mediation_status reports the resolved repository and sign-in state', async () => {
   const out = await callTool('mediation_status');
   assert.match(out, /github\.com\/acme\/widgets/);
+});
+
+// GitHub coupling is a nice-to-have layered on the developer's own `gh`. It
+// must never be load-bearing: the bug is filed first and stands on its own.
+test('mediation_bug opens and links a GitHub issue when gh is signed in', async () => {
+  patches.length = 0;
+  const out = await callTool('mediation_bug', { title: 'flaky billing test', severity: 'high' },
+    { PATH: `${ghBin}:${process.env.PATH}` });
+  assert.match(out, /Bug filed/);
+  assert.match(out, /Tracking issue: https:\/\/github\.com\/acme\/widgets\/issues\/12/);
+  assert.equal(patches.at(-1)?.body.issueUrl, ISSUE, JSON.stringify(patches));
+});
+
+test('mediation_bug still files the bug when gh is not signed in', async () => {
+  patches.length = 0;
+  const out = await callTool('mediation_bug', { title: 'flaky billing test', severity: 'high' },
+    { PATH: `${ghDeadBin}:${process.env.PATH}` });
+  assert.match(out, /Bug filed/);
+  assert.match(out, /gh is not signed in/);
+  assert.equal(patches.length, 0, 'nothing should be linked when there is no issue');
+});
+
+// A merged PR closes the issue and tells Mediation nothing, so orientation is
+// where the two lists are brought back together.
+test('mediation_state resolves bugs whose GitHub issue has been closed', async () => {
+  patches.length = 0;
+  const out = await callTool('mediation_state', {}, { PATH: `${ghBin}:${process.env.PATH}` });
+  assert.match(out, /Resolved 1 bug\(s\) whose GitHub issue has been closed/);
+  assert.equal(patches.at(-1)?.body.status, 'fixed');
+  assert.match(out, /Open bugs \(0\)/);
+});
+
+test('mediation_bug_resolve closes a bug this session did not report, and its issue', async () => {
+  const out = await callTool('mediation_bug_resolve', { bugId: 'bug-1', status: 'fixed' },
+    { PATH: `${ghBin}:${process.env.PATH}` });
+  assert.match(out, /Bug "flaky billing test" is now fixed \(high\)\./);
+  assert.match(out, /Closed https:\/\/github\.com\/acme\/widgets\/issues\/12\./);
+  assert.ok(seen.includes(`PATCH /api/projects/${PROJECT_ID}/bugs/bug-1`), seen.join(', '));
 });
 
 // The client used to clear its own heartbeat interval on the first failed beat,

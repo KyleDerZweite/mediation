@@ -61,6 +61,7 @@ const ADD_COLUMNS: [table: string, column: string, decl: string][] = [
   ['project_members', 'authorization_source', 'TEXT'],
   ['project_members', 'repository_permission', 'TEXT'],
   ['project_members', 'authorization_expires_at', 'INTEGER'],
+  ['bugs', 'issue_url', 'TEXT'],
 ];
 
 interface StoreOptions {
@@ -265,6 +266,7 @@ function bugFromRow(r: Row): Bug {
     severity: r.severity as Bug['severity'],
     status: r.status as Bug['status'],
     createdAt: Number(r.createdAt),
+    issueUrl: (r.issue_url as string) ?? null,
   };
 }
 
@@ -560,13 +562,6 @@ export class Store {
     this.assertSessionCapability(projectId, row.sessionId as string, capability);
   }
 
-  assertBugCapability(projectId: string, bugId: string, capability: string | undefined): void {
-    const row = this.db.prepare('SELECT sessionId FROM bugs WHERE projectId = ? AND id = ?')
-      .get(projectId, bugId) as Row | undefined;
-    if (!row) notFound('bug not found');
-    this.assertSessionCapability(projectId, row.sessionId as string, capability);
-  }
-
   heartbeat(projectId: string, sessionId: string, input: Heartbeat): Session {
     const session = this.requireSession(projectId, sessionId);
     session.lastSeenAt = Date.now();
@@ -749,11 +744,12 @@ export class Store {
       severity: input.severity,
       status: 'open',
       createdAt: Date.now(),
+      issueUrl: input.issueUrl ?? null,
     };
-    this.db.prepare(`INSERT INTO bugs (id, projectId, sessionId, reporter, title, description, files, severity, status, createdAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    this.db.prepare(`INSERT INTO bugs (id, projectId, sessionId, reporter, title, description, files, severity, status, createdAt, issue_url)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(bug.id, projectId, bug.sessionId, bug.reporter, bug.title, bug.description,
-        JSON.stringify(bug.files), bug.severity, bug.status, bug.createdAt);
+        JSON.stringify(bug.files), bug.severity, bug.status, bug.createdAt, bug.issueUrl);
     this.emit(projectId, 'bug', `${session.agent} reported bug: ${bug.title}`, session.agent);
     return bug;
   }
@@ -765,8 +761,9 @@ export class Store {
     const bug = bugFromRow(row);
     if (patch.status) bug.status = patch.status;
     if (patch.severity) bug.severity = patch.severity;
-    this.db.prepare('UPDATE bugs SET status = ?, severity = ? WHERE id = ?')
-      .run(bug.status, bug.severity, bug.id);
+    if (patch.issueUrl) bug.issueUrl = patch.issueUrl;
+    this.db.prepare('UPDATE bugs SET status = ?, severity = ?, issue_url = ? WHERE id = ?')
+      .run(bug.status, bug.severity, bug.issueUrl, bug.id);
     return bug;
   }
 

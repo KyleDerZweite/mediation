@@ -612,9 +612,21 @@ export function buildApp(store: Store, options: AppOptions = {}): Hono {
     return c.json(store.reportBug(c.req.param('p'), body));
   });
 
+  // Whoever fixes a bug closes it. Gating this on the REPORTING session's
+  // capability made every bug permanently unresolvable, since that session is
+  // swept minutes later: an agent proves it is a live session in this project,
+  // and a signed-in human is already a member by the middleware above.
   app.patch('/api/projects/:p/bugs/:id', async (c) => {
-    store.assertBugCapability(c.req.param('p'), c.req.param('id'), c.req.header('x-mediation-session'));
-    return c.json(store.updateBug(c.req.param('p'), c.req.param('id'), await parseBody(c, schemas.bugPatch)));
+    const body = await parseBody(c, schemas.bugPatch);
+    if (body.sessionId) {
+      store.assertSessionCapability(c.req.param('p'), body.sessionId, c.req.header('x-mediation-session'));
+    } else if (!getUser(c)) {
+      return c.json({
+        error: 'agents must send their own sessionId with the session capability to resolve a bug',
+        docs: AUTH_MD,
+      }, 403);
+    }
+    return c.json(store.updateBug(c.req.param('p'), c.req.param('id'), body));
   });
 
   app.get('/api/projects/:p/state', (c) => c.json(store.getState(c.req.param('p'))));
