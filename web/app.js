@@ -554,32 +554,40 @@ function renderProject() {
 
   let body;
   const failure = state.stateErrors.get(pid);
-  if (tab === 'members') {
-    body = renderMembersTab(pid);
-  } else if (failure === 403) {
-    body = emptyCard(`You are not a member of <span class="mono">${esc(projectName(pid))}</span>. Ask one of its
-      owners to add you (dashboard → project → Members). Retrying will not help until they do.`);
-  } else if (failure === 404) {
-    body = emptyCard(`No project <span class="mono">${esc(projectName(pid))}</span> on this server.
-      <a href="#/">Back to the overview</a>.`);
-  } else if (!ps) {
-    body = emptyCard(state.everSynced
-      ? `Nothing recorded for <span class="mono">${esc(projectName(pid))}</span> yet. It will appear as soon as an agent connects.`
-      : `Waiting for the Mediation API…`);
-  } else if (tab === 'agents') {
-    body = renderSessionsTable(ps.sessions, now);
-  } else if (tab === 'activity') {
-    body = ps.events.length
-      ? `<div class="feed-panel" style="max-width:760px">${ps.events.map((e) => eventRow(e, now)).join('')}</div>`
-      : emptyCard('No events yet. Sessions, claims, findings and bug reports will land here as they happen.');
-  } else {
-    body = renderNowTab(ps, now);
+  try {
+    if (tab === 'members') {
+      body = renderMembersTab(pid);
+    } else if (failure === 403) {
+      body = emptyCard(`You are not a member of <span class="mono">${esc(projectName(pid))}</span>. Ask one of its
+        owners to add you (dashboard → project → Members). Retrying will not help until they do.`);
+    } else if (failure === 404) {
+      body = emptyCard(`No project <span class="mono">${esc(projectName(pid))}</span> on this server.
+        <a href="#/">Back to the overview</a>.`);
+    } else if (!ps) {
+      body = emptyCard(state.everSynced
+        ? `Nothing recorded for <span class="mono">${esc(projectName(pid))}</span> yet. It will appear as soon as an agent connects.`
+        : `Waiting for the Mediation API…`);
+    } else if (tab === 'agents') {
+      body = renderSessionsTable(ps.sessions, now);
+    } else if (tab === 'activity') {
+      body = ps.events.length
+        ? `<div class="feed-panel" style="max-width:760px">${ps.events.map((e) => eventRow(e, now)).join('')}</div>`
+        : emptyCard('No events yet. Sessions, claims, findings and bug reports will land here as they happen.');
+    } else {
+      body = renderNowTab(ps, now, pid);
+    }
+  } catch (err) {
+    // TRAP: the 3s poll re-renders this view, so a throwing panel used to blank
+    // the whole project on every tick. Keep the head and tabs usable instead.
+    console.error('render failed', tab, err);
+    body = emptyCard(`Could not render this tab: <span class="mono">${esc(String(err?.message || err))}</span>.
+      The rest of the dashboard still works.`);
   }
 
   return `<div class="view-project">${head}<div class="tabs">${tabs}</div>${body}</div>`;
 }
 
-function renderNowTab(ps, now) {
+function renderNowTab(ps, now, pid) {
   const sessionsById = new Map(ps.sessions.map((s) => [s.id, s]));
 
   const claimsHtml = ps.claims.length
