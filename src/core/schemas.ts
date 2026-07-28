@@ -9,6 +9,11 @@ const optStr = z.string().min(1).nullish();
 const files = z.array(z.string()).default([]);
 
 export const activeClaimStatus = z.enum(['investigating', 'in-progress', 'testing', 'blocked']);
+// How a claim ends. `done` is finished work and enters the completed feed;
+// `abandoned` is work that was claimed and dropped, which closes the claim
+// without pretending anything was delivered.
+export const terminalClaimStatus = z.enum(['done', 'abandoned']);
+export const findingKind = z.enum(['root-cause', 'gotcha', 'decision', 'api-change']);
 export const bugSeverity = z.enum(['low', 'medium', 'high', 'critical', 'unknown']);
 export const bugStatus = z.enum(['open', 'claimed', 'fixed']);
 
@@ -16,10 +21,17 @@ export const sessionCreate = z.object({
   agent: str,
   developer: optStr,
   machine: optStr,
+  worktree: optStr,
 });
 
+// Repo state rides ALONG with the beat rather than needing its own call: the
+// beat already fires on a timer, so real touched files keep flowing while the
+// agent is heads-down coding and calling no tools at all.
 export const heartbeat = z.object({
   activity: optStr,
+  branch: optStr,
+  revision: optStr,
+  dirtyFiles: z.array(z.string()).optional(),
 });
 
 export const repoReport = z.object({
@@ -37,6 +49,7 @@ export const claimCreate = z.object({
   branch: optStr,
   baseRevision: optStr,
   status: activeClaimStatus.default('investigating'),
+  blockedOn: optStr,
 });
 
 export const claimPatch = z.object({
@@ -47,13 +60,20 @@ export const claimPatch = z.object({
   branch: optStr,
   baseRevision: optStr,
   status: activeClaimStatus.optional(),
+  blockedOn: optStr,
   finding: optStr,
+  // A finding about one file inherits the claim's whole file list otherwise,
+  // which routes it to everyone the claim overlaps instead of the people the
+  // finding is actually about.
+  findingFiles: z.array(z.string()).optional(),
+  findingKind: findingKind.optional(),
 });
 
 export const claimComplete = z.object({
   commits: z.array(z.string()).default([]),
   prs: z.array(z.string()).default([]),
   summary: optStr,
+  status: terminalClaimStatus.default('done'),
 });
 
 export const bugCreate = z.object({
@@ -117,6 +137,7 @@ export const githubRepositorySession = z.object({
   repository: githubName,
   agent: str,
   machine: optStr,
+  worktree: optStr,
 });
 
 export const userPatch = z.object({

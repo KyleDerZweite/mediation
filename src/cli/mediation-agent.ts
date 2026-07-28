@@ -29,6 +29,7 @@ commands:
   update      --project P --claim ID [--status S] [--intent "..."] [--task T]
               [--files a,b] [--components x,y] [--branch B] [--revision R] [--finding "..."]
   complete    --project P --claim ID [--commits c1,c2] [--prs u1,u2] [--summary "..."]
+              [--status done|abandoned]   (abandoned = claimed then dropped, kept out of history)
   bug         --project P --session ID --title "..." [--description "..."] [--files a,b] [--severity S]
   state       --project P
   projects    (list all projects)
@@ -302,6 +303,7 @@ const commands: Record<string, () => Promise<void>> = {
       commits: list('--commits') ?? [],
       prs: list('--prs') ?? [],
       summary: arg('--summary'),
+      status: (arg('--status') as ClaimComplete['status']) ?? 'done',
     };
     out(await call('POST', `/api/projects/${project()}/claims/${id}/complete`, body));
   },

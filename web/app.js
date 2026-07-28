@@ -847,15 +847,16 @@ function renderInstallPanel() {
   const installCmd = `curl -fsSL ${origin}/install.sh | bash`;
   const signIn = state.serverAuthMode === 'github-app'
     ? [
-      '3. Run mediation_login and show me the verification URL and code it prints.',
+      '3. Run mediation_setup and show me the verification URL and code it prints.',
       '   I open that link, sign in with GitHub if I am not signed in already, and',
-      '   confirm the code. Then run mediation_login again to store this machine’s',
+      '   confirm the code. Then run mediation_setup again to store this machine’s',
       '   credential. Never ask me for a GitHub token, because you do not get one.',
       '   If it says the account awaits approval, tell me and stop until I say go.',
     ]
     : [
-      '3. Run mediation_register with the username and password I give you, then',
-      '   mediation_login once an administrator has activated the account.',
+      '3. Run mediation_setup with register: true and the username and password I',
+      '   give you, then mediation_setup with the same credentials once an',
+      '   administrator has activated the account.',
     ];
   const prompt = [
     'Set up Mediation (live work coordination) for this repository.',
@@ -864,11 +865,11 @@ function renderInstallPanel() {
     '1. If you have no mediation_* MCP tools, install the client:',
     `   ${installCmd}`,
     '   Then reload your MCP servers so the tools appear.',
-    '2. Run mediation_status and tell me what it reports.',
+    '2. Run mediation_state and tell me what it reports.',
     ...signIn,
     '4. Run mediation_init here to bind this repository’s GitHub push target.',
-    '5. From now on follow the mediation skill: mediation_check before you touch',
-    '   files, mediation_claim when you start, mediation_complete when you finish.',
+    '5. From now on follow the mediation skill: mediation_claim before you touch',
+    '   files, then the same tool for findings and again with status "done".',
   ].join('\n');
 
   return `<div class="dark-panel" style="margin-bottom:22px">
@@ -929,15 +930,15 @@ function connectPanel(origin) {
   const pid = state.projects[0]?.id || 'my-project';
   const steps = github
     ? [
-      ['mediation_status', 'reports the repository it resolved and whether this machine is signed in'],
-      ['mediation_login', 'one browser confirmation, then the device credential is stored for this server'],
+      ['mediation_setup', 'one browser confirmation, then the device credential is stored for this server'],
       ['mediation_init', 'binds the repository GitHub says you can push to; no project id is ever typed'],
-      ['mediation_check', 'before touching files, then mediation_claim, mediation_complete'],
+      ['mediation_claim', 'before touching files; the same tool records findings and finishes the work'],
+      ['mediation_state', 'the live picture, and what is still missing if setup is incomplete'],
     ]
     : [
-      ['mediation_register / mediation_login', 'account, then a device credential for this machine'],
+      ['mediation_setup', 'register: true for the account, then again to sign this machine in'],
       ['mediation_init', 'maps this repository'],
-      ['mediation_check', 'before touching files, then mediation_claim, mediation_complete'],
+      ['mediation_claim', 'before touching files; the same tool records findings and finishes the work'],
     ];
   const cli = [
     '# manual mode only: the CLI addresses projects by id',

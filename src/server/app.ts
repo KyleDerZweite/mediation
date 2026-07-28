@@ -452,7 +452,8 @@ export function buildApp(store: Store, options: AppOptions = {}): Hono {
     store.grantGithubProjectAccess(project.id, userId, authorization.permission, authorization.expiresAt);
     const capability = randomBytes(32).toString('base64url');
     const session = store.startSession(project.id, {
-      agent: body.agent, machine: body.machine ?? null, developer: getUser(c)?.displayName ?? getCred(c)?.ownerDisplayName ?? null,
+      agent: body.agent, machine: body.machine ?? null, worktree: body.worktree ?? null,
+      developer: getUser(c)?.displayName ?? getCred(c)?.ownerDisplayName ?? null,
     }, capability);
     store.setGithubSessionAuthorization(project.id, session.id, {
       userId,
@@ -590,26 +591,39 @@ export function buildApp(store: Store, options: AppOptions = {}): Hono {
     return c.json(store.reportRepoState(c.req.param('p'), c.req.param('id'), await parseBody(c, schemas.repoReport)));
   });
 
+  /* Every write an agent makes comes back with the news that concerns it. The
+     call was already happening, so relevance-filtered updates cost one extra
+     field instead of a poll, and they land while the agent is still thinking
+     about the files they are about. */
+  const withNews = (projectId: string, sessionId: string | null | undefined, payload: object) =>
+    (sessionId ? { ...payload, news: store.newsFor(projectId, sessionId) } : payload);
+
   app.post('/api/projects/:p/claims', async (c) => {
     const body = await parseBody(c, schemas.claimCreate);
-    store.assertSessionCapability(c.req.param('p'), body.sessionId, c.req.header('x-mediation-session'));
-    return c.json(store.createClaim(c.req.param('p'), body));
+    const projectId = c.req.param('p');
+    store.assertSessionCapability(projectId, body.sessionId, c.req.header('x-mediation-session'));
+    return c.json(withNews(projectId, body.sessionId, store.createClaim(projectId, body)));
   });
 
   app.patch('/api/projects/:p/claims/:id', async (c) => {
-    store.assertClaimCapability(c.req.param('p'), c.req.param('id'), c.req.header('x-mediation-session'));
-    return c.json(store.updateClaim(c.req.param('p'), c.req.param('id'), await parseBody(c, schemas.claimPatch)));
+    const projectId = c.req.param('p');
+    store.assertClaimCapability(projectId, c.req.param('id'), c.req.header('x-mediation-session'));
+    const claim = store.updateClaim(projectId, c.req.param('id'), await parseBody(c, schemas.claimPatch));
+    return c.json(withNews(projectId, claim.sessionId, claim));
   });
 
   app.post('/api/projects/:p/claims/:id/complete', async (c) => {
-    store.assertClaimCapability(c.req.param('p'), c.req.param('id'), c.req.header('x-mediation-session'));
-    return c.json(store.completeClaim(c.req.param('p'), c.req.param('id'), await parseBody(c, schemas.claimComplete)));
+    const projectId = c.req.param('p');
+    store.assertClaimCapability(projectId, c.req.param('id'), c.req.header('x-mediation-session'));
+    const claim = store.completeClaim(projectId, c.req.param('id'), await parseBody(c, schemas.claimComplete));
+    return c.json(withNews(projectId, claim.sessionId, claim));
   });
 
   app.post('/api/projects/:p/bugs', async (c) => {
     const body = await parseBody(c, schemas.bugCreate);
-    store.assertSessionCapability(c.req.param('p'), body.sessionId, c.req.header('x-mediation-session'));
-    return c.json(store.reportBug(c.req.param('p'), body));
+    const projectId = c.req.param('p');
+    store.assertSessionCapability(projectId, body.sessionId, c.req.header('x-mediation-session'));
+    return c.json(withNews(projectId, body.sessionId, store.reportBug(projectId, body)));
   });
 
   // Whoever fixes a bug closes it. Gating this on the REPORTING session's
@@ -629,7 +643,14 @@ export function buildApp(store: Store, options: AppOptions = {}): Hono {
     return c.json(store.updateBug(c.req.param('p'), c.req.param('id'), body));
   });
 
-  app.get('/api/projects/:p/state', (c) => c.json(store.getState(c.req.param('p'))));
+  app.get('/api/projects/:p/state', (c) => {
+    const projectId = c.req.param('p');
+    const sessionId = c.req.query('sessionId');
+    // Agents orient AND catch up in one call; the dashboard passes no session
+    // and simply gets the state, since a browser has nothing to catch up on.
+    if (sessionId) store.assertSessionCapability(projectId, sessionId, c.req.header('x-mediation-session'));
+    return c.json(withNews(projectId, sessionId, store.getState(projectId)));
+  });
 
   app.get('/api/projects/:p/check', (c) => {
     const q = c.req.query();

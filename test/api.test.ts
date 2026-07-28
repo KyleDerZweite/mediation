@@ -172,7 +172,8 @@ test('check endpoint returns conflicts array from query params', async () => {
   assert.ok(Array.isArray(hit.body.conflicts));
   assert.equal(hit.body.conflicts.length, 1);
   const types = hit.body.conflicts[0].reasons.map((r: { type: string }) => r.type).sort();
-  assert.deepEqual(types, ['components', 'files', 'task']);
+  // Files and components are proof; the task guess stays quiet behind them.
+  assert.deepEqual(types, ['components', 'files']);
 
   // own session's claims are excluded
   const own = await get(`${Q}/check?sessionId=${a.id}&files=src/pay/stripe.ts`);

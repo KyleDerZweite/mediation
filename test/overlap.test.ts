@@ -15,10 +15,12 @@ function claim(over: Partial<Claim> & { id: string; sessionId: string }): Claim 
     branch: null,
     baseRevision: null,
     status: 'in-progress',
+    blockedOn: null,
     findings: [],
     commits: [],
     prs: [],
     summary: null,
+    worktree: null,
     createdAt: 0,
     updatedAt: 0,
     completedAt: null,
@@ -51,7 +53,7 @@ test('pathsOverlap: exact, parent dir, sibling no-match', () => {
   assert.ok(!pathsOverlap('', 'src'));
 });
 
-test('checkOverlap: file, component, and task reasons', () => {
+test('checkOverlap: hard file and component evidence suppresses the task guess', () => {
   const existing = [
     claim({
       id: 'c1', sessionId: 's1', agent: 'a1',
@@ -67,7 +69,27 @@ test('checkOverlap: file, component, and task reasons', () => {
   assert.equal(warnings.length, 1);
   assert.equal(warnings[0].claimId, 'c1');
   const types = warnings[0].reasons.map((r) => r.type).sort();
-  assert.deepEqual(types, ['components', 'files', 'task']);
+  assert.deepEqual(types, ['components', 'files']);
+});
+
+test('checkOverlap: task similarity still speaks when nothing else does', () => {
+  const existing = [claim({ id: 'c1', sessionId: 's1', intent: 'Fix login redirect loop' })];
+  const warnings = checkOverlap(existing, { sessionId: 's2', intent: 'Debug login redirect' });
+  assert.equal(warnings.length, 1);
+  assert.deepEqual(warnings[0].reasons.map((r) => r.type), ['task']);
+});
+
+test('checkOverlap: warnings carry the claim age so stale work reads differently', () => {
+  const existing = [claim({ id: 'c1', sessionId: 's1', files: ['src/a.js'], updatedAt: 1234 })];
+  assert.equal(checkOverlap(existing, { sessionId: 's2', files: ['src/a.js'] })[0].updatedAt, 1234);
+});
+
+test('checkOverlap: one worktree is one working tree, never a conflict', () => {
+  const existing = [claim({ id: 'c1', sessionId: 's1', files: ['src/a.js'], worktree: 'box:/repo' })];
+  assert.equal(checkOverlap(existing, { sessionId: 's2', files: ['src/a.js'], worktree: 'box:/repo' }).length, 0);
+  assert.equal(checkOverlap(existing, { sessionId: 's2', files: ['src/a.js'], worktree: 'box:/other' }).length, 1);
+  // An unknown worktree on either side must never suppress: absence is not a match.
+  assert.equal(checkOverlap(existing, { sessionId: 's2', files: ['src/a.js'] }).length, 1);
 });
 
 test('checkOverlap: own session excluded', () => {
@@ -102,7 +124,19 @@ test('pairConflicts: cross-session pairs only', () => {
   assert.equal(conflicts.length, 1);
   assert.deepEqual(conflicts[0].between.map((b) => b.claimId).sort(), ['c1', 'c2']);
   assert.ok(conflicts[0].reasons.some((r) => r.type === 'files'));
-  assert.ok(conflicts[0].reasons.some((r) => r.type === 'task'));
+  // The shared file is the evidence; the shared wording adds nothing to it.
+  assert.ok(!conflicts[0].reasons.some((r) => r.type === 'task'));
+});
+
+test('pairConflicts: claims from one worktree are the same tree, not a clash', () => {
+  const claims = [
+    claim({ id: 'c1', sessionId: 's1', files: ['src/a.js'], worktree: 'box:/repo' }),
+    claim({ id: 'c2', sessionId: 's2', files: ['src/a.js'], worktree: 'box:/repo' }),
+    claim({ id: 'c3', sessionId: 's3', files: ['src/a.js'], worktree: 'box:/elsewhere' }),
+  ];
+  const conflicts = pairConflicts(claims);
+  assert.equal(conflicts.length, 2);
+  assert.ok(conflicts.every((k) => k.between.some((b) => b.claimId === 'c3')));
 });
 
 test('pairConflicts: same-session claims never conflict', () => {

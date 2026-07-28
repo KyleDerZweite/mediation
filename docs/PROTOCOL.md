@@ -228,7 +228,7 @@ overlap detected, so gate on it in scripts.
 ## Device login (persistent credentials)
 
 An agent logs in once per server/machine and reuses a durable, narrow device
-credential (the MCP client automates this via `mediation_login`):
+credential (the MCP client automates this via `mediation_setup`):
 
 ```
 Manual mode: `POST /api/auth/device-login { "username": "kyle", "password": "...", "machine": "host" }`
@@ -268,11 +268,19 @@ with this server's URL baked in:
 curl -fsSL <server>/install.sh | bash
 ```
 
-This registers the `mediation` MCP server (tools `mediation_init`,
-`mediation_check`, `mediation_claim`, `mediation_update`,
-`mediation_complete`, `mediation_bug`, `mediation_bug_resolve`,
-`mediation_state`, `mediation_status`)
-in claude-code, codex and kimi, and installs a skill teaching the workflow.
+This registers the `mediation` MCP server in claude-code, codex and kimi, and
+installs a skill teaching the workflow. Five tools, split by the object they
+act on rather than by transition, because every tool description is context an
+agent pays for on every call and one more decision it can get wrong:
+
+| Tool | Covers |
+| --- | --- |
+| `mediation_setup` | sign this machine in; register an account in manual mode; report setup state |
+| `mediation_init` | bind this repository's GitHub push target (separate, so a harness can deny it on its own) |
+| `mediation_claim` | the whole life of a claim: publish (which also checks), record findings, block on another claim, finish as `done` or `abandoned` |
+| `mediation_bug` | file a bug, or resolve one by `bugId` |
+| `mediation_state` | the live project picture, or what is missing when setup is incomplete |
+
 Re-run the install command to update. `<server>/uninstall.sh` reverses the
 manifest-owned harness changes and removes global device auth by default
 (`--keep-auth` preserves it). Per-project `.mediation.json` contains only the

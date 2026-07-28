@@ -227,7 +227,48 @@ function derivedProject() {
   };
 }
 
-// Definitive answer, not a guess: git itself decides whether the file is ignored.
+/* Identifies the CHECKOUT, not the machine: two harnesses started in one
+   directory share a working tree, so their dirty files are identical by
+   construction and the server must not read that as a collision. Hashed because
+   equality is the only thing anyone needs, and a local path is nobody's
+   business on a shared server. */
+function worktreeId() {
+  return createHash('sha256').update(`${os.hostname()} ${baseDir().dir}`).digest('base64url').slice(0, 22);
+}
+
+/* What the working tree ACTUALLY has open, which is the one honest answer to
+   "which files is this agent touching". Agents predict their own file lists
+   badly and often leave them empty; git does not guess. Capped because a
+   generated-file sweep or a fresh clone can dirty thousands of paths and none
+   of that belongs in an overlap check. */
+const DIRTY_FILES_CAP = 100;
+function dirtyFiles() {
+  const out = git(['status', '--porcelain', '--untracked-files=normal']);
+  if (out === null) return null; // not a repo, no git, or too slow: report nothing
+  const files = [];
+  for (const line of out.split('\n')) {
+    if (!line.trim()) continue;
+    const raw = line.slice(3).trim();
+    // Renames read `old -> new`; the new path is the one being worked on.
+    const file = (raw.includes(' -> ') ? raw.slice(raw.lastIndexOf(' -> ') + 4) : raw).replace(/^"|"$/g, '');
+    if (file) files.push(file);
+    if (files.length >= DIRTY_FILES_CAP) break;
+  }
+  return files;
+}
+
+function repoReport() {
+  const files = dirtyFiles();
+  if (files === null) return {};
+  return {
+    // symbolic-ref, not rev-parse: a repository before its first commit has an
+    // unborn branch, which rev-parse cannot name but symbolic-ref reports fine.
+    branch: git(['symbolic-ref', '--quiet', '--short', 'HEAD']) || null,
+    revision: git(['rev-parse', 'HEAD']) || null,
+    dirtyFiles: files,
+  };
+}
+
 /* ---------------- http ---------------- */
 
 let session = null; // { id, capability, project, heartbeat }; never persisted
@@ -301,6 +342,7 @@ async function githubSession(state) {
     repository: current.repository.repository,
     agent: process.env.MEDIATION_HARNESS || 'claude-code',
     machine: os.hostname(),
+    worktree: worktreeId(),
   });
   const project = typeof created.project === 'string' ? created.project : created.project?.id;
   const id = typeof created.session === 'string' ? created.session : created.session?.id;
@@ -315,17 +357,21 @@ async function ensureSession() {
   sessionPromise = (async () => {
   if (session) await endSession();
   if (!state?.repository && !state?.project) throw new Error('not initialized. Call mediation_init first');
-  if (!readCredentials()?.token) throw new Error('not signed in. Call mediation_login first');
+  if (!readCredentials()?.token) throw new Error('not signed in. Call mediation_setup first');
   const created = await ((await serverAuthMode()) === 'github-app'
     ? githubSession(state)
     : api('POST', `/api/projects/${encodeURIComponent(state.project)}/sessions`, {
-      agent: process.env.MEDIATION_HARNESS || 'claude-code', machine: os.hostname(),
+      agent: process.env.MEDIATION_HARNESS || 'claude-code', machine: os.hostname(), worktree: worktreeId(),
     }));
   const current = { id: created.id, capability: created.capability, project: created.project || state.project, heartbeat: null };
   session = current;
   current.heartbeat = setInterval(() => {
-    api('POST', `/api/projects/${encodeURIComponent(current.project)}/sessions/${current.id}/heartbeat`, {},
-      { sessionCapability: current.capability })
+    /* The beat carries what the working tree says. It is the ONLY thing that
+       fires while the agent is heads-down coding and calling no tools, so it is
+       the only channel that keeps overlap data fresh through exactly the window
+       where a collision is most likely to form unnoticed. */
+    api('POST', `/api/projects/${encodeURIComponent(current.project)}/sessions/${current.id}/heartbeat`,
+      repoReport(), { sessionCapability: current.capability })
       .catch((error) => {
         // A dropped beat is a network event, not a verdict. Giving up on the
         // first one leaves the agent working under a session the server then
@@ -418,7 +464,7 @@ const ago = (ts) => {
 // through verbatim and stop the agent from retrying its way around them.
 function renderError(err) {
   const out = [`error: ${err.message}`];
-  if (err.status === 401) out.push('(device credential is missing, invalid, or revoked. Run mediation_login again)');
+  if (err.status === 401) out.push('(device credential is missing, invalid, or revoked. Run mediation_setup again)');
   else if (err.name === 'TimeoutError' || err.cause?.code === 'ECONNREFUSED') out.push(`(mediation server ${SERVER} unreachable)`);
   if (err.hint) {
     out.push(`\nNEXT STEP, tell your user verbatim: ${err.hint}`);
@@ -436,9 +482,52 @@ function renderConflicts(conflicts) {
       r.type === 'files' ? `files: ${r.detail.map((d) => `${d.mine}<->${d.theirs}`).join(', ')}`
       : r.type === 'components' ? `components: ${r.detail.join(', ')}`
       : `similar task (${r.detail.join(', ')})`).join('; ');
-    return `- ${w.agent}${w.developer ? ` (for ${w.developer})` : ''} is "${w.status}" on: ${w.intent}\n  overlap: ${reasons}\n  claimId: ${w.claimId}`;
+    // The age is the difference between "someone is in this file right now" and
+    // "someone touched it half an hour ago"; without it both read as urgent.
+    const age = w.updatedAt ? `, last touched ${ago(w.updatedAt)} ago` : '';
+    return `- ${w.agent}${w.developer ? ` (for ${w.developer})` : ''} is "${w.status}"${age} on: ${w.intent}\n  overlap: ${reasons}\n  claimId: ${w.claimId}`;
   });
   return `WARNING: ${conflicts.length} overlapping claim(s). Conflicts are warnings, not locks. Stop, coordinate with the owner, narrow scope, or continue explicitly.\n${lines.join('\n')}`;
+}
+
+/* News rides back on a call the agent was already making. Kept deliberately
+   short: this text is spent out of the agent's context on every write, so it
+   earns its place only by staying a few lines. */
+function renderNews(news) {
+  if (!news?.length) return '';
+  const label = {
+    'waiting-on-you': 'SOMEONE IS WAITING ON YOU',
+    unblocked: 'YOUR WAIT IS OVER',
+    blocker: 'on the work you are waiting for',
+    overlap: 'touches your work',
+  };
+  return `\n\nNEWS (${news.length}, relevant to files you claimed):\n`
+    + news.map((n) => `- [${label[n.reason] || n.reason}] ${n.message} (${ago(n.at)} ago)`).join('\n');
+}
+
+// Where this directory stands: mapped, mapped elsewhere, or not initialized.
+// Shared by setup and state so both answer the question the same way.
+function describeMapping(state) {
+  if (!state) {
+    const guess = derivedProject();
+    return guess?.repository
+      ? `This directory is NOT initialized. Resolved repository: github.com/${guess.repository.owner}/${guess.repository.repository} (${guess.source}). Call mediation_init only if the user asked to set up Mediation here.`
+      : `This directory is NOT initialized, and ${guess?.error || 'no Git push remote is configured here'}, so it cannot be. Configure the GitHub push remote; never guess from the directory name.`;
+  }
+  if (!stateMatchesServer(state)) {
+    return `The mapping at ${state.path} belongs to ${state.server || 'an invalid server'}, not ${SERVER}. Call mediation_init to remap it.`;
+  }
+  const repository = state.repository
+    ? `github.com/${state.repository.owner}/${state.repository.repository}`
+    : `legacy project "${state.project}"`;
+  return `Repository ${repository} (mapping: ${state.path}).`;
+}
+
+// Response budget. These strings are charged to the agent's context on every
+// call, so long lists get counted rather than printed.
+function capped(items, limit, render) {
+  const shown = items.slice(0, limit).map(render).join('');
+  return items.length > limit ? `${shown}\n  ...and ${items.length - limit} more` : shown;
 }
 
 /* ---------------- tools ---------------- */
@@ -452,58 +541,43 @@ const dirArg = {
     + 'Pass it whenever your harness may have started the MCP server somewhere other than the project.',
 };
 
+/* Five tools, not eleven. Each tool description is context an agent pays for on
+   every single call, and each is a decision point it can get wrong; folding a
+   lifecycle into one tool removes both. The split that survives is by OBJECT
+   (a claim, a bug, the project) plus the two setup steps, because that is the
+   split a model already reasons in. `mediation_init` deliberately stays its own
+   tool: it is the one action with a policy boundary ("never initialize unless
+   the user asked") and the only one that writes into the repository, so a
+   harness must be able to deny it on its own. */
 const TOOLS = [
   {
-    name: 'mediation_status',
-    description: 'Check the Mediation setup for a project directory: resolved directory, server reachability, device login, project mapping, and active session.',
-    inputSchema: { type: 'object', properties: { directory: dirArg } },
-    async run({ directory }) {
-      const b = baseDir(directory);
-      let health = 'unreachable';
-      try { await api('GET', '/api/health', undefined, { auth: false }); health = 'ok'; } catch {}
-      const state = readState();
-      const where = `Directory: ${b.dir}${b.repo ? '' : ' (NOT a git repository)'}${b.explicit ? ' (given)' : ''}.`;
-      if (!state) {
-        const guess = derivedProject();
-        return `server ${SERVER}: ${health}. ${where} No .mediation.json found, so this directory is not initialized.\n`
-          + (guess?.repository
-            ? `Resolved repository: github.com/${guess.repository.owner}/${guess.repository.repository} (${guess.source}). Call mediation_init.`
-            : `${guess?.error || 'No Git push remote is configured here'}, so this repository cannot be initialized. Configure its GitHub push remote; never guess from the directory name.`);
-      }
-      if (!stateMatchesServer(state)) {
-        return `server ${SERVER}: ${health}. ${where} The mapping at ${state.path} belongs to `
-          + `${state.server || 'an invalid server'}. Run mediation_init to remap this repository.`;
-      }
-      let identity = 'not signed in. Call mediation_login';
-      try {
-        const me = await api('GET', '/api/auth/me');
-        identity = `signed in as ${me.ownerUsername}`;
-      } catch {}
-      const repository = state.repository ? `github.com/${state.repository.owner}/${state.repository.repository}` : `legacy project "${state.project}"`;
-      return `server ${SERVER}: ${health}. ${where} Repository ${repository} (state: ${state.path}). ${identity}. Session: ${session ? 'active' : 'none yet (created on first use)'}.`;
-    },
-  },
-  {
-    name: 'mediation_register',
-    description: 'Register a Mediation account. The first account is active admin; later accounts wait for an admin to approve them. Never store the password.',
+    name: 'mediation_setup',
+    description: 'Sign this machine in to Mediation, and report setup state. Idempotent and resumable: call it, do what it says, call it again. GitHub App mode drives browser device authorization (never accept or store a GitHub token); manual mode takes username/password, and registers a new account only when register: true.',
     inputSchema: {
       type: 'object',
       properties: {
-        username: str, password: str,
+        username: str,
+        password: str,
+        register: { type: 'boolean', description: 'Manual mode only: create a NEW account instead of signing in. Never set this to recover from a failed sign-in.' },
+        directory: dirArg,
       },
-      required: ['username', 'password'],
     },
-    async run({ username, password }) {
-      const r = await api('POST', '/api/users/register', { username, password }, { auth: false });
-      return r.bootstrap ? `Account ${r.user.username} registered as the initial admin. Call mediation_login.`
-        : `Account ${r.user.username} registered and is awaiting admin approval. Ask an admin to approve it, then call mediation_login.`;
-    },
-  },
-  {
-    name: 'mediation_login',
-    description: 'Manual mode: sign in once with username/password and store a narrow device bearer. GitHub App mode: guides the human to complete browser device authorization; never accept or store a GitHub token.',
-    inputSchema: { type: 'object', properties: { username: str, password: str } },
-    async run({ username, password }) {
+    async run({ username, password, register, directory }) {
+      const b = baseDir(directory);
+      let health = 'unreachable';
+      try { await api('GET', '/api/health', undefined, { auth: false }); health = 'ok'; } catch {}
+      const where = `Directory: ${b.dir}${b.repo ? '' : ' (NOT a git repository)'}${b.explicit ? ' (given)' : ''}.`;
+
+      // Signed in already: this is the report, and no credential is touched.
+      if (readCredentials()?.token && !register && !password) {
+        let identity = 'device credential present but not accepted; sign in again';
+        try {
+          const me = await api('GET', '/api/auth/me');
+          identity = `signed in as ${me.ownerUsername}`;
+        } catch {}
+        return `server ${SERVER}: ${health}. ${where} ${identity}. ${describeMapping(readState())}`;
+      }
+
       if ((await serverAuthMode()) === 'github-app') {
         const current = readCredentials();
         const begin = async () => {
@@ -513,7 +587,7 @@ const TOOLS = [
           } });
           return `Open ${started.verificationUri} and confirm code ${started.userCode}. `
             + 'GitHub signs the human into Mediation; no GitHub token is given to this agent. '
-            + 'After an administrator approves the Mediation account, call mediation_login again.';
+            + 'After an administrator approves the Mediation account, call mediation_setup again.';
         };
         if (!current?.activation?.requestId || !current.activation.secret) return begin();
         let redeemed;
@@ -527,21 +601,34 @@ const TOOLS = [
         }
         if (!redeemed.token) {
           return redeemed.status === 'waiting-for-approval'
-            ? 'GitHub identity confirmed. A Mediation administrator must approve the account; then call mediation_login again.'
-            : 'Browser GitHub authorization is not complete yet. Open the previously shown verification URL, then call mediation_login again.';
+            ? 'GitHub identity confirmed. A Mediation administrator must approve the account; then call mediation_setup again.'
+            : 'Browser GitHub authorization is not complete yet. Open the previously shown verification URL, then call mediation_setup again.';
         }
         const credentialPath = writeCredentials({ token: redeemed.token, username: redeemed.user.username });
-        return `Signed in as ${redeemed.user.username}. Device credential stored at ${credentialPath}.`;
+        return `Signed in as ${redeemed.user.username}. Device credential stored at ${credentialPath}. ${describeMapping(readState())}`;
       }
-      if (!username || !password) throw new Error('manual mode requires username and password');
+
+      if (!username || !password) {
+        return `server ${SERVER}: ${health}. ${where} Not signed in. Manual mode: ask the user for their Mediation `
+          + 'username and password and call mediation_setup with them. Do NOT invent credentials.';
+      }
+      /* Registering is an explicit request, never a fallback from a failed
+         sign-in: a typo'd username would silently create a junk pending account
+         and leave the real one untouched. */
+      if (register) {
+        const r = await api('POST', '/api/users/register', { username, password }, { auth: false });
+        return r.bootstrap
+          ? `Account ${r.user.username} registered as the initial admin. Call mediation_setup with the same credentials to sign in.`
+          : `Account ${r.user.username} registered and is awaiting admin approval. Ask an admin to approve it, then call mediation_setup with the same credentials.`;
+      }
       const r = await api('POST', '/api/auth/device-login', { username, password, machine: os.hostname() }, { auth: false });
       const credentialPath = writeCredentials({ token: r.token, username: r.user.username });
-      return `Signed in as ${r.user.username}. Device credential stored at ${credentialPath}.`;
+      return `Signed in as ${r.user.username}. Device credential stored at ${credentialPath}. ${describeMapping(readState())}`;
     },
   },
   {
     name: 'mediation_init',
-    description: 'Bind the current repository’s GitHub push target. It independently resolves owner/repository once; models cannot supply a project id and no credential is stored in the repository.',
+    description: 'Bind the current repository’s GitHub push target. Call ONLY when the user explicitly asks to set up or connect Mediation here. It independently resolves owner/repository once; models cannot supply a project id and no credential is stored in the repository.',
     inputSchema: { type: 'object', properties: { directory: dirArg } },
     async run({ directory }) {
       const b = baseDir(directory);
@@ -557,138 +644,133 @@ const TOOLS = [
       const statePath = writeState({ server: SERVER, repository: guess.repository,
         ...(mode === 'manual' ? { project: manualProject(guess.repository.owner, guess.repository.repository) } : {}) });
       const repository = `github.com/${guess.repository.owner}/${guess.repository.repository}`;
-      if (!readCredentials()?.token) return `Repository "${repository}" mapped at ${statePath}. Sign in with mediation_login before working.`;
+      if (!readCredentials()?.token) return `Repository "${repository}" mapped at ${statePath}. Sign in with mediation_setup before working.`;
       await ensureSession();
-      return `Repository "${repository}" bound at ${statePath} (${guess.source}). Use mediation_check before starting work.`;
+      return `Repository "${repository}" bound at ${statePath} (${guess.source}). Publish work with mediation_claim before you start editing.`;
     },
   },
   {
-    name: 'mediation_check',
-    description: 'REQUIRED before starting any coding task: check whether other developers/agents already work on the same files, components, or a similar task. Conflicts are warnings, not locks.',
+    /* One tool for the whole life of a claim, because a claim IS one object
+       moving through states, and a separate tool per transition only gave the
+       model more chances to skip one. Creating a claim is also how you check:
+       POST /claims runs the same overlap computation the old check call did and
+       returns the same warnings, so checking first was a round trip that bought
+       nothing except the ability to look without publishing, and staying
+       invisible is the opposite of what a coordination server is for. */
+    name: 'mediation_claim',
+    description: 'REQUIRED before you start editing: publish what you are about to work on. Returns overlap warnings for anyone already on it (warnings, not locks). Then reuse the SAME tool with the returned claimId to record findings, change status, and finish: status "done" with commits when the work is committed, or "abandoned" if you drop it so the claim stops warning others.',
     inputSchema: {
       type: 'object',
       properties: {
+        claimId: { ...str, description: 'Omit to create a new claim; pass it to update or finish an existing one.' },
+        intent: { ...str, description: 'What you are doing, e.g. "Fix login redirect loop". Required when creating.' },
+        status: {
+          ...str,
+          enum: ['investigating', 'in-progress', 'testing', 'blocked', 'done', 'abandoned'],
+          description: '"done" needs commits; "abandoned" retires a claim you did not do, e.g. after backing off a conflict.',
+        },
+        finding: { ...str, description: 'One important discovery (root cause, gotcha, decision). Other agents read these live.' },
+        findingFiles: { ...strArr, description: 'Files this finding is about, so it reaches the agents working on them.' },
+        findingKind: { ...str, enum: ['root-cause', 'gotcha', 'decision', 'api-change'] },
+        blockedOn: { ...str, description: 'claimId you are waiting on. That agent is told someone is waiting, and you are told when it clears.' },
         files: { ...strArr, description: 'Files/dirs you intend to touch' },
         components: { ...strArr, description: 'Logical components, e.g. ["auth"]' },
         task: { ...str, description: 'Ticket/task reference, e.g. BUG-142' },
-        intent: { ...str, description: 'Short description of what you plan to do' },
-      },
-    },
-    async run({ files = [], components = [], task, intent }) {
-      const sid = await ensureSession();
-      const { base } = proj();
-      const q = new URLSearchParams({ sessionId: sid, files: files.join(','), components: components.join(',') });
-      if (task) q.set('task', task);
-      if (intent) q.set('intent', intent);
-      const { conflicts } = await api('GET', `${base}/check?${q}`);
-      return renderConflicts(conflicts);
-    },
-  },
-  {
-    name: 'mediation_claim',
-    description: 'Publish a work claim before you start editing, so other agents see the work is taken. Returns overlap warnings alongside the claim.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        intent: { ...str, description: 'What you are doing, e.g. "Fix login redirect loop"' },
-        task: str, files: strArr, components: strArr,
-        branch: str, baseRevision: str,
-        status: { ...str, enum: ['investigating', 'in-progress', 'testing', 'blocked'] },
-      },
-      required: ['intent'],
-    },
-    async run(input) {
-      const sid = await ensureSession();
-      const { base } = proj();
-      const { claim, conflicts } = await api('POST', `${base}/claims`, { sessionId: sid, ...input });
-      const head = `Claim created: ${claim.id} ("${claim.intent}", ${claim.status}). Update it with findings via mediation_update; finish with mediation_complete.`;
-      return conflicts.length ? `${head}\n\n${renderConflicts(conflicts)}` : head;
-    },
-  },
-  {
-    name: 'mediation_update',
-    description: 'Update your claim: status changes and important findings as you discover them (other agents read these live).',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        claimId: str,
-        status: { ...str, enum: ['investigating', 'in-progress', 'testing', 'blocked'] },
-        finding: { ...str, description: 'One important discovery, e.g. the root cause' },
-        files: strArr, components: strArr, task: str, intent: str, branch: str, baseRevision: str,
-      },
-      required: ['claimId'],
-    },
-    async run({ claimId, ...patch }) {
-      await ensureSession();
-      const { base } = proj();
-      const claim = await api('PATCH', `${base}/claims/${encodeURIComponent(claimId)}`, patch);
-      return `Claim updated: ${claim.intent}, now ${claim.status}${claim.findings.length ? `, ${claim.findings.length} finding(s) recorded` : ''}.`;
-    },
-  },
-  {
-    name: 'mediation_complete',
-    description: 'Mark your claim done and attach commits/PRs, moving it to the completed feed. Call when the work is committed.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        claimId: str,
-        commits: { ...strArr, description: 'Commit SHAs' },
+        branch: str,
+        baseRevision: str,
+        commits: { ...strArr, description: 'Commit SHAs, with status "done"' },
         prs: { ...strArr, description: 'PR URLs' },
         summary: str,
+        dryRun: {
+          type: 'boolean',
+          description: 'Check for overlap WITHOUT publishing a claim. Prefer publishing: an unpublished agent is invisible to everyone else.',
+        },
       },
-      required: ['claimId'],
     },
-    async run({ claimId, ...body }) {
-      await ensureSession();
+    async run({ claimId, dryRun, ...input }) {
+      const sid = await ensureSession();
       const { base } = proj();
-      const claim = await api('POST', `${base}/claims/${encodeURIComponent(claimId)}/complete`, body);
-      return `Completed: "${claim.intent}"${claim.commits.length ? ` (${claim.commits.join(', ')})` : ''}.`;
+
+      if (dryRun) {
+        const q = new URLSearchParams({
+          sessionId: sid, files: (input.files ?? []).join(','), components: (input.components ?? []).join(','),
+        });
+        if (input.task) q.set('task', input.task);
+        if (input.intent) q.set('intent', input.intent);
+        const { conflicts } = await api('GET', `${base}/check?${q}`);
+        return `${renderConflicts(conflicts)}\nNothing was published. Call mediation_claim without dryRun to claim this work.`;
+      }
+
+      if (!claimId) {
+        if (!input.intent) throw new Error('intent is required to create a claim (or pass claimId to update one)');
+        const { claim, conflicts, news } = await api('POST', `${base}/claims`, { sessionId: sid, ...input });
+        const head = `Claim created: ${claim.id} ("${claim.intent}", ${claim.status}). Reuse mediation_claim with this `
+          + 'claimId to add findings, and again with status "done" (plus commits) or "abandoned" when you stop.';
+        return `${conflicts.length ? `${head}\n\n${renderConflicts(conflicts)}` : head}${renderNews(news)}`;
+      }
+
+      const id = encodeURIComponent(claimId);
+      // `done` and `abandoned` are terminal, so they go to the endpoint that
+      // closes a claim; every other status is an ordinary patch.
+      if (input.status === 'done' || input.status === 'abandoned') {
+        const { commits = [], prs = [], summary, status } = input;
+        const claim = await api('POST', `${base}/claims/${id}/complete`, { commits, prs, summary, status });
+        const head = claim.status === 'abandoned'
+          ? `Abandoned: "${claim.intent}". The claim no longer warns anyone and is kept out of the completed feed.`
+          : `Completed: "${claim.intent}"${claim.commits.length ? ` (${claim.commits.join(', ')})` : ''}.`;
+        return `${head}${renderNews(claim.news)}`;
+      }
+      const claim = await api('PATCH', `${base}/claims/${id}`, input);
+      const head = `Claim updated: ${claim.intent}, now ${claim.status}`
+        + `${claim.findings.length ? `, ${claim.findings.length} finding(s) recorded` : ''}.`;
+      return `${head}${renderNews(claim.news)}`;
     },
   },
   {
     name: 'mediation_bug',
-    description: 'Report a bug you discovered, even one you will not fix, so other agents see it and do not re-discover it.',
+    description: 'File a bug you found (even one you will not fix), or resolve one: pass bugId with status "fixed" once the fix is committed, or "claimed" while you work on it. Any agent may resolve any bug in the project, including one someone else reported; ids come from mediation_state.',
     inputSchema: {
       type: 'object',
       properties: {
-        title: str, description: str, files: strArr,
-        severity: { ...str, enum: ['low', 'medium', 'high', 'critical', 'unknown'] },
+        bugId: { ...str, description: 'Omit to file a new bug; pass it (from mediation_state) to update an existing one.' },
+        title: { ...str, description: 'Required when filing. Never send it together with bugId.' },
+        description: str,
+        files: strArr,
+        severity: {
+          ...str,
+          enum: ['low', 'medium', 'high', 'critical', 'unknown'],
+          description: 'high and critical also open a linked GitHub issue when gh is signed in here.',
+        },
+        status: { ...str, enum: ['open', 'claimed', 'fixed'] },
       },
-      required: ['title'],
     },
-    async run(input) {
+    async run({ bugId, ...input }) {
       const sid = await ensureSession();
       const { base } = proj();
-      // The bug is filed first and unconditionally: the issue is decoration on
-      // top of it, and its id gives the issue something to point back at.
-      const bug = await api('POST', `${base}/bugs`, { sessionId: sid, ...input });
-      const head = `Bug filed: "${bug.title}" (${bug.severity}, id ${bug.id}).`;
-      if (!ISSUE_WORTHY.has(bug.severity)) {
-        return `${head} Tracked in Mediation only; ${bug.severity} severity does not open a GitHub issue.`;
+      /* Guard the one way this merge can silently do the wrong thing: an agent
+         meaning to resolve a bug, forgetting the id but still sending a title,
+         would file a duplicate instead of erroring. Refusing the ambiguous call
+         costs a retry; a silent duplicate costs the bug list its credibility. */
+      if (bugId && input.title) {
+        throw new Error('send either bugId (to update a bug) or title (to file a new one), never both');
       }
-      if (!ghAuthenticated()) return `${head} No GitHub issue: gh is not signed in here.`;
-      const issueUrl = await openTrackingIssue(base, sid, bug);
-      return issueUrl
-        ? `${head} Tracking issue: ${issueUrl}`
-        : `${head} GitHub issue could not be created; the bug is filed either way.`;
-    },
-  },
-  {
-    name: 'mediation_bug_resolve',
-    description: 'Close a bug once it is fixed, or claim one you are about to fix. Any agent may resolve any bug in the project, including one another agent reported: get ids from mediation_state.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        bugId: { ...str, description: 'Bug id from mediation_state' },
-        status: { ...str, enum: ['open', 'claimed', 'fixed'], description: 'fixed once the fix is committed; claimed while you work on it' },
-        severity: { ...str, enum: ['low', 'medium', 'high', 'critical', 'unknown'], description: 'Correct the severity if the reporter misjudged it' },
-      },
-      required: ['bugId'],
-    },
-    async run({ bugId, ...patch }) {
-      const sid = await ensureSession();
-      const { base } = proj();
-      const bug = await api('PATCH', `${base}/bugs/${encodeURIComponent(bugId)}`, { sessionId: sid, ...patch });
+
+      if (!bugId) {
+        if (!input.title) throw new Error('title is required to file a bug (or pass bugId to update one)');
+        // The bug is filed first and unconditionally: the issue is decoration on
+        // top of it, and its id gives the issue something to point back at.
+        const bug = await api('POST', `${base}/bugs`, { sessionId: sid, ...input });
+        const head = `Bug filed: "${bug.title}" (${bug.severity}, id ${bug.id}).`;
+        const news = renderNews(bug.news);
+        if (!ISSUE_WORTHY.has(bug.severity)) {
+          return `${head} Tracked in Mediation only; ${bug.severity} severity does not open a GitHub issue.${news}`;
+        }
+        if (!ghAuthenticated()) return `${head} No GitHub issue: gh is not signed in here.${news}`;
+        const issueUrl = await openTrackingIssue(base, sid, bug);
+        return `${head} ${issueUrl ? `Tracking issue: ${issueUrl}` : 'GitHub issue could not be created; the bug is filed either way.'}${news}`;
+      }
+
+      const bug = await api('PATCH', `${base}/bugs/${encodeURIComponent(bugId)}`, { sessionId: sid, ...input });
       const head = `Bug "${bug.title}" is now ${bug.status} (${bug.severity}).`;
       // Raising a bug to high is the same judgement as filing it high, so it
       // earns the same tracking issue; the rule is about severity, not timing.
@@ -704,23 +786,53 @@ const TOOLS = [
   },
   {
     name: 'mediation_state',
-    description: 'Full live picture of the project: active sessions, claims, conflicts, bugs, recently touched files, completed work. Use to orient before picking a task.',
-    inputSchema: { type: 'object', properties: {} },
-    async run() {
+    description: 'Full live picture of the project: active sessions, claims, conflicts, open bugs with their ids, and recent completed work. Use to orient before picking a task. If this directory is not set up yet, it reports what is missing instead.',
+    inputSchema: { type: 'object', properties: { directory: dirArg } },
+    async run({ directory }) {
+      const b = baseDir(directory);
+      const state = readState();
+      /* An agent that calls state in an unconfigured directory used to get an
+         error telling it to go call a different tool. Answering the question it
+         could not know to ask is the whole reason the status tool is gone. */
+      if (!state || !stateMatchesServer(state) || !readCredentials()?.token) {
+        let health = 'unreachable';
+        try { await api('GET', '/api/health', undefined, { auth: false }); health = 'ok'; } catch {}
+        const signedIn = readCredentials()?.token ? '' : ' Not signed in: call mediation_setup.';
+        return `Not ready for coordination. server ${SERVER}: ${health}. Directory: ${b.dir}`
+          + `${b.repo ? '' : ' (NOT a git repository)'}. ${describeMapping(state)}${signedIn}`;
+      }
+
       const sid = await ensureSession();
       const { base } = proj();
-      const s = await api('GET', `${base}/state`);
+      const s = await api('GET', `${base}/state?sessionId=${encodeURIComponent(sid)}`);
       const reconciled = await reconcileClosedIssues(base, s, sid);
       const out = [];
       if (reconciled) out.push(`Resolved ${reconciled} bug(s) whose GitHub issue has been closed.`);
       out.push(`Sessions (${s.sessions.length}): ${s.sessions.map((x) => `${x.agent} (${ago(x.lastSeenAt)} ago)`).join(', ') || 'none'}`);
-      out.push(`Active claims (${s.claims.length}):${s.claims.map((cl) => `\n- [${cl.status}] ${cl.agent}: ${cl.intent}${cl.files.length ? ` (${cl.files.join(', ')})` : ''} (id ${cl.id})`).join('') || ' none'}`);
-      if (s.conflicts.length) out.push(`CONFLICTS (${s.conflicts.length}):${s.conflicts.map((k) => `\n- ${k.between[0].agent} <-> ${k.between[1].agent}: ${k.between[0].intent} / ${k.between[1].intent}`).join('')}`);
-      // Ids are printed because mediation_bug_resolve needs them to close a bug.
-      const open = s.bugs.filter((b) => b.status !== 'fixed');
-      out.push(`Open bugs (${open.length}):${open.map((b) => `\n- [${b.severity}] ${b.title} (${b.status}, id ${b.id})${b.issueUrl ? ` ${b.issueUrl}` : ''}`).join('') || ' none'}`);
-      if (s.completed.length) out.push(`Recently completed: ${s.completed.slice(0, 5).map((cl) => cl.intent).join('; ')}`);
-      return out.join('\n');
+      // Everything below is capped. With five agents holding claims over real
+      // file lists this is the single most expensive response in the system,
+      // and it is most expensive exactly when the project is busiest.
+      const files = (list) => (list.length > 5
+        ? `${list.slice(0, 5).join(', ')} +${list.length - 5} more`
+        : list.join(', '));
+      out.push(`Active claims (${s.claims.length}):${capped(s.claims, 10, (cl) =>
+        `\n- [${cl.status}] ${cl.agent}: ${cl.intent}${cl.files.length ? ` (${files(cl.files)})` : ''}`
+        + `${cl.blockedOn ? ` [blocked on ${cl.blockedOn}]` : ''} (id ${cl.id})`) || ' none'}`);
+      if (s.conflicts.length) {
+        out.push(`CONFLICTS (${s.conflicts.length}):${capped(s.conflicts, 5, (k) =>
+          `\n- ${k.between[0].agent} <-> ${k.between[1].agent}: ${k.between[0].intent} / ${k.between[1].intent}`)}`);
+      }
+      // Ids are printed because resolving a bug needs them.
+      const open = s.bugs.filter((bug) => bug.status !== 'fixed');
+      out.push(`Open bugs (${open.length}):${capped(open, 15, (bug) =>
+        `\n- [${bug.severity}] ${bug.title} (${bug.status}, id ${bug.id})${bug.issueUrl ? ` ${bug.issueUrl}` : ''}`) || ' none'}`);
+      // Summaries, not bare intents: what someone learned finishing a job is the
+      // highest-signal thing on the board and used to be collected and hidden.
+      if (s.completed.length) {
+        out.push(`Recently completed:${capped(s.completed, 5, (cl) =>
+          `\n- ${cl.intent}${cl.summary ? `: ${cl.summary}` : ''}`)}`);
+      }
+      return `${out.join('\n')}${renderNews(s.news)}`;
     },
   },
 ];
@@ -741,7 +853,7 @@ async function handle(req) {
       return reply({
         protocolVersion: params?.protocolVersion || '2024-11-05',
         capabilities: { tools: {} },
-        serverInfo: { name: 'mediation', version: '0.4.2' },
+        serverInfo: { name: 'mediation', version: '0.5.0' },
       });
     case 'notifications/initialized':
     case 'notifications/cancelled':

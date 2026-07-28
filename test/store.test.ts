@@ -46,7 +46,8 @@ test('claims: create, overlap warning on files and task', () => {
   assert.equal(conflicts2.length, 1);
   assert.equal(conflicts2[0].claimId, claim.id);
   assert.ok(conflicts2[0].reasons.some((r) => r.type === 'files'));
-  assert.ok(conflicts2[0].reasons.some((r) => r.type === 'task'));
+  assert.ok(!conflicts2[0].reasons.some((r) => r.type === 'task'));
+  assert.equal(conflicts2[0].updatedAt, claim.updatedAt);
 });
 
 test('check: own claims are excluded', () => {
@@ -213,5 +214,191 @@ test('events record the agent that caused them, so a feed can be filtered by one
   for (const kind of ['session', 'claim', 'finding', 'bug'] as const) {
     assert.equal(byKind.get(kind), session.agent, kind);
   }
+  s.close();
+});
+
+// ---- dirty files as overlap evidence ----
+
+// Agents predict their own file lists badly and often leave them empty, which
+// silently defeats the entire overlap engine. The working tree does not guess.
+test('a session dirty file collides even when nobody claimed it', () => {
+  const s = new Store({ dbPath: ':memory:' });
+  const a = s.startSession('dirt', { agent: 'agent-a', worktree: 'boxA' });
+  const b = s.startSession('dirt', { agent: 'agent-b', worktree: 'boxB' });
+  // agent-a claims a vague intent with no files at all, then actually edits one.
+  s.createClaim('dirt', mkClaim({ sessionId: a.id, intent: 'poke at billing' }));
+  assert.equal(s.check('dirt', { sessionId: b.id, files: ['src/billing.ts'] }).length, 0);
+
+  s.heartbeat('dirt', a.id, { dirtyFiles: ['src/billing.ts'] });
+  const conflicts = s.check('dirt', { sessionId: b.id, files: ['src/billing.ts'] });
+  assert.equal(conflicts.length, 1);
+  assert.ok(conflicts[0].reasons.some((r) => r.type === 'files'));
+  s.close();
+});
+
+// Two harnesses in ONE checkout share a working tree, so their dirty files are
+// identical by construction. Reporting that back as a conflict would make the
+// warnings worthless in exactly the setup they matter most in.
+test('two sessions in one worktree never conflict over their shared tree', () => {
+  const s = new Store({ dbPath: ':memory:' });
+  const a = s.startSession('wt', { agent: 'tab-a', worktree: 'same-checkout' });
+  const b = s.startSession('wt', { agent: 'tab-b', worktree: 'same-checkout' });
+  const c = s.startSession('wt', { agent: 'elsewhere', worktree: 'other-checkout' });
+  s.createClaim('wt', mkClaim({ sessionId: a.id, intent: 'edit parser', files: ['src/parser.ts'] }));
+
+  assert.equal(s.check('wt', { sessionId: b.id, files: ['src/parser.ts'] }).length, 0);
+  assert.equal(s.check('wt', { sessionId: c.id, files: ['src/parser.ts'] }).length, 1);
+  s.close();
+});
+
+test('the heartbeat carries repo state, so it flows while no tool is called', () => {
+  const s = new Store({ dbPath: ':memory:' });
+  const a = s.startSession('beat', { agent: 'agent-a' });
+  s.heartbeat('beat', a.id, { branch: 'feature', revision: 'deadbee', dirtyFiles: ['src/a.ts', 'src/b.ts'] });
+  const session = s.getState('beat').sessions[0];
+  assert.equal(session.repo?.branch, 'feature');
+  assert.deepEqual(session.repo?.dirtyFiles, ['src/a.ts', 'src/b.ts']);
+  s.close();
+});
+
+// ---- terminal statuses ----
+
+test('an abandoned claim stops warning others and stays out of the completed feed', () => {
+  const s = new Store({ dbPath: ':memory:' });
+  const a = s.startSession('ab', { agent: 'agent-a' });
+  const b = s.startSession('ab', { agent: 'agent-b' });
+  const { claim } = s.createClaim('ab', mkClaim({ sessionId: a.id, intent: 'risky refactor', files: ['src/x.ts'] }));
+  assert.equal(s.check('ab', { sessionId: b.id, files: ['src/x.ts'] }).length, 1);
+
+  s.completeClaim('ab', claim.id, claimComplete.parse({ status: 'abandoned' }));
+  assert.equal(s.check('ab', { sessionId: b.id, files: ['src/x.ts'] }).length, 0, 'a dropped claim must not linger as a warning');
+  const state = s.getState('ab');
+  assert.equal(state.claims.length, 0);
+  assert.equal(state.completed.length, 0, 'work nobody did is not history');
+  s.close();
+});
+
+// ---- news delivery ----
+
+test('news reaches the session whose files an event touches, and nobody else', () => {
+  const s = new Store({ dbPath: ':memory:' });
+  const a = s.startSession('news', { agent: 'agent-a', worktree: 'wA' });
+  const b = s.startSession('news', { agent: 'agent-b', worktree: 'wB' });
+  const c = s.startSession('news', { agent: 'agent-c', worktree: 'wC' });
+  const { claim } = s.createClaim('news', mkClaim({ sessionId: a.id, intent: 'touch store', files: ['src/store.ts'] }));
+  s.createClaim('news', mkClaim({ sessionId: b.id, intent: 'also store', files: ['src/store.ts'] }));
+  s.createClaim('news', mkClaim({ sessionId: c.id, intent: 'docs only', files: ['docs/readme.md'] }));
+  // Drain the claim-creation backlog so the finding below is the only news left.
+  for (const id of [a.id, b.id, c.id]) s.newsFor('news', id);
+
+  s.updateClaim('news', claim.id, claimPatch.parse({
+    finding: 'saveClaim drops findings on release', findingFiles: ['src/store.ts'], findingKind: 'gotcha',
+  }));
+
+  const forB = s.newsFor('news', b.id);
+  assert.equal(forB.length, 1);
+  assert.match(forB[0].message, /saveClaim drops findings/);
+  assert.equal(forB[0].reason, 'overlap');
+  assert.equal(s.newsFor('news', c.id).length, 0, 'an unrelated file list must not be spammed');
+  assert.equal(s.newsFor('news', a.id).length, 0, 'news is never handed back to its author');
+  s.close();
+});
+
+test('news is delivered once: the cursor advances past what it hands over', () => {
+  const s = new Store({ dbPath: ':memory:' });
+  const a = s.startSession('once', { agent: 'agent-a', worktree: 'wA' });
+  const b = s.startSession('once', { agent: 'agent-b', worktree: 'wB' });
+  const { claim } = s.createClaim('once', mkClaim({ sessionId: a.id, intent: 'a', files: ['src/x.ts'] }));
+  s.createClaim('once', mkClaim({ sessionId: b.id, intent: 'b', files: ['src/x.ts'] }));
+  s.newsFor('once', b.id);
+
+  s.updateClaim('once', claim.id, claimPatch.parse({ finding: 'the root cause', findingFiles: ['src/x.ts'] }));
+  assert.equal(s.newsFor('once', b.id).length, 1);
+  assert.equal(s.newsFor('once', b.id).length, 0, 'the same item must not be delivered twice');
+  s.close();
+});
+
+// `blocked` was a dead enum value: nothing read it, so nobody ever learned that
+// someone was waiting on them, or that the wait was over.
+test('blockedOn tells the blocker someone waits, and the waiter when it clears', () => {
+  const s = new Store({ dbPath: ':memory:' });
+  const a = s.startSession('block', { agent: 'agent-a', worktree: 'wA' });
+  const b = s.startSession('block', { agent: 'agent-b', worktree: 'wB' });
+  const { claim: blocker } = s.createClaim('block', mkClaim({ sessionId: a.id, intent: 'refactor api', files: ['src/api.ts'] }));
+  s.newsFor('block', a.id);
+
+  const { claim: waiter } = s.createClaim('block', mkClaim({
+    sessionId: b.id, intent: 'use new api', files: ['src/caller.ts'], status: 'blocked', blockedOn: blocker.id,
+  }));
+  assert.equal(waiter.blockedOn, blocker.id);
+
+  const forBlocker = s.newsFor('block', a.id);
+  assert.equal(forBlocker.length, 1);
+  assert.equal(forBlocker[0].reason, 'waiting-on-you');
+  assert.match(forBlocker[0].message, /is waiting on your "refactor api"/);
+
+  s.newsFor('block', b.id);
+  s.completeClaim('block', blocker.id, claimComplete.parse({ commits: ['abc1234'] }));
+  // Exactly one message, not one for "the blocker finished" and another for
+  // "you are unblocked": the wait ending is a single fact.
+  const forWaiter = s.newsFor('block', b.id);
+  assert.equal(forWaiter.length, 1);
+  assert.equal(forWaiter[0].reason, 'unblocked');
+  assert.match(forWaiter[0].message, /UNBLOCKED/);
+  s.close();
+});
+
+// A claim row is DELETED when its session dies. Findings used to die with it,
+// which made them useless as the shared record Mediation asks agents to build.
+test('findings outlive the claim they were recorded on', () => {
+  const s = new Store({ dbPath: ':memory:' });
+  const a = s.startSession('durable', { agent: 'agent-a' });
+  const { claim } = s.createClaim('durable', mkClaim({ sessionId: a.id, intent: 'investigate', files: ['src/x.ts'] }));
+  s.updateClaim('durable', claim.id, claimPatch.parse({ finding: 'the parser eats CRLF' }));
+  s.endSession('durable', a.id);
+
+  const state = s.getState('durable');
+  assert.equal(state.claims.length, 0, 'the claim itself is released');
+  assert.ok(state.events.some((e) => e.type === 'finding' && /eats CRLF/.test(e.message)),
+    'what the agent learned must survive the claim it was learned under');
+  s.close();
+});
+
+// Churn must not be able to evict the record. A busy project generates session
+// and claim events constantly; findings are the part worth keeping.
+test('a burst of churn cannot evict findings from the feed', () => {
+  const s = new Store({ dbPath: ':memory:' });
+  const a = s.startSession('flood', { agent: 'agent-a' });
+  const { claim } = s.createClaim('flood', mkClaim({ sessionId: a.id, intent: 'work', files: ['src/x.ts'] }));
+  s.updateClaim('flood', claim.id, claimPatch.parse({ finding: 'the one thing worth remembering' }));
+  for (let i = 0; i < 400; i += 1) s.heartbeat('flood', a.id, { activity: `step ${i}` });
+
+  const events = (s.db.prepare("SELECT message FROM events WHERE projectId = 'flood' AND type = 'finding'")
+    .all() as { message: string }[]);
+  assert.equal(events.length, 1);
+  assert.match(events[0].message, /worth remembering/);
+  s.close();
+});
+
+// A claim can vanish instead of completing. Blocking on a session that quietly
+// dies would otherwise be a permanent wait, which is the failure blockedOn
+// exists to prevent in the first place.
+test('a waiter is released when the claim it waits on vanishes with its session', () => {
+  const s = new Store({ dbPath: ':memory:' });
+  const a = s.startSession('vanish', { agent: 'agent-a', worktree: 'wA' });
+  const b = s.startSession('vanish', { agent: 'agent-b', worktree: 'wB' });
+  const { claim: blocker } = s.createClaim('vanish', mkClaim({ sessionId: a.id, intent: 'refactor api', files: ['src/api.ts'] }));
+  s.createClaim('vanish', mkClaim({
+    sessionId: b.id, intent: 'use new api', files: ['src/caller.ts'], status: 'blocked', blockedOn: blocker.id,
+  }));
+  s.newsFor('vanish', b.id);
+
+  s.endSession('vanish', a.id); // agent-a disappears without ever completing
+
+  const forWaiter = s.newsFor('vanish', b.id);
+  assert.equal(forWaiter.length, 1);
+  assert.equal(forWaiter[0].reason, 'unblocked');
+  assert.match(forWaiter[0].message, /gone \(ended by agent\)/);
+  assert.equal(s.getState('vanish').claims.find((c) => c.sessionId === b.id)?.blockedOn, null);
   s.close();
 });

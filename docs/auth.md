@@ -23,14 +23,16 @@ When a user says to register and install Mediation from this server:
 2. Restart the agent harness if it does not discover the new MCP server in the
    current process.
 3. Follow this server's authorization mode below. In GitHub App mode the human
-   performs browser authorization; in manual mode call `mediation_register`
-   with the username/password the user chose.
+   performs browser authorization; in manual mode call
+   `mediation_setup {username, password, register: true}` with the credentials
+   the user chose. Never send `register: true` to recover from a failed
+   sign-in; a typo would create a junk pending account.
 4. In manual mode, tell the user an administrator must activate the account on
    the dashboard **Users** page. Do not retry in a loop.
-5. After authorization/activation, call `mediation_login` once. It stores only
+5. After authorization/activation, call `mediation_setup` again. It stores only
    a narrow device token; it never stores a GitHub token.
-6. In the repository, call `mediation_init`, then `mediation_check` before
-   coding.
+6. In the repository, call `mediation_init`, then `mediation_claim` before you
+   touch a file.
 
 Re-run the install command to update. To uninstall, run
 `curl -fsSL <server>/uninstall.sh | bash`; add `--keep-auth` only when the user
@@ -135,7 +137,7 @@ Bearer they answer `403 { "error": "project administration is human-only" }`
 **Who is the actor?** For project authorization the actor is the cookie user
 if present, otherwise the user that owns the Bearer credential. A credential
 whose owner is missing or not `active` never authenticates. Reactivate the
-account, then use `mediation_login` again if the device credential was revoked.
+account, then use `mediation_setup` again if the device credential was revoked.
 
 ## Manual-mode human user accounts
 

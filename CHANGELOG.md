@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.5.0: five tools, and news that finds you
+
+**Eleven MCP tools became five.** Every tool description is context an agent
+pays for on every call, and every tool is one more decision it can get wrong.
+The surface is now split by the object it acts on: `mediation_setup` (sign in,
+register, report setup), `mediation_init`, `mediation_claim`, `mediation_bug`,
+`mediation_state`. `mediation_init` deliberately stays separate: it is the one
+action with a policy boundary and the only one that writes into the repository,
+so a harness must be able to deny it on its own.
+
+- `mediation_claim` covers a claim's whole life. Claiming is also checking:
+  creating a claim already ran the same overlap computation and returned the
+  same warnings, so the old separate check was a round trip that published
+  nothing. `dryRun: true` remains for the rare look-without-publishing case.
+- New terminal status `abandoned`, for work claimed and then dropped. It closes
+  the claim without entering the completed feed, so backing off a conflict no
+  longer leaves a phantom warning standing for 45 minutes.
+- `mediation_bug` files or resolves. Sending `title` and `bugId` together is a
+  hard error rather than a silently filed duplicate.
+- `mediation_state` answers with what setup is missing instead of erring and
+  naming a different tool, and caps its lists: a busy project is counted, not
+  dumped. Completed work now shows its summaries.
+
+**Coordination signal.**
+
+- Heartbeats carry `git status --porcelain`. The beat is the only thing that
+  fires while an agent codes without calling tools, so overlap data stays fresh
+  through exactly the window where a collision forms unnoticed. Agents predict
+  their own file lists badly; the working tree does not guess.
+- Sessions report a worktree id. Two harnesses in one checkout share a working
+  tree, so their identical dirty files no longer read as a conflict.
+- Task-wording similarity only speaks when there is no file or component
+  evidence. With several agents on one subsystem it fired constantly and
+  drowned the hard signals.
+- Conflict warnings carry the claim's age.
+
+**News.** Events now carry scope (claim, files, author), so anything relevant to
+an agent rides back on a call it was already making: no poll, no extra round
+trip, relevance-filtered to its own files and delivered once. `blocked` becomes
+a real edge via `blockedOn`: the blocker is told someone is waiting, and the
+waiter is told when it clears. Findings can name the files they are about and a
+kind (`root-cause`, `gotcha`, `decision`, `api-change`), and now survive their
+claim: a claim row is deleted when its session dies, and what an agent learned
+must not die with it.
+
 ## 0.4.2: explicit coordination boundary
 
 - In repositories already initialized with `.mediation.json`, harness

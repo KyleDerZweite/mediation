@@ -38,10 +38,14 @@ follow the access instructions below for those responses.
 Mediation has two server-selected authorization modes. In `AUTH_MODE=github-app`
 the human completes browser-based GitHub App authorization; the server verifies
 repository access and the agent never receives or stores a GitHub token. In
-`AUTH_MODE=manual`, register with the username/password the user provides; a
-new account waits for an instance admin to activate it and a project owner adds
-membership explicitly. In both modes, `mediation_login` stores only a narrow
-Mediation device token globally for this server, never in a repository.
+`AUTH_MODE=manual`, `mediation_setup {username, password, register: true}`
+creates the account with the credentials the user provides; a new account waits
+for an instance admin to activate it and a project owner adds membership
+explicitly. Never pass `register: true` to recover from a failed sign-in: a
+typo would silently create a junk account instead of signing anyone in. In both
+modes `mediation_setup` stores only a narrow Mediation device token globally
+for this server, never in a repository. It is idempotent and resumable: call
+it, do what it says, call it again.
 
 If the user asks to update Mediation, re-run the server's `install.sh`; the
 manifest-owned install is idempotent. If they ask to uninstall it, run the
@@ -49,7 +53,7 @@ server's `uninstall.sh`. Uninstall removes the global device credential by
 default; pass `--keep-auth` only when the user explicitly wants to preserve it.
 
 Only when the user explicitly asks to set up or connect Mediation and
-`mediation_status` says the directory is not initialized:
+`mediation_state` says the directory is not initialized:
 
 1. Call `mediation_init`. It has no project-name override: it independently
    resolves the GitHub owner/repository from Git's actual push remote and sends
@@ -60,9 +64,10 @@ Only when the user explicitly asks to set up or connect Mediation and
    `.mediation.json` records only the server/repository mapping; it contains no
    secret and no model-selected project id.
 
-`mediation_status` reports the directory it resolved. If that is not the
+`mediation_state` reports the directory it resolved. If that is not the
 project you are working in (some harnesses start MCP servers elsewhere), pass
-`directory: "<absolute path>"` to `mediation_status` and `mediation_init`.
+`directory: "<absolute path>"` to `mediation_state`, `mediation_setup` and
+`mediation_init`.
 
 Projects are private. In GitHub App mode, a reachable authorization denial
 means the linked human lacks verified access; in manual mode it means a project
@@ -72,31 +77,53 @@ diagnostic only; it never authorizes Mediation access.
 
 ## Every coding task
 
-1. **Before starting**: `mediation_check` with the files/components you intend
-   to touch plus a short intent. If it warns about overlap: tell the user who
-   is already on it and what they found, then stop, narrow scope, or continue
-   only if the user (or the situation clearly) says so.
-2. **When you start**: `mediation_claim` with intent, files, components, task
-   reference, and branch. Keep the returned `claimId`.
-3. **While working**: push important discoveries with
-   `mediation_update {claimId, finding}` for root causes, gotchas, decisions.
-   Other agents read these live; a good finding saves someone else the same
-   investigation. Update `status` as you move (investigating → in-progress →
-   testing; blocked when stuck).
+One tool, `mediation_claim`, covers the whole life of a piece of work. Claiming
+is also how you check: the response carries the same overlap warnings a
+separate look-first call would have, so there is nothing to call before it.
+
+1. **Before you touch a file**: `mediation_claim` with intent, files,
+   components, task reference and branch. Keep the returned `claimId`. If it
+   warns about overlap: tell the user who is already on it and what they found,
+   then stop, narrow scope, or continue only if the user (or the situation
+   clearly) says so. If you stop, call
+   `mediation_claim {claimId, status: "abandoned"}` so your claim stops warning
+   everyone else about work you are not doing.
+   Use `dryRun: true` only when you truly must look without publishing. Prefer
+   publishing: an agent nobody can see is the problem this server exists to fix.
+2. **While working**: same tool, same `claimId`. Push important discoveries with
+   `finding`, and add `findingFiles` so it reaches the agents working on those
+   files (`findingKind` is one of `root-cause`, `gotcha`, `decision`,
+   `api-change`; `api-change` matters most to strangers, because a changed
+   signature breaks them silently). Other agents read these live; a good finding
+   saves someone else the same investigation. Update `status` as you move
+   (investigating → in-progress → testing).
+3. **When you are stuck on someone else**: `status: "blocked"` with
+   `blockedOn: "<their claimId>"`. That agent is told someone is waiting, and
+   you are told at your next call when it clears. Do not sit and poll.
 4. **Side discoveries**: file bugs you notice but won't fix with
-   `mediation_bug`, even small ones. Severity matters: `high` and `critical`
-   also open a linked GitHub issue when the machine has an authenticated `gh`,
-   so a PR saying `Closes #12` resolves the bug here too. Everything below that
-   lives only in Mediation, which keeps the repository's issue list worth
-   reading. No `gh`, no issue: the bug is filed either way and nothing about
-   your workflow changes.
-5. **When you fix one**: `mediation_bug_resolve {bugId, status: "fixed"}` once
-   the fix is committed. Any agent may resolve any bug in the project, not only
-   the one that reported it, so close what you fix even if someone else filed
-   it. Take `bugId` from `mediation_state`. Mark it `claimed` first if you are
-   about to work on it, so nobody duplicates the fix; `open` reopens it.
-6. **When done**: `mediation_complete {claimId, commits, summary}` with the
-   real commit SHAs after committing.
+   `mediation_bug {title, ...}`, even small ones. Severity matters: `high` and
+   `critical` also open a linked GitHub issue when the machine has an
+   authenticated `gh`, so a PR saying `Closes #12` resolves the bug here too.
+   Everything below that lives only in Mediation, which keeps the repository's
+   issue list worth reading. No `gh`, no issue: the bug is filed either way and
+   nothing about your workflow changes.
+5. **When you fix one**: `mediation_bug {bugId, status: "fixed"}` once the fix
+   is committed. Send `bugId` or `title`, never both: with both it cannot tell
+   whether you meant to file or resolve, and it refuses rather than guess. Any
+   agent may resolve any bug in the project, not only the one that reported it,
+   so close what you fix even if someone else filed it. Take `bugId` from
+   `mediation_state`. Mark it `claimed` first if you are about to work on it, so
+   nobody duplicates the fix; `open` reopens it.
+6. **When done**: `mediation_claim {claimId, status: "done", commits, summary}`
+   with the real commit SHAs after committing.
+
+## News
+
+Responses to `mediation_claim`, `mediation_bug` and `mediation_state` may carry
+a short `NEWS` block: things other agents did that touch the files you claimed,
+someone waiting on you, or a wait of yours that ended. It is filtered to your
+own work and delivered once. Read it and act on it; nobody sends it twice, and
+there is no way to ask for it again.
 
 ## Orientation
 

@@ -6,10 +6,13 @@ import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from 'no
 import type { ScryptOptions } from 'node:crypto';
 import { promisify } from 'node:util';
 import { DatabaseSync } from 'node:sqlite';
-import { checkOverlap, normalizePath, pairConflicts } from '../core/overlap.ts';
+import { checkOverlap, filesOverlap, normalizePath, pairConflicts } from '../core/overlap.ts';
+import {
+  DURABLE_EVENT_TYPES, NEWS_BLOCKED_PREFIX, NEWS_UNBLOCKED_PREFIX, TERMINAL_CLAIM_STATUSES,
+} from '../core/types.ts';
 import type {
-  Bug, Claim, ConflictWarning, EventEntry, EventType, MemberRole, ProjectState,
-  ProjectSummary, RecentFile, RepoState, Session, WorkScope,
+  Bug, Claim, ConflictWarning, EventEntry, EventType, Finding, MemberRole, NewsItem,
+  ProjectState, ProjectSummary, RecentFile, RepoState, Session, WorkScope,
 } from '../core/types.ts';
 import type {
   BugCreate, BugPatch, ClaimComplete, ClaimCreate, ClaimPatch,
@@ -25,6 +28,12 @@ export const DEFAULT_CLAIM_IDLE_TTL_MS = 45 * 60_000;
 export const PROJECT_IDLE_HIDE_MS = 7 * 24 * 60 * 60_000;
 
 const EVENTS_CAP = 200;
+const DURABLE_EVENTS_CAP = 1000;
+// News older than this is never delivered, however far behind a session's cursor
+// is. A restarted harness gets a fresh session with no cursor history, so this
+// window is what bounds the catch-up it receives instead of the whole feed.
+const NEWS_WINDOW_MS = 30 * 60_000;
+const NEWS_LIMIT = 3;
 
 // Project ids are slugs. Enforced on CREATION only, because ids created before the
 // Alpha milestone are grandfathered and keep working.
@@ -62,6 +71,13 @@ const ADD_COLUMNS: [table: string, column: string, decl: string][] = [
   ['project_members', 'repository_permission', 'TEXT'],
   ['project_members', 'authorization_expires_at', 'INTEGER'],
   ['bugs', 'issue_url', 'TEXT'],
+  ['events', 'claimId', 'TEXT'],
+  ['events', 'files', 'TEXT'],
+  ['events', 'sessionId', 'TEXT'],
+  ['sessions', 'worktree', 'TEXT'],
+  ['sessions', 'news_cursor', 'INTEGER'],
+  ['claims', 'worktree', 'TEXT'],
+  ['claims', 'blockedOn', 'TEXT'],
 ];
 
 interface StoreOptions {
@@ -69,6 +85,9 @@ interface StoreOptions {
   sessionTtlMs?: number;
   claimIdleTtlMs?: number;
 }
+
+// `done` and `abandoned` both close a claim; neither is active work.
+const TERMINAL_SQL = TERMINAL_CLAIM_STATUSES.map((s) => `'${s}'`).join(', ');
 
 function fail(message: string, statusCode: number): never {
   const err = new Error(message) as Error & { statusCode: number };
@@ -224,6 +243,7 @@ function sessionFromRow(r: Row): Session {
     agent: r.agent as string,
     developer: (r.developer as string) ?? null,
     machine: (r.machine as string) ?? null,
+    worktree: (r.worktree as string) ?? null,
     repo: r.repo ? (JSON.parse(r.repo as string) as RepoState) : null,
     createdAt: Number(r.createdAt),
     lastSeenAt: Number(r.lastSeenAt),
@@ -244,10 +264,15 @@ function claimFromRow(r: Row): Claim {
     branch: (r.branch as string) ?? null,
     baseRevision: (r.baseRevision as string) ?? null,
     status: r.status as Claim['status'],
-    findings: JSON.parse(r.findings as string),
+    blockedOn: (r.blockedOn as string) ?? null,
+    // Findings written before they carried scope hydrate with empty defaults, so
+    // old rows display normally and simply never route.
+    findings: (JSON.parse(r.findings as string) as Partial<Finding>[])
+      .map((f) => ({ text: f.text ?? '', at: Number(f.at ?? 0), files: f.files ?? [], kind: f.kind ?? null })),
     commits: JSON.parse(r.commits as string),
     prs: JSON.parse(r.prs as string),
     summary: (r.summary as string) ?? null,
+    worktree: (r.worktree as string) ?? null,
     createdAt: Number(r.createdAt),
     updatedAt: Number(r.updatedAt),
     completedAt: r.completedAt == null ? null : Number(r.completedAt),
@@ -278,6 +303,10 @@ function eventFromRow(r: Row): EventEntry {
     message: r.message as string,
     at: Number(r.at),
     agent: (r.agent as string) ?? null, // null for rows written before the column
+    claimId: (r.claimId as string) ?? null,
+    files: r.files ? (JSON.parse(r.files as string) as string[]) : [],
+    sessionId: (r.sessionId as string) ?? null,
+    seq: Number(r.rowid ?? 0),
   };
 }
 
@@ -435,13 +464,32 @@ export class Store {
       .run(projectId, userId, role, at);
   }
 
-  private emit(projectId: string, type: EventType, message: string, agent: string | null = null): void {
-    this.db.prepare('INSERT INTO events (id, projectId, type, message, at, agent) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(randomUUID(), projectId, type, message, Date.now(), agent);
+  /* Scope (`claimId`, `files`, `sessionId`) is what makes an event routable:
+     without it the feed can only be displayed, never delivered to the people it
+     concerns. `sessionId` is the author, so news is never handed back to them. */
+  private emit(projectId: string, type: EventType, message: string, agent: string | null = null,
+    scope: { claimId?: string | null; files?: string[]; sessionId?: string | null } = {}): void {
+    this.db.prepare(`INSERT INTO events (id, projectId, type, message, at, agent, claimId, files, sessionId)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(randomUUID(), projectId, type, message, Date.now(), agent,
+        scope.claimId ?? null, JSON.stringify((scope.files ?? []).map(normalizePath)), scope.sessionId ?? null);
+    /* Eviction spares the durable types. A claim row is DELETED when its session
+       dies or it idles out, so its findings live on only as events; letting a
+       burst of session churn evict them would throw away the one record of what
+       an agent learned. Churny types (session/activity/claim) still ride the cap. */
+    const durable = DURABLE_EVENT_TYPES.map(() => '?').join(', ');
     this.db.prepare(`
-      DELETE FROM events WHERE projectId = ? AND rowid NOT IN (
-        SELECT rowid FROM events WHERE projectId = ? ORDER BY at DESC, rowid DESC LIMIT ?
-      )`).run(projectId, projectId, EVENTS_CAP);
+      DELETE FROM events WHERE projectId = ? AND type NOT IN (${durable}) AND rowid NOT IN (
+        SELECT rowid FROM events WHERE projectId = ? AND type NOT IN (${durable})
+        ORDER BY at DESC, rowid DESC LIMIT ?
+      )`).run(projectId, ...DURABLE_EVENT_TYPES, projectId, ...DURABLE_EVENT_TYPES, EVENTS_CAP);
+    // Spared from the churn cap, not from every cap: they still get a ceiling,
+    // just a far higher one, so a long-lived project cannot grow without bound.
+    this.db.prepare(`
+      DELETE FROM events WHERE projectId = ? AND type IN (${durable}) AND rowid NOT IN (
+        SELECT rowid FROM events WHERE projectId = ? AND type IN (${durable})
+        ORDER BY at DESC, rowid DESC LIMIT ?
+      )`).run(projectId, ...DURABLE_EVENT_TYPES, projectId, ...DURABLE_EVENT_TYPES, DURABLE_EVENTS_CAP);
   }
 
   private requireSession(projectId: string, sessionId: string): Session {
@@ -456,8 +504,28 @@ export class Store {
   }
 
   private activeClaims(projectId: string): Claim[] {
-    return (this.db.prepare("SELECT * FROM claims WHERE projectId = ? AND status != 'done' ORDER BY createdAt")
+    return (this.db.prepare(`SELECT * FROM claims WHERE projectId = ? AND status NOT IN (${TERMINAL_SQL}) ORDER BY createdAt`)
       .all(projectId) as Row[]).map(claimFromRow);
+  }
+
+  /* Overlap runs against claims WIDENED by what each session actually has dirty
+     on disk. Agents predict their file lists badly (or leave them empty), which
+     silently defeats the whole engine; the working tree does not guess. The
+     union is computed on read and never written back, so a claim keeps saying
+     what its agent meant to touch. */
+  private effectiveClaims(projectId: string): Claim[] {
+    const claims = this.activeClaims(projectId);
+    if (!claims.length) return claims;
+    const dirty = new Map<string, string[]>();
+    for (const row of this.db.prepare('SELECT id, repo FROM sessions WHERE projectId = ?').all(projectId) as Row[]) {
+      const repo = row.repo ? (JSON.parse(row.repo as string) as RepoState) : null;
+      if (repo?.dirtyFiles?.length) dirty.set(row.id as string, repo.dirtyFiles.map(normalizePath));
+    }
+    if (!dirty.size) return claims;
+    return claims.map((c) => {
+      const extra = dirty.get(c.sessionId);
+      return extra ? { ...c, files: [...new Set([...c.files, ...extra])] } : c;
+    });
   }
 
   private getClaim(projectId: string, claimId: string): Claim {
@@ -470,10 +538,10 @@ export class Store {
   private saveClaim(c: Claim): void {
     this.db.prepare(`
       UPDATE claims SET intent = ?, task = ?, files = ?, components = ?, branch = ?,
-        baseRevision = ?, status = ?, findings = ?, commits = ?, prs = ?, summary = ?,
+        baseRevision = ?, status = ?, blockedOn = ?, findings = ?, commits = ?, prs = ?, summary = ?,
         updatedAt = ?, completedAt = ? WHERE id = ?`)
       .run(c.intent, c.task, JSON.stringify(c.files), JSON.stringify(c.components), c.branch,
-        c.baseRevision, c.status, JSON.stringify(c.findings), JSON.stringify(c.commits),
+        c.baseRevision, c.status, c.blockedOn, JSON.stringify(c.findings), JSON.stringify(c.commits),
         JSON.stringify(c.prs), c.summary, c.updatedAt, c.completedAt, c.id);
   }
 
@@ -488,14 +556,16 @@ export class Store {
       agent: input.developer ? `${input.agent}-${'pending'}@${input.developer}` : input.agent,
       developer: input.developer ?? null,
       machine: input.machine ?? null,
+      worktree: input.worktree ?? null,
       repo: null,
       createdAt: t,
       lastSeenAt: t,
     };
     if (input.developer) session.agent = `${input.agent}-${session.id.slice(0, 8)}@${input.developer}`;
-    this.db.prepare(`INSERT INTO sessions (id, projectId, agent, developer, machine, repo, createdAt, lastSeenAt, capability_hash)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(session.id, projectId, session.agent, session.developer, session.machine, null, t, t,
+    this.db.prepare(`INSERT INTO sessions (id, projectId, agent, developer, machine, worktree, repo,
+        createdAt, lastSeenAt, capability_hash)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(session.id, projectId, session.agent, session.developer, session.machine, session.worktree, null, t, t,
         capability ? capabilityHash(capability) : null);
     this.emit(projectId, 'session', `${session.agent} connected`, session.agent);
     return session;
@@ -566,6 +636,13 @@ export class Store {
     const session = this.requireSession(projectId, sessionId);
     session.lastSeenAt = Date.now();
     this.touchSession(sessionId);
+    // The beat is the only thing that fires while an agent codes without calling
+    // tools, so it is the right carrier for what the working tree actually says.
+    if (input.dirtyFiles) {
+      session.repo = this.reportRepoState(projectId, sessionId, {
+        branch: input.branch ?? null, revision: input.revision ?? null, dirtyFiles: input.dirtyFiles,
+      });
+    }
     if (input.activity) this.emit(projectId, 'activity', `${session.agent}: ${input.activity}`, session.agent);
     return session;
   }
@@ -579,11 +656,17 @@ export class Store {
   }
 
   private releaseClaims(projectId: string, sessionId: string, reason: string): void {
-    const claims = (this.db.prepare("SELECT * FROM claims WHERE projectId = ? AND sessionId = ? AND status != 'done'")
+    const claims = (this.db.prepare(
+      `SELECT * FROM claims WHERE projectId = ? AND sessionId = ? AND status NOT IN (${TERMINAL_SQL})`)
       .all(projectId, sessionId) as Row[]).map(claimFromRow);
     for (const claim of claims) {
       this.db.prepare('DELETE FROM claims WHERE id = ?').run(claim.id);
-      this.emit(projectId, 'claim', `claim "${claim.intent}" released (${reason})`, claim.agent);
+      this.emit(projectId, 'claim', `claim "${claim.intent}" released (${reason})`, claim.agent,
+        { claimId: claim.id, files: claim.files, sessionId: sessionId });
+      // A claim can vanish instead of completing. Anyone waiting on it must
+      // still be let go, or blocking on a session that quietly dies is a
+      // permanent wait: the exact failure `blockedOn` exists to prevent.
+      this.releaseBlockedOn(projectId, claim, `gone (${reason})`);
     }
   }
 
@@ -667,32 +750,49 @@ export class Store {
       branch: input.branch ?? null,
       baseRevision: input.baseRevision ?? null,
       status: input.status,
+      blockedOn: input.blockedOn ?? null,
       findings: [],
       commits: [],
       prs: [],
       summary: null,
+      worktree: session.worktree,
       createdAt: t,
       updatedAt: t,
       completedAt: null,
     };
     // Warnings, not locks: conflicts are computed before insert and returned
     // alongside the claim; the claim is always created.
-    const conflicts = checkOverlap(this.activeClaims(projectId), {
+    const conflicts = checkOverlap(this.effectiveClaims(projectId), {
       sessionId: session.id,
       files: claim.files,
       components: claim.components,
       task: claim.task,
       intent: claim.intent,
+      worktree: claim.worktree,
     });
     this.db.prepare(`INSERT INTO claims (id, projectId, sessionId, agent, developer, intent, task,
-        files, components, branch, baseRevision, status, findings, commits, prs, summary,
-        createdAt, updatedAt, completedAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        files, components, branch, baseRevision, status, blockedOn, findings, commits, prs, summary,
+        worktree, createdAt, updatedAt, completedAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(claim.id, projectId, claim.sessionId, claim.agent, claim.developer, claim.intent,
         claim.task, JSON.stringify(claim.files), JSON.stringify(claim.components), claim.branch,
-        claim.baseRevision, claim.status, '[]', '[]', '[]', null, t, t, null);
-    this.emit(projectId, 'claim', `${session.agent} claimed: ${claim.intent}`, session.agent);
+        claim.baseRevision, claim.status, claim.blockedOn, '[]', '[]', '[]', null, claim.worktree, t, t, null);
+    this.emit(projectId, 'claim', `${session.agent} claimed: ${claim.intent}`, session.agent,
+      { claimId: claim.id, files: claim.files, sessionId: session.id });
+    if (claim.blockedOn) this.emitBlocked(projectId, claim);
     return { claim, conflicts };
+  }
+
+  /* A blocked claim is only useful if the claim it waits on hears about it. The
+     event is scoped to the BLOCKER's id, so delivery reaches that agent on its
+     next call without anyone having to poll. */
+  private emitBlocked(projectId: string, claim: Claim): void {
+    const blocker = this.db.prepare('SELECT intent FROM claims WHERE projectId = ? AND id = ?')
+      .get(projectId, claim.blockedOn) as Row | undefined;
+    if (!blocker) return;
+    this.emit(projectId, 'claim',
+      `${NEWS_BLOCKED_PREFIX} ${claim.agent} is waiting on your "${blocker.intent as string}" to do: ${claim.intent}`,
+      claim.agent, { claimId: claim.blockedOn, files: claim.files, sessionId: claim.sessionId });
   }
 
   updateClaim(projectId: string, claimId: string, patch: ClaimPatch): Claim {
@@ -703,29 +803,82 @@ export class Store {
     if (patch.branch !== undefined) claim.branch = patch.branch ?? null;
     if (patch.baseRevision !== undefined) claim.baseRevision = patch.baseRevision ?? null;
     if (patch.status) claim.status = patch.status;
+    if (patch.blockedOn !== undefined) claim.blockedOn = patch.blockedOn ?? null;
     if (patch.files) claim.files = patch.files.map(normalizePath);
     if (patch.components) claim.components = patch.components;
-    if (patch.finding) claim.findings.push({ text: patch.finding, at: Date.now() });
+    // A finding scoped to its own files routes to the people it is about; with
+    // no files of its own it falls back to the claim's, which is coarse but
+    // still better than routing nowhere.
+    const finding: Finding | null = patch.finding
+      ? {
+        text: patch.finding,
+        at: Date.now(),
+        files: (patch.findingFiles ?? claim.files).map(normalizePath),
+        kind: patch.findingKind ?? null,
+      }
+      : null;
+    if (finding) claim.findings.push(finding);
     claim.updatedAt = Date.now();
     this.saveClaim(claim);
-    if (patch.finding) this.emit(projectId, 'finding', `${claim.agent} found: ${patch.finding}`, claim.agent);
-    if (patch.status) this.emit(projectId, 'claim', `${claim.agent} → ${patch.status}: ${claim.intent}`, claim.agent);
+    if (finding) {
+      this.emit(projectId, 'finding',
+        `${claim.agent} found${finding.kind ? ` (${finding.kind})` : ''}: ${finding.text}`, claim.agent,
+        { claimId: claim.id, files: finding.files, sessionId: claim.sessionId });
+    }
+    if (patch.status) {
+      this.emit(projectId, 'claim', `${claim.agent} → ${patch.status}: ${claim.intent}`, claim.agent,
+        { claimId: claim.id, files: claim.files, sessionId: claim.sessionId });
+    }
+    if (patch.blockedOn) this.emitBlocked(projectId, claim);
     return claim;
   }
 
   completeClaim(projectId: string, claimId: string, input: ClaimComplete): Claim {
     const claim = this.getClaim(projectId, claimId);
-    claim.status = 'done';
+    claim.status = input.status;
     claim.commits = input.commits;
     claim.prs = input.prs;
     claim.summary = input.summary ?? null;
     claim.completedAt = Date.now();
     claim.updatedAt = claim.completedAt;
+    claim.blockedOn = null;
     this.saveClaim(claim); // row is kept: completed claims survive as history
-    this.emit(projectId, 'completed',
-      `${claim.agent} completed: ${claim.intent}${input.commits.length ? ` (${input.commits.join(', ')})` : ''}`,
-      claim.agent);
+    if (input.status === 'abandoned') {
+      // Deliberately NOT a `completed` event: nothing was delivered, so it does
+      // not belong in the history feed. It still clears the claim, which is the
+      // point: an agent that backs off a conflict must be able to withdraw
+      // instead of leaving a phantom warning behind for 45 minutes.
+      this.emit(projectId, 'claim', `${claim.agent} abandoned: ${claim.intent}`, claim.agent,
+        { claimId: claim.id, files: claim.files, sessionId: claim.sessionId });
+    } else {
+      this.emit(projectId, 'completed',
+        `${claim.agent} completed: ${claim.intent}${input.commits.length ? ` (${input.commits.join(', ')})` : ''}`
+          + `${claim.summary ? `. ${claim.summary}` : ''}`,
+        claim.agent, { claimId: claim.id, files: claim.files, sessionId: claim.sessionId });
+    }
+    this.releaseBlockedOn(projectId, claim);
     return claim;
+  }
+
+  /* Whoever was waiting on this claim needs to hear that it cleared. Without
+     this the classic failure stands: B waits on A's refactor, A finishes, and B
+     never finds out. Delivery is lazy like everything else, so B learns at its
+     next contact, not the instant it happens. */
+  private releaseBlockedOn(projectId: string, claim: Claim, disposition: string = claim.status): void {
+    const waiting = (this.db.prepare(
+      `SELECT * FROM claims WHERE projectId = ? AND blockedOn = ? AND status NOT IN (${TERMINAL_SQL})`)
+      .all(projectId, claim.id) as Row[]).map(claimFromRow);
+    for (const w of waiting) {
+      /* Clearing the field is not bookkeeping, it is the state change: the wait
+         is genuinely over. It also keeps the waiter from being told twice, once
+         because the blocker completed and once because it was unblocked. */
+      w.blockedOn = null;
+      w.updatedAt = Date.now();
+      this.saveClaim(w);
+      this.emit(projectId, 'claim',
+        `${NEWS_UNBLOCKED_PREFIX} "${claim.intent}" (${claim.agent}) is ${disposition}; your "${w.intent}" was waiting on it`,
+        claim.agent, { claimId: w.id, files: w.files, sessionId: claim.sessionId });
+    }
   }
 
   // ---- bugs ----
@@ -750,7 +903,8 @@ export class Store {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(bug.id, projectId, bug.sessionId, bug.reporter, bug.title, bug.description,
         JSON.stringify(bug.files), bug.severity, bug.status, bug.createdAt, bug.issueUrl);
-    this.emit(projectId, 'bug', `${session.agent} reported bug: ${bug.title}`, session.agent);
+    this.emit(projectId, 'bug', `${session.agent} reported ${bug.severity} bug: ${bug.title}`, session.agent,
+      { files: bug.files, sessionId: session.id });
     return bug;
   }
 
@@ -1314,7 +1468,71 @@ export class Store {
   // ---- queries ----
 
   check(projectId: string, scope: WorkScope): ConflictWarning[] {
-    return checkOverlap(this.activeClaims(projectId), scope);
+    // The worktree comes from the session, never from the caller: it decides
+    // which claims are suppressed, so a client must not be able to assert one.
+    const row = scope.sessionId
+      ? this.db.prepare('SELECT worktree FROM sessions WHERE projectId = ? AND id = ?')
+        .get(projectId, scope.sessionId) as Row | undefined
+      : undefined;
+    return checkOverlap(this.effectiveClaims(projectId), { ...scope, worktree: (row?.worktree as string) ?? null });
+  }
+
+  /* Piggyback delivery. Every tool response is already a text payload going back
+     to an agent, so news relevant to THAT agent rides along on whatever call it
+     was making anyway: no extra round trip, no poll, and nothing to interrupt.
+     MCP cannot push into a model's context, so this is lazy by nature; an agent
+     hears at its next contact, never sooner.
+
+     Relevance is the overlap engine reused as a routing table. An event reaches
+     a session only when it touches that session's files, or concerns a claim in
+     its blocked/blocking chain. Without that filter this degenerates into
+     broadcast spam and agents learn to skip the whole block. */
+  newsFor(projectId: string, sessionId: string, limit = NEWS_LIMIT): NewsItem[] {
+    const row = this.db.prepare('SELECT news_cursor, repo, worktree FROM sessions WHERE projectId = ? AND id = ?')
+      .get(projectId, sessionId) as Row | undefined;
+    if (!row) return [];
+
+    const mine = this.activeClaims(projectId).filter((c) => c.sessionId === sessionId);
+    const repo = row.repo ? (JSON.parse(row.repo as string) as RepoState) : null;
+    const scope = [...new Set([
+      ...mine.flatMap((c) => c.files),
+      ...(repo?.dirtyFiles ?? []).map(normalizePath),
+    ])];
+    const myClaimIds = new Set(mine.map((c) => c.id));
+    const blockers = new Set(mine.map((c) => c.blockedOn).filter(Boolean) as string[]);
+    if (!scope.length && !myClaimIds.size) return [];
+
+    /* A fresh session has no cursor, and sessions are swept, so a restarted
+       harness always looks fresh. Bounding the catch-up by time rather than
+       replaying the feed keeps that duplicate small and stale news out. */
+    const cursor = row.news_cursor == null ? 0 : Number(row.news_cursor);
+    const since = Date.now() - NEWS_WINDOW_MS;
+    const candidates = (this.db.prepare(`SELECT rowid, * FROM events
+      WHERE projectId = ? AND rowid > ? AND at >= ? AND (sessionId IS NULL OR sessionId != ?)
+      ORDER BY rowid DESC LIMIT 200`)
+      .all(projectId, cursor, since, sessionId) as Row[]).map(eventFromRow);
+
+    const news: NewsItem[] = [];
+    let highest = cursor;
+    for (const e of candidates) {
+      highest = Math.max(highest, e.seq);
+      if (news.length >= limit) continue; // still advance the cursor past what we skip
+      const reason: NewsItem['reason'] | null =
+        e.message.startsWith(NEWS_BLOCKED_PREFIX) && e.claimId && myClaimIds.has(e.claimId) ? 'waiting-on-you'
+        : e.message.startsWith(NEWS_UNBLOCKED_PREFIX) && e.claimId && myClaimIds.has(e.claimId) ? 'unblocked'
+        : e.claimId && blockers.has(e.claimId) ? 'blocker'
+        : e.claimId && myClaimIds.has(e.claimId) ? 'overlap'
+        : e.files.length && filesOverlap(scope, e.files) ? 'overlap'
+        : null;
+      if (!reason) continue;
+      news.push({ seq: e.seq, type: e.type, message: e.message, at: e.at, agent: e.agent, reason });
+    }
+    // The cursor advances past everything considered, delivered or not: news the
+    // filter rejected once will not become relevant on a later pass.
+    if (highest > cursor) {
+      this.db.prepare('UPDATE sessions SET news_cursor = ? WHERE id = ?').run(highest, sessionId);
+    }
+    return news.reverse(); // oldest first: the block reads as a short timeline
   }
 
   getState(projectId: string): ProjectState {
@@ -1353,7 +1571,9 @@ export class Store {
       claims,
       bugs,
       completed,
-      conflicts: pairConflicts(claims),
+      // Widened by dirty files like every other overlap check, so the dashboard
+      // and the agents agree on what counts as a collision.
+      conflicts: pairConflicts(this.effectiveClaims(projectId)),
       recentFiles,
       events,
     };
@@ -1370,7 +1590,7 @@ export class Store {
     return ids.map((id) => {
       const project = this.db.prepare('SELECT full_name, created_at FROM projects WHERE id = ?').get(id) as Row | undefined;
       const sessions = (this.db.prepare('SELECT agent FROM sessions WHERE projectId = ?').all(id) as Row[]);
-      const claims = this.activeClaims(id);
+      const claims = this.effectiveClaims(id);
       const openBugs = this.db.prepare("SELECT COUNT(*) AS n FROM bugs WHERE projectId = ? AND status != 'fixed'")
         .get(id) as Row;
       const lastEvent = this.db.prepare('SELECT MAX(at) AS at FROM events WHERE projectId = ?').get(id) as Row;
@@ -1402,11 +1622,13 @@ export class Store {
       this.emit(s.projectId, 'session', `${s.agent} session expired (no heartbeat)`, s.agent);
       this.releaseClaims(s.projectId, s.id, 'session expired');
     }
-    const idle = (this.db.prepare("SELECT * FROM claims WHERE status != 'done' AND updatedAt < ?")
+    const idle = (this.db.prepare(`SELECT * FROM claims WHERE status NOT IN (${TERMINAL_SQL}) AND updatedAt < ?`)
       .all(t - this.claimIdleTtlMs) as Row[]).map(claimFromRow);
     for (const c of idle) {
       this.db.prepare('DELETE FROM claims WHERE id = ?').run(c.id);
-      this.emit(c.projectId, 'claim', `claim "${c.intent}" expired (idle)`, c.agent);
+      this.emit(c.projectId, 'claim', `claim "${c.intent}" expired (idle)`, c.agent,
+        { claimId: c.id, files: c.files, sessionId: c.sessionId });
+      this.releaseBlockedOn(c.projectId, c, 'gone (expired idle)');
     }
   }
 

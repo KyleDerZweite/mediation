@@ -49,12 +49,26 @@ function overlapReasons(scope: WorkScope, claim: Claim): OverlapReason[] {
   const componentHits = claim.components.filter((c) => components.has(c.toLowerCase()));
   if (componentHits.length) reasons.push({ type: 'components', detail: componentHits });
 
-  const mine = tokenize(`${scope.task ?? ''} ${scope.intent ?? ''}`);
-  const theirs = tokenize(`${claim.task ?? ''} ${claim.intent ?? ''}`);
-  const shared = [...mine].filter((t) => theirs.has(t));
-  if (shared.length >= 2) reasons.push({ type: 'task', detail: shared });
+  // Task similarity is the weakest signal and the noisiest: several agents on one
+  // subsystem share subsystem words constantly ("fix auth token refresh" vs "add
+  // token counter to auth page"). It only speaks when nothing better has, so a
+  // hard file or component hit never gets diluted by a guess about wording.
+  if (!reasons.length) {
+    const mine = tokenize(`${scope.task ?? ''} ${scope.intent ?? ''}`);
+    const theirs = tokenize(`${claim.task ?? ''} ${claim.intent ?? ''}`);
+    const shared = [...mine].filter((t) => theirs.has(t));
+    if (shared.length >= 2) reasons.push({ type: 'task', detail: shared });
+  }
 
   return reasons;
+}
+
+/* Two harnesses started in the SAME checkout (a human's editor plus two agent
+   tabs, say) see one working tree. Their dirty files are identical by
+   construction, so overlap between them reports the shared tree back as a
+   conflict every time. Same worktree is the same disk: not a collision. */
+function sameWorktree(a: string | null | undefined, b: string | null | undefined): boolean {
+  return !!a && !!b && a === b;
 }
 
 /** Warn about active claims that overlap the proposed work. Own session's claims are excluded. */
@@ -62,6 +76,7 @@ export function checkOverlap(activeClaims: Claim[], scope: WorkScope): ConflictW
   const warnings: ConflictWarning[] = [];
   for (const claim of activeClaims) {
     if (scope.sessionId && claim.sessionId === scope.sessionId) continue;
+    if (sameWorktree(scope.worktree, claim.worktree)) continue;
     const reasons = overlapReasons(scope, claim);
     if (reasons.length) {
       warnings.push({
@@ -71,10 +86,16 @@ export function checkOverlap(activeClaims: Claim[], scope: WorkScope): ConflictW
         intent: claim.intent,
         status: claim.status,
         reasons,
+        updatedAt: claim.updatedAt,
       });
     }
   }
   return warnings;
+}
+
+/** Do any two file lists touch? The routing test for delivering news by scope. */
+export function filesOverlap(a: string[], b: string[]): boolean {
+  return a.some((x) => b.some((y) => pathsOverlap(x, y)));
 }
 
 /** Pairwise conflicts between active claims of different sessions, for the dashboard. */
@@ -85,6 +106,7 @@ export function pairConflicts(activeClaims: Claim[]): PairConflict[] {
       const a = activeClaims[i];
       const b = activeClaims[j];
       if (a.sessionId === b.sessionId) continue;
+      if (sameWorktree(a.worktree, b.worktree)) continue;
       const reasons = overlapReasons(
         { files: b.files, components: b.components, task: b.task, intent: b.intent },
         a,

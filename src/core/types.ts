@@ -14,16 +14,32 @@ export interface Session {
   agent: string;
   developer: string | null;
   machine: string | null;
+  // Opaque id of the checkout this session runs in (machine + directory).
+  // Sessions sharing one are looking at the same files on disk.
+  worktree: string | null;
   repo: RepoState | null;
   createdAt: number;
   lastSeenAt: number;
 }
 
-export type ClaimStatus = 'investigating' | 'in-progress' | 'testing' | 'blocked' | 'done';
+// `abandoned` is the terminal status for work that was claimed and then dropped
+// (usually because the claim surfaced a conflict and the agent backed off). It
+// closes the claim like `done` does, but stays out of the completed feed: work
+// nobody did is not history worth reading.
+export type ClaimStatus = 'investigating' | 'in-progress' | 'testing' | 'blocked' | 'done' | 'abandoned';
+
+export const TERMINAL_CLAIM_STATUSES = ['done', 'abandoned'] as const;
+
+// What a finding is about, so the delivery filter can route it. `api-change` is
+// the one that matters most to strangers: a changed signature breaks another
+// agent silently, where a root cause only ever saves them time.
+export type FindingKind = 'root-cause' | 'gotcha' | 'decision' | 'api-change';
 
 export interface Finding {
   text: string;
   at: number;
+  files: string[];
+  kind: FindingKind | null;
 }
 
 export interface Claim {
@@ -39,10 +55,18 @@ export interface Claim {
   branch: string | null;
   baseRevision: string | null;
   status: ClaimStatus;
+  // Another claim this one waits on. Set with status 'blocked'; it turns a dead
+  // enum value into a routable edge, so the blocker learns someone is waiting
+  // and the waiter learns the moment it clears.
+  blockedOn: string | null;
   findings: Finding[];
   commits: string[];
   prs: string[];
   summary: string | null;
+  // Identifies the checkout this claim was made from (machine + directory).
+  // Two harnesses in ONE worktree share a working tree, so their dirty files are
+  // identical by construction and must not be read as a conflict.
+  worktree: string | null;
   createdAt: number;
   updatedAt: number;
   completedAt: number | null;
@@ -69,6 +93,11 @@ export interface Bug {
 
 export type EventType = 'session' | 'claim' | 'finding' | 'bug' | 'completed' | 'activity';
 
+// Types worth keeping when the per-project event cap evicts. Findings and
+// completions are the durable record: a claim row is DELETED when its session
+// dies or it idles out, so without this its findings would vanish with it.
+export const DURABLE_EVENT_TYPES: EventType[] = ['finding', 'completed', 'bug'];
+
 export interface EventEntry {
   id: string;
   projectId: string;
@@ -76,7 +105,32 @@ export interface EventEntry {
   message: string;
   at: number;
   agent: string | null; // who caused it; null on rows written before this existed
+  // Scope, so an event can be routed to the sessions it actually concerns.
+  // Null/empty on rows written before delivery existed: those are never routed,
+  // only displayed.
+  claimId: string | null;
+  files: string[];
+  sessionId: string | null; // author, so news is never delivered back to them
+  seq: number; // monotonic per project; the cursor delivery reads against
 }
+
+/** One piece of news routed to a session because it overlaps that session's work. */
+export interface NewsItem {
+  seq: number;
+  type: EventType;
+  message: string;
+  at: number;
+  agent: string | null;
+  // Why it reached you, which is what decides how loudly it should read:
+  // someone is stuck behind you, your own wait is over, something happened on
+  // the claim you are waiting on, or it simply touches your files.
+  reason: 'waiting-on-you' | 'unblocked' | 'blocker' | 'overlap';
+}
+
+// Prefixes that make a routed event self-classifying, so the reason survives
+// the trip through the events table without a column per relationship.
+export const NEWS_BLOCKED_PREFIX = 'BLOCKED:';
+export const NEWS_UNBLOCKED_PREFIX = 'UNBLOCKED:';
 
 // ---- overlap detection ----
 
@@ -93,6 +147,9 @@ export interface ConflictWarning {
   intent: string;
   status: ClaimStatus;
   reasons: OverlapReason[];
+  // A warning about work touched 30 seconds ago and one about work last touched
+  // 40 minutes ago deserve different reactions; without the age they read alike.
+  updatedAt: number;
 }
 
 /** Overlap between two already-active claims, for the dashboard. */
@@ -111,6 +168,7 @@ export interface WorkScope {
   components?: string[];
   task?: string | null;
   intent?: string | null;
+  worktree?: string | null; // claims from the same checkout are never conflicts
 }
 
 // ---- API read models ----
