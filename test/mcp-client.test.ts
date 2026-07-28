@@ -25,10 +25,18 @@ let ghBin = '';        // fake `gh` that answers as if signed in
 let ghDeadBin = '';    // fake `gh` that fails every call, like a signed-out one
 const patches: any[] = [];
 let stubIssueUrl: string | null = ISSUE; // what the stub says a patched bug is linked to
+// Destroy the sockets of the next N /check requests before responding. Scoped
+// to /check because stray heartbeats from a dying child of an earlier test
+// would otherwise absorb the destruction (their failures are tolerated).
+let destroyCheckSockets = 0;
 
 before(async () => {
   server = createServer((req, res) => {
     seen.push(`${req.method} ${req.url?.split('?')[0]}`);
+    if (destroyCheckSockets > 0 && req.url?.includes('/check')) {
+      destroyCheckSockets -= 1;
+      return req.socket.destroy();
+    }
     const send = (body: unknown, status = 200) => {
       res.writeHead(status, { 'content-type': 'application/json' });
       res.end(JSON.stringify(body));
@@ -263,4 +271,24 @@ test('a failed heartbeat does not stop the beats after it', async () => {
   }
   assert.equal(failNextHeartbeat, false, 'the first beat never reached the server');
   assert.ok(heartbeats >= 3, `expected beats to continue past the failure, saw ${heartbeats}`);
+});
+
+// A pooled keep-alive socket the edge has already closed dies before any HTTP
+// response exists. undici reports that as a bare "fetch failed" and never
+// retries a request with a body, so the client must retry once itself.
+test('a request whose socket dies is retried once and succeeds', async () => {
+  destroyCheckSockets = 1;
+  const out = await callTool('mediation_check', { files: ['src/app.ts'], intent: 'retry' });
+  assert.equal(out, 'No overlapping work detected. Clear to proceed.');
+  assert.equal(destroyCheckSockets, 0, 'the doomed request never reached the server');
+});
+
+test('a persistent connection failure names the socket error, not bare "fetch failed"', async () => {
+  destroyCheckSockets = 1000; // the attempt and its retry both die
+  try {
+    const out = await callTool('mediation_check', { files: ['src/app.ts'], intent: 'retry' });
+    assert.match(out, /error: fetch failed \((ECONNRESET|EPIPE|UND_ERR_SOCKET)\) on GET \/api\/projects\/[0-9a-f-]+\/check/);
+  } finally {
+    destroyCheckSockets = 0;
+  }
 });

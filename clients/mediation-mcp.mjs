@@ -239,25 +239,42 @@ let authMode = null;
 // the session. /api/health reports the real TTL; this is the fallback.
 let heartbeatMs = 60_000;
 
+// Connection-level failures where the request may never have reached the
+// server: typically a pooled keep-alive socket the edge (Cloudflare) already
+// closed. undici surfaces these as a bare "fetch failed" TypeError and never
+// retries a request with a body, so one immediate retry on a fresh socket is
+// ours to do. Worst case is a rare duplicate write, better than a lost one.
+const RETRYABLE_CAUSES = new Set(['ECONNRESET', 'EPIPE', 'UND_ERR_SOCKET']);
+
 async function api(method, apiPath, body, { auth = true, sessionCapability = session?.capability } = {}) {
   const credential = readCredentials();
   const headers = { 'content-type': 'application/json' };
   if (auth && credential?.token) headers.authorization = `Bearer ${credential.token}`;
   if (sessionCapability) headers['x-mediation-session'] = sessionCapability;
-  const res = await fetch(`${SERVER}${apiPath}`, {
-    method,
-    headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
-    signal: AbortSignal.timeout(5000),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err = new Error(data.error || `${res.status} on ${apiPath}`);
-    err.status = res.status;
-    err.hint = data.hint || null; // server-authored instruction for the human
-    throw err;
+  for (let attempt = 0; ; attempt++) {
+    let res;
+    try {
+      res = await fetch(`${SERVER}${apiPath}`, {
+        method,
+        headers,
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: AbortSignal.timeout(5000),
+      });
+    } catch (error) {
+      const code = error.cause?.code || error.cause?.cause?.code;
+      if (attempt === 0 && RETRYABLE_CAUSES.has(code)) continue;
+      if (code) error.message = `${error.message} (${code}) on ${method} ${apiPath}`;
+      throw error;
+    }
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const err = new Error(data.error || `${res.status} on ${apiPath}`);
+      err.status = res.status;
+      err.hint = data.hint || null; // server-authored instruction for the human
+      throw err;
+    }
+    return data;
   }
-  return data;
 }
 
 async function serverAuthMode() {
