@@ -253,6 +253,14 @@ input, button { font-family: inherit; }
   background: #fbf6ec; border: 1px solid #f4e6cb; border-radius: 7px; padding: 3px 9px; font-size: 11.5px;
 }
 
+/* rough claim: a live session that published nothing. Dashed and grey so it
+   never reads as work someone actually committed to. */
+.claim-card.rough { border-style: dashed; background: #fcfcfd; }
+.claim-card.rough .rough-badge { background: #f2f4f7; color: #667085; }
+.claim-card.rough .rough-intent { color: #475467; }
+.claim-card.rough .file-chip.more { color: #98a2b3; }
+.rough-note { margin-left: auto; font-size: 11.5px; color: #98a2b3; }
+
 /* conflict card */
 .conflict-card { background: #fffdf7; border: 1px solid #f4e6cb; border-radius: 14px; padding: 14px 16px; }
 .conflict-head { display: flex; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 600; color: #8a5a12; margin-bottom: 9px; }
@@ -314,8 +322,19 @@ input, button { font-family: inherit; }
 .done-row { display: flex; gap: 13px; padding: 13px 0; border-bottom: 1px solid #f2f4f7; align-items: center; }
 .done-row:last-child { border-bottom: none; }
 .done-body { min-width: 0; flex: 1; }
-.done-title { font-size: 13px; color: #101828; }
-.done-sub { font-size: 11.5px; color: #98a2b3; margin-top: 2px; overflow-wrap: anywhere; }
+/* Explicit line-height: a clamped -webkit-box crops on line boxes, and the
+   default one clips descenders on the last visible line. */
+.done-title {
+  font-size: 13px; color: #101828; line-height: 1.45;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden;
+}
+/* Agents write essays into `summary`. Two lines is enough to recognise the work;
+   the full text lives in the activity feed. */
+.done-sub {
+  font-size: 11.5px; color: #98a2b3; margin-top: 2px; overflow-wrap: anywhere; line-height: 1.45;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden;
+}
+.done-more { margin: 10px 0 6px; }
 .done-refs { display: flex; gap: 6px; flex: 0 0 auto; flex-wrap: wrap; justify-content: flex-end; max-width: 40%; }
 .ref-chip {
   font-family: 'IBM Plex Mono', monospace; font-size: 11.5px; color: #7c3aed;

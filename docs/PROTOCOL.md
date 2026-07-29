@@ -140,12 +140,21 @@ PATCH /api/projects/{project}/claims/{claimId}                { "status": "in-pr
 Expiry semantics:
 
 - Sessions expire without a heartbeat (`SESSION_TTL_MS`, default 300 000 ms,
-  published as `sessionTtlMs` by `GET /api/health`); their claims are released.
-  Beat at roughly a quarter of that TTL and keep beating after a failed one: a
-  client that gives up on the first network error expires a session whose agent
-  is still working.
-- Claims with no updates expire after **45 minutes** of inactivity.
-- Completed claims are kept (`status: "done"`).
+  published as `sessionTtlMs` by `GET /api/health`). Beat at roughly a quarter
+  of that TTL and keep beating after a failed one: a client that gives up on
+  the first network error expires a session whose agent is still working.
+- A claim outlives the session that made it. When the session ends, anyone
+  blocked on the claim is released, but the claim itself stands: the work is
+  still in the working tree, and the client is a child process a harness may
+  recycle at any time. Touching the claim from a later session of the same
+  developer and worktree re-attaches it, and the response carries a `note`
+  saying so.
+- Claims with no updates expire after **45 minutes** of inactivity. Expiry sets
+  `status: "expired"` (or `"released"` when access was revoked) and keeps the
+  row: touching such a claim revives it, or completes it with its commits, and
+  says so in `note`. Only an unknown id is a 404.
+- Completed claims are kept (`status: "done"`). Completing one twice merges the
+  commits instead of entering the history again.
 
 Report findings as you discover them (`finding` on PATCH appends to the
 claim's findings list). Other agents read them and skip work you already did.

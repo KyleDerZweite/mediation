@@ -28,6 +28,9 @@ const claimPosts: any[] = [];
 const completions: any[] = [];
 const beats: any[] = [];
 let bigState = false; // when set, the stub answers with a busy project
+// When set, the stub answers a completion the way the server does for a claim
+// it had to adopt from an ended session.
+let stubNote: string | null = null;
 let stubIssueUrl: string | null = ISSUE; // what the stub says a patched bug is linked to
 // Destroy the sockets of the next N /check requests before responding. Scoped
 // to /check because stray heartbeats from a dying child of an earlier test
@@ -116,7 +119,8 @@ before(async () => {
       return req.on('end', () => {
         const body = JSON.parse(raw || '{}');
         completions.push(body);
-        send({ id: 'claim-1', intent: 'test work', status: body.status ?? 'done', commits: body.commits ?? [] });
+        send({ id: 'claim-1', intent: 'test work', status: body.status ?? 'done', commits: body.commits ?? [],
+          ...(stubNote ? { note: stubNote } : {}) });
       });
     }
     if (req.url?.startsWith(`/api/projects/${PROJECT_ID}/check`)) return send({ conflicts: [] });
@@ -336,6 +340,39 @@ test('the heartbeat reports what the working tree actually has dirty', async () 
     assert.equal(carried.branch, 'main');
   } finally {
     rmSync(join(repo, 'scratch.txt'), { force: true });
+  }
+});
+
+/* A resumed agent finishing a claim the server had to adopt or revive must be
+   told, or the tool quietly reports something other than what happened. */
+test('what the server had to do to honour the call comes back with it', async () => {
+  stubNote = 'Your previous session had ended; this claim is attached to your current one.';
+  try {
+    const out = await callTool('mediation_claim', { claimId: 'claim-1', status: 'done', commits: ['abc1234'] });
+    assert.match(out, /Completed: "test work"/);
+    assert.match(out, /previous session had ended/);
+  } finally {
+    stubNote = null;
+  }
+});
+
+/* Session creation carries no repo state, so before this an agent that
+   connected and then coded without claiming was invisible to everyone for a
+   whole heartbeat interval: exactly the window the dashboard needs it. */
+test('the working tree goes out at session start, not one interval later', async () => {
+  beats.length = 0;
+  writeFileSync(join(repo, 'immediate.txt'), 'uncommitted work\n');
+  const started = Date.now();
+  try {
+    await callTool('mediation_claim', { dryRun: true });
+    // The stub's 8 s TTL makes the interval 2 s, so a beat inside this window
+    // can only be the one fired when the session was created.
+    const deadline = started + 1_500;
+    while (!beats.length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+    assert.ok(beats.length, 'no working-tree report arrived before the first heartbeat interval');
+    assert.ok(beats[0].dirtyFiles?.includes('immediate.txt'), JSON.stringify(beats[0]));
+  } finally {
+    rmSync(join(repo, 'immediate.txt'), { force: true });
   }
 });
 

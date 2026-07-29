@@ -45,6 +45,70 @@ kind (`root-cause`, `gotcha`, `decision`, `api-change`), and now survive their
 claim: a claim row is deleted when its session dies, and what an agent learned
 must not die with it.
 
+**A claim outlives its session.** The MCP client is a child process a harness
+recycles freely, and its `shutdown()` deleted every claim it held. An agent
+whose process restarted mid-task kept editing with its coordination record
+gone, and since dirty-file widening only ever widens a *claim*, a session
+holding none contributed nothing to any overlap check: the live work was
+uncovered, not merely mislabelled. This is the same symptom as the two
+instruction bugs below, reached without any instruction being disobeyed.
+
+- Ending a session leaves its claims standing. Whoever was blocked on one is
+  still released, because an agent that vanishes mid-block may never return.
+- Idle expiry and forced release now tombstone (`status: "expired"` /
+  `"released"`) instead of deleting. The row is what lets the server answer a
+  returning agent at all.
+- Touching a claim is authorized against the caller, so a later session can
+  adopt one whose session ended, and revive one that expired. Adoption is keyed
+  on the `developer` the server set from the authenticated credential and
+  narrowed by worktree; the worktree alone would be a hijack, since it is
+  client-declared and every member can read it.
+- Work that finished still lands in the history: completing an expired claim
+  succeeds with its commits, and completing an already completed one merges
+  rather than entering the feed twice. Every recovery says what it did in the
+  response `note`; only an unknown id is still a 404, and that 404 now names
+  the way forward instead of ending the conversation.
+
+**Agents actually coordinate.** Two instruction bugs, both of which produced the
+same thing: a live session holding no claims.
+
+- The activation condition was not checkable. Everything gated on "a repository
+  that contains `.mediation.json`", and that mapping is per-checkout and
+  gitignored by design, so it never appears in `git status` and a fresh clone
+  has none. The skill's own description gated on it too, which decided whether
+  the skill was ever loaded: it now triggers on the `mediation_*` tools being
+  available, and the skill answers the repository question in one step instead
+  of assuming it. Both harness instructions name the two cheap ways to check
+  and say to check before the first edit.
+- `.mediation.json` stays out of Git, and now says so where the decision is
+  made. Sharing it binds every clone to one person's server, and a fork pushes
+  somewhere else, so the client refuses the stale binding until someone
+  re-initializes: on a tracked file that is a dirty tree and a merge conflict
+  for everyone after. `mediation_init`, the skill and the README agree on it.
+- Claiming read as expensive, so it got deferred until after editing began. The
+  skill asked for intent, files, components, task and branch; only `intent` is
+  required. It now says to claim rough and early and refine through the same
+  `claimId`, and adds the rule for the case that actually happens: already
+  editing, never claimed, claim now anyway.
+- Delegated work is spelled out. A subagent inside your own harness shares its
+  session and may reuse your `claimId`; a separately launched agent files its
+  own. Only the session that created a claim can update it.
+
+**Dashboard.** The Now tab shows what is happening now.
+
+- A live session that has claimed nothing renders as a *rough claim* built from
+  the working tree the heartbeat already carries: agent, branch, dirty files,
+  marked as derived and never confused with a published claim. An agent nobody
+  can see is the problem this server exists to fix, and "nothing is claimed"
+  was advice, not information.
+- The client sends its first working-tree report when the session is created
+  instead of one heartbeat interval later, so that rough claim is there from
+  the first second.
+- Completed work is history, not news: it previews the newest four and keeps
+  the rest one click away, and long agent-written summaries are clamped to two
+  lines. Twenty finished claims used to push the live half of the page off the
+  screen.
+
 ## 0.4.2: explicit coordination boundary
 
 - In repositories already initialized with `.mediation.json`, harness

@@ -70,6 +70,10 @@ test('Claude receives the initialized-repository skill rule without losing its o
   const instructions = readFileSync(join(claudeHome, 'CLAUDE.md'), 'utf8');
   assert.match(instructions, /^# Mine/m);
   assert.match(instructions, /you must use and follow the installed `mediation` skill/);
+  // The trigger has to be checkable: `.mediation.json` is usually gitignored, so
+  // an agent waiting for it to appear in `git status` never coordinates at all.
+  assert.match(instructions, /usually gitignored/);
+  assert.match(instructions, /`mediation_state`/);
   assert.match(instructions, /do not initialize Mediation unless the user explicitly asks/);
   assert.equal((instructions.match(/>>> mediation >>>/g) || []).length, 1);
 

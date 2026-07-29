@@ -605,18 +605,21 @@ export function buildApp(store: Store, options: AppOptions = {}): Hono {
     return c.json(withNews(projectId, body.sessionId, store.createClaim(projectId, body)));
   });
 
+  // `note` carries what the server had to do to honour the call: adopting a
+  // claim whose session had ended, or reviving one that had expired. Silence
+  // there would be a tool that quietly lies about what happened.
   app.patch('/api/projects/:p/claims/:id', async (c) => {
     const projectId = c.req.param('p');
-    store.assertClaimCapability(projectId, c.req.param('id'), c.req.header('x-mediation-session'));
+    const { note } = store.authorizeClaimTouch(projectId, c.req.param('id'), c.req.header('x-mediation-session'), 'patch');
     const claim = store.updateClaim(projectId, c.req.param('id'), await parseBody(c, schemas.claimPatch));
-    return c.json(withNews(projectId, claim.sessionId, claim));
+    return c.json({ ...withNews(projectId, claim.sessionId, claim), note });
   });
 
   app.post('/api/projects/:p/claims/:id/complete', async (c) => {
     const projectId = c.req.param('p');
-    store.assertClaimCapability(projectId, c.req.param('id'), c.req.header('x-mediation-session'));
+    const { note } = store.authorizeClaimTouch(projectId, c.req.param('id'), c.req.header('x-mediation-session'), 'complete');
     const claim = store.completeClaim(projectId, c.req.param('id'), await parseBody(c, schemas.claimComplete));
-    return c.json(withNews(projectId, claim.sessionId, claim));
+    return c.json({ ...withNews(projectId, claim.sessionId, claim), note });
   });
 
   app.post('/api/projects/:p/bugs', async (c) => {

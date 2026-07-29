@@ -114,7 +114,10 @@ function detect() {
 }
 async function download(url) { const r = await fetch(url); if (!r.ok) fail(`download failed (${r.status}): ${url}`); return r.text(); }
 function usage() {
-  return '## Mediation\n\nBefore coding or delegating in a repository that contains `.mediation.json`, you must use and follow the installed `mediation` skill for the full task.\n\nIf `.mediation.json` is absent, do not initialize Mediation unless the user explicitly asks. If the skill or service is unavailable, mention it once and continue.';
+  // The condition has to be CHECKABLE. `.mediation.json` is usually gitignored,
+  // so an agent that waits for it to show up in `git status` never coordinates
+  // at all: name the two cheap ways to answer the question instead.
+  return '## Mediation\n\nBefore coding or delegating in a repository that contains `.mediation.json`, you must use and follow the installed `mediation` skill for the full task. That file is usually gitignored and absent from `git status`: check the repository root, or call `mediation_state` once.\n\nIf `.mediation.json` is absent, do not initialize Mediation unless the user explicitly asks. If the skill or service is unavailable, mention it once and continue.';
 }
 function expected(server, agent) {
   return { command: 'node', args: [clientFile], env: { MEDIATION_URL: server, MEDIATION_HARNESS: agent } };

@@ -45,6 +45,15 @@ browser and the server verifies remote access; no GitHub token reaches the
 agent machine. In `AUTH_MODE=manual`, admin-approved accounts use explicit
 Mediation membership instead.
 
+Setup writes one file into the repository, `.mediation.json`: the server URL
+and the GitHub owner/repository this checkout coordinates on. It holds no
+secret, but **gitignore it**. The mapping is per-checkout: sharing it binds
+every clone to one person's server, and a fork pushes somewhere else, so the
+client refuses the stale binding until someone re-runs setup, which on a
+tracked file means a dirty tree and a merge conflict for everyone after. Each
+developer connects their own checkout once; a fresh clone starting
+uninitialized is the design.
+
 Re-run the install command to update. Remove it with
 `curl -fsSL http://<your-server>/uninstall.sh | bash`. Uninstall removes the
 global device credential by default (`--keep-auth` preserves it) and leaves

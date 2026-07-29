@@ -99,6 +99,13 @@ function notFound(message: string): never {
   return fail(message, 404);
 }
 
+// Coarse on purpose: these ages are read by an agent deciding what to do next,
+// where "20m" and "3h" are different decisions and "20m14s" is neither.
+function agoText(ts: number): string {
+  const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  return s < 60 ? `${s}s` : s < 3600 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`;
+}
+
 type Row = Record<string, unknown>;
 
 // ---- user auth (see docs/auth.md) ----
@@ -473,8 +480,8 @@ export class Store {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(randomUUID(), projectId, type, message, Date.now(), agent,
         scope.claimId ?? null, JSON.stringify((scope.files ?? []).map(normalizePath)), scope.sessionId ?? null);
-    /* Eviction spares the durable types. A claim row is DELETED when its session
-       dies or it idles out, so its findings live on only as events; letting a
+    /* Eviction spares the durable types. A claim's findings must outlive the
+       claim itself: it can be abandoned, expire, or be released, and letting a
        burst of session churn evict them would throw away the one record of what
        an agent learned. Churny types (session/activity/claim) still ride the cap. */
     const durable = DURABLE_EVENT_TYPES.map(() => '?').join(', ');
@@ -531,7 +538,13 @@ export class Store {
   private getClaim(projectId: string, claimId: string): Claim {
     const row = this.db.prepare('SELECT * FROM claims WHERE projectId = ? AND id = ?')
       .get(projectId, claimId) as Row | undefined;
-    if (!row) notFound('claim not found');
+    // Every dead end here ends a resumed agent's coordination for the whole
+    // task, so say what to do instead of only what went wrong.
+    if (!row) {
+      notFound('no claim with this id exists in this project. If you are resuming earlier work, '
+        + 'create a new claim now with mediation_claim {intent, files} for what you are doing and finish it there: '
+        + 're-claiming is the correct recovery, not a failure');
+    }
     return claimFromRow(row);
   }
 
@@ -625,11 +638,73 @@ export class Store {
     if (result.changes === 0) notFound('credential not found');
   }
 
-  assertClaimCapability(projectId: string, claimId: string, capability: string | undefined): void {
-    const row = this.db.prepare('SELECT sessionId FROM claims WHERE projectId = ? AND id = ?')
-      .get(projectId, claimId) as Row | undefined;
-    if (!row) notFound('claim not found');
-    this.assertSessionCapability(projectId, row.sessionId as string, capability);
+  private sessionByCapability(projectId: string, capability: string | undefined): Session {
+    if (!capability) fail('session capability required', 403);
+    const row = this.db.prepare('SELECT * FROM sessions WHERE projectId = ? AND capability_hash = ?')
+      .get(projectId, capabilityHash(capability)) as Row | undefined;
+    if (!row) fail('session capability required', 403);
+    return sessionFromRow(row);
+  }
+
+  /* Touching a claim is authorized against the CALLER, because the session that
+     created it may be long gone: an agent whose MCP process was recycled, or
+     whose chat is resumed hours later, still holds the work in its working tree
+     and must be able to finish the claim rather than start again.
+
+     Adoption is keyed on `developer`, which the server sets from the
+     authenticated credential and never reads from a request body, and narrowed
+     by the worktree so one person's two checkouts stay apart. Worktree alone
+     would be a hijack: it is client-declared, not secret, and every member can
+     read it out of the project state. */
+  authorizeClaimTouch(projectId: string, claimId: string, capability: string | undefined,
+    kind: 'patch' | 'complete'): { note: string | null } {
+    const claim = this.getClaim(projectId, claimId);
+    const alive = this.db.prepare('SELECT id FROM sessions WHERE projectId = ? AND id = ?')
+      .get(projectId, claim.sessionId) as Row | undefined;
+    if (alive) {
+      this.assertSessionCapability(projectId, claim.sessionId, capability);
+      return { note: this.resumeClaim(projectId, claim, kind) };
+    }
+
+    const caller = this.sessionByCapability(projectId, capability);
+    this.assertSessionCapability(projectId, caller.id, capability);
+    if (!claim.worktree || !caller.worktree
+      || claim.worktree !== caller.worktree || claim.developer !== caller.developer) {
+      fail(`claim ${claimId} belongs to ${claim.agent} and cannot be taken over from this session. `
+        + 'Publish your own with mediation_claim {intent, files}', 403);
+    }
+    this.db.prepare('UPDATE claims SET sessionId = ?, agent = ? WHERE id = ?')
+      .run(caller.id, caller.agent, claim.id);
+    claim.sessionId = caller.id;
+    claim.agent = caller.agent;
+    const resumed = this.resumeClaim(projectId, claim, kind);
+    const adopted = 'Your previous session had ended; this claim is attached to your current one.';
+    return { note: resumed ? `${adopted} ${resumed}` : adopted };
+  }
+
+  /* What to do about the status the claim was found in. A tombstoned claim is
+     revived rather than refused: the work is real and still on disk, and an
+     agent told only "claim not found" stops coordinating for the whole task. */
+  private resumeClaim(projectId: string, claim: Claim, kind: 'patch' | 'complete'): string | null {
+    const when = agoText(claim.completedAt ?? claim.updatedAt);
+    if (claim.status === 'done' || claim.status === 'abandoned') {
+      if (kind === 'patch') {
+        fail(`this claim was ${claim.status} ${when} ago and cannot be reopened. `
+          + 'Create a new claim with mediation_claim {intent, files} for the follow-up work', 409);
+      }
+      return `Heads up: it was already completed ${when} ago, so this only added to that record.`;
+    }
+    const was = claim.status;
+    if (was !== 'expired' && was !== 'released') return null;
+    // Revived to in-progress; an explicit status in the same call overrides it.
+    this.db.prepare('UPDATE claims SET status = ?, updatedAt = ? WHERE id = ?')
+      .run('in-progress', Date.now(), claim.id);
+    claim.status = 'in-progress';
+    this.emit(projectId, 'claim', `${claim.agent} resumed: ${claim.intent}`, claim.agent,
+      { claimId: claim.id, files: claim.files, sessionId: claim.sessionId });
+    return was === 'released'
+      ? `It had been released ${when} ago when project access changed; it is live again.`
+      : `It had expired ${when} ago after that long without an update; it is live again.`;
   }
 
   heartbeat(projectId: string, sessionId: string, input: Heartbeat): Session {
@@ -650,22 +725,46 @@ export class Store {
   endSession(projectId: string, sessionId: string, reason = 'ended by agent'): { ok: true } {
     const session = this.requireSession(projectId, sessionId);
     this.db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
-    this.releaseClaims(projectId, sessionId, reason);
+    this.orphanClaims(projectId, sessionId, reason);
     this.emit(projectId, 'session', `${session.agent} disconnected (${reason})`, session.agent);
     return { ok: true };
   }
 
-  private releaseClaims(projectId: string, sessionId: string, reason: string): void {
-    const claims = (this.db.prepare(
+  private sessionClaims(projectId: string, sessionId: string): Claim[] {
+    return (this.db.prepare(
       `SELECT * FROM claims WHERE projectId = ? AND sessionId = ? AND status NOT IN (${TERMINAL_SQL})`)
       .all(projectId, sessionId) as Row[]).map(claimFromRow);
-    for (const claim of claims) {
-      this.db.prepare('DELETE FROM claims WHERE id = ?').run(claim.id);
+  }
+
+  /* A session dying is a TRANSPORT event, not the end of the work. The MCP
+     client is a child process the harness recycles freely, and deleting its
+     claims on stdin close threw away the coordination record of work still
+     sitting in the working tree: the dashboard then showed a live agent
+     claiming nothing, and the overlap engine covered none of its files, because
+     dirty-file widening only ever widens a CLAIM. The claim now stands until it
+     expires on its own, and `authorizeClaimTouch` hands it back to the agent
+     when it returns.
+
+     Waiters are still let go: the agent that vanished mid-block may never come
+     back, and that permanent wait is the exact failure `blockedOn` prevents. */
+  private orphanClaims(projectId: string, sessionId: string, reason: string): void {
+    for (const claim of this.sessionClaims(projectId, sessionId)) {
+      this.emit(projectId, 'claim', `${claim.agent} left "${claim.intent}" unattended (${reason})`, claim.agent,
+        { claimId: claim.id, files: claim.files, sessionId });
+      this.releaseBlockedOn(projectId, claim, `unattended (${reason})`);
+    }
+  }
+
+  /* Forced release, for access that was revoked rather than a process that
+     died: the claim must stop warning people, but the row is kept as a
+     tombstone so its agent is told what happened instead of "claim not found". */
+  private releaseClaims(projectId: string, sessionId: string, reason: string): void {
+    for (const claim of this.sessionClaims(projectId, sessionId)) {
+      claim.status = 'released';
+      claim.updatedAt = Date.now();
+      this.saveClaim(claim);
       this.emit(projectId, 'claim', `claim "${claim.intent}" released (${reason})`, claim.agent,
-        { claimId: claim.id, files: claim.files, sessionId: sessionId });
-      // A claim can vanish instead of completing. Anyone waiting on it must
-      // still be let go, or blocking on a session that quietly dies is a
-      // permanent wait: the exact failure `blockedOn` exists to prevent.
+        { claimId: claim.id, files: claim.files, sessionId });
       this.releaseBlockedOn(projectId, claim, `gone (${reason})`);
     }
   }
@@ -835,6 +934,17 @@ export class Store {
 
   completeClaim(projectId: string, claimId: string, input: ClaimComplete): Claim {
     const claim = this.getClaim(projectId, claimId);
+    /* A resumed agent replaying its last step must not enter the history twice.
+       Merging is the honest answer: it keeps the commits of both calls and the
+       moment the work actually landed, and emits nothing new. */
+    if (claim.status === 'done' && input.status === 'done') {
+      claim.commits = [...new Set([...claim.commits, ...input.commits])];
+      claim.prs = [...new Set([...claim.prs, ...input.prs])];
+      claim.summary = input.summary ?? claim.summary;
+      claim.updatedAt = Date.now();
+      this.saveClaim(claim);
+      return claim;
+    }
     claim.status = input.status;
     claim.commits = input.commits;
     claim.prs = input.prs;
@@ -1620,12 +1730,17 @@ export class Store {
     for (const s of stale) {
       this.db.prepare('DELETE FROM sessions WHERE id = ?').run(s.id);
       this.emit(s.projectId, 'session', `${s.agent} session expired (no heartbeat)`, s.agent);
-      this.releaseClaims(s.projectId, s.id, 'session expired');
+      this.orphanClaims(s.projectId, s.id, 'session expired');
     }
     const idle = (this.db.prepare(`SELECT * FROM claims WHERE status NOT IN (${TERMINAL_SQL}) AND updatedAt < ?`)
       .all(t - this.claimIdleTtlMs) as Row[]).map(claimFromRow);
     for (const c of idle) {
-      this.db.prepare('DELETE FROM claims WHERE id = ?').run(c.id);
+      // Tombstoned, not deleted. `updatedAt` is only bumped by claim writes, so
+      // this also fires on a live agent that has been heads-down for the whole
+      // TTL; that agent's next call must get its claim back, not a 404.
+      c.status = 'expired';
+      c.updatedAt = t;
+      this.saveClaim(c);
       this.emit(c.projectId, 'claim', `claim "${c.intent}" expired (idle)`, c.agent,
         { claimId: c.id, files: c.files, sessionId: c.sessionId });
       this.releaseBlockedOn(c.projectId, c, 'gone (expired idle)');

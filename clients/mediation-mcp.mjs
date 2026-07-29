@@ -365,11 +365,11 @@ async function ensureSession() {
     }));
   const current = { id: created.id, capability: created.capability, project: created.project || state.project, heartbeat: null };
   session = current;
-  current.heartbeat = setInterval(() => {
-    /* The beat carries what the working tree says. It is the ONLY thing that
-       fires while the agent is heads-down coding and calling no tools, so it is
-       the only channel that keeps overlap data fresh through exactly the window
-       where a collision is most likely to form unnoticed. */
+  /* The beat carries what the working tree says. It is the ONLY thing that
+     fires while the agent is heads-down coding and calling no tools, so it is
+     the only channel that keeps overlap data fresh through exactly the window
+     where a collision is most likely to form unnoticed. */
+  const beat = () =>
     api('POST', `/api/projects/${encodeURIComponent(current.project)}/sessions/${current.id}/heartbeat`,
       repoReport(), { sessionCapability: current.capability })
       .catch((error) => {
@@ -382,7 +382,11 @@ async function ensureSession() {
         if (session === current) session = null;
         clearInterval(current.heartbeat);
       });
-  }, heartbeatMs);
+  /* Beat once immediately: session creation carries no repo state, so an agent
+     that connects and then codes without claiming was invisible for a whole
+     heartbeat interval, which is exactly the window the dashboard needs it. */
+  beat();
+  current.heartbeat = setInterval(beat, heartbeatMs);
   current.heartbeat.unref?.();
   return current.id;
   })();
@@ -489,6 +493,10 @@ function renderConflicts(conflicts) {
   });
   return `WARNING: ${conflicts.length} overlapping claim(s). Conflicts are warnings, not locks. Stop, coordinate with the owner, narrow scope, or continue explicitly.\n${lines.join('\n')}`;
 }
+
+// What the server had to do to honour the call, when that is not what the agent
+// asked for: a claim adopted from an ended session, or revived after expiring.
+const note = (payload) => (payload?.note ? ` ${payload.note}` : '');
 
 /* News rides back on a call the agent was already making. Kept deliberately
    short: this text is spent out of the agent's context on every write, so it
@@ -646,7 +654,13 @@ const TOOLS = [
       const repository = `github.com/${guess.repository.owner}/${guess.repository.repository}`;
       if (!readCredentials()?.token) return `Repository "${repository}" mapped at ${statePath}. Sign in with mediation_setup before working.`;
       await ensureSession();
-      return `Repository "${repository}" bound at ${statePath} (${guess.source}). Publish work with mediation_claim before you start editing.`;
+      // Said here because this is the one moment the file exists and nobody has
+      // decided its fate yet. Sharing the mapping binds every clone to one
+      // person's server, and a fork pushes elsewhere, so githubSession() refuses
+      // the binding until someone re-runs init: on a tracked file, that is a
+      // dirty tree and a merge conflict for the next person.
+      return `Repository "${repository}" bound at ${statePath} (${guess.source}). Gitignore ${STATE_FILE}: the mapping is `
+        + 'per-checkout. Publish work with mediation_claim before you start editing.';
     },
   },
   {
@@ -718,12 +732,12 @@ const TOOLS = [
         const head = claim.status === 'abandoned'
           ? `Abandoned: "${claim.intent}". The claim no longer warns anyone and is kept out of the completed feed.`
           : `Completed: "${claim.intent}"${claim.commits.length ? ` (${claim.commits.join(', ')})` : ''}.`;
-        return `${head}${renderNews(claim.news)}`;
+        return `${head}${note(claim)}${renderNews(claim.news)}`;
       }
       const claim = await api('PATCH', `${base}/claims/${id}`, input);
       const head = `Claim updated: ${claim.intent}, now ${claim.status}`
         + `${claim.findings.length ? `, ${claim.findings.length} finding(s) recorded` : ''}.`;
-      return `${head}${renderNews(claim.news)}`;
+      return `${head}${note(claim)}${renderNews(claim.news)}`;
     },
   },
   {

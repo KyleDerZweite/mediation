@@ -26,9 +26,18 @@ export interface Session {
 // (usually because the claim surfaced a conflict and the agent backed off). It
 // closes the claim like `done` does, but stays out of the completed feed: work
 // nobody did is not history worth reading.
-export type ClaimStatus = 'investigating' | 'in-progress' | 'testing' | 'blocked' | 'done' | 'abandoned';
+// `expired` (idle past the claim TTL) and `released` (access revoked) are set by
+// the server, never by an agent. They end a claim like the agent-set terminal
+// states, but the row is KEPT: an agent resuming an old chat with a claimId in
+// its context has to be told what happened to it, and "claim not found" is a
+// dead end that teaches it to stop coordinating.
+export type ClaimStatus = 'investigating' | 'in-progress' | 'testing' | 'blocked'
+  | 'done' | 'abandoned' | 'expired' | 'released';
 
-export const TERMINAL_CLAIM_STATUSES = ['done', 'abandoned'] as const;
+export const TERMINAL_CLAIM_STATUSES = ['done', 'abandoned', 'expired', 'released'] as const;
+
+// The two an agent can recover from by touching the claim again.
+export const RESUMABLE_CLAIM_STATUSES = ['expired', 'released'] as const;
 
 // What a finding is about, so the delivery filter can route it. `api-change` is
 // the one that matters most to strangers: a changed signature breaks another

@@ -168,6 +168,7 @@ const state = {
   authMsg: '',             // message shown on the login/register card
   copied: null,            // key of the element that just copied, for feedback
   armed: null,             // key of a destructive button armed for its second click
+  allCompleted: false,     // Now tab: completed work expanded past its preview
   menu: null,              // key of the open row menu (role editor / overflow)
   userFilter: { q: '', role: 'all', status: 'all' },
   activityFilter: { q: '', kind: 'all', agent: 'all', project: 'all' },
@@ -505,6 +506,46 @@ function sessionRow(s, now) {
   </div>`;
 }
 
+/* A live session that has claimed nothing is exactly the case this server
+   exists to catch, and it used to render as one line of advice nobody can act
+   on. Git already answers "what is this agent touching": the heartbeat carries
+   the working tree, so show that as a ROUGH claim. It is deliberately styled
+   apart from a real claim and never feeds the overlap engine here (the server
+   already widens conflicts by dirty files); it only makes an invisible agent
+   visible. */
+function roughClaimCard(s, now) {
+  const who = s.developer || s.agent;
+  const files = s.repo?.dirtyFiles ?? [];
+  const branch = s.repo?.branch;
+  return `<div class="claim-card rough">
+    <div class="claim-top">
+      <span class="avatar" style="background:${AVATAR_FALLBACK}">${esc(initials(who))}</span>
+      <div class="claim-who">
+        <div class="claim-who-row">
+          <span class="claim-name">${esc(who)}</span>
+          <span class="agent-chip">${icon('bot', '#5b6b85', 14)}${esc(s.agent)}</span>
+          ${s.machine ? `<span class="claim-machine">${esc(s.machine)}</span>` : ''}
+        </div>
+      </div>
+      <div class="claim-right">
+        <span class="status-badge rough-badge">no claim</span>
+        <span class="claim-activity"><span class="dot dot-idle"></span>${ago(s.lastSeenAt, now)} ago</span>
+      </div>
+    </div>
+    <div class="claim-intent rough-intent">${files.length
+      ? `Editing ${plural(files.length, 'file')} without claiming anything.`
+      : 'Live, nothing claimed, and no working tree reported yet.'}</div>
+    ${files.length ? `<div class="chip-row">
+      ${files.slice(0, 8).map((f) => `<span class="file-chip">${esc(f)}</span>`).join('')}
+      ${files.length > 8 ? `<span class="file-chip more">+${files.length - 8} more</span>` : ''}
+    </div>` : ''}
+    <div class="claim-foot">
+      ${branch ? `<span class="foot-item">${icon('branch', '#98a2b3', 14)}<span class="mono">${esc(branch)}</span></span>` : ''}
+      <span class="rough-note">from the working tree, not a published claim</span>
+    </div>
+  </div>`;
+}
+
 function completedRow(c, now) {
   const refs = [
     ...c.prs.map((p) => `<span class="ref-chip">${esc(p)}</span>`),
@@ -513,8 +554,8 @@ function completedRow(c, now) {
   return `<div class="done-row">
     <span style="color:#7c3aed;flex:0 0 auto">${icon('check', '#0e9f6e', 16)}</span>
     <div class="done-body">
-      <div class="done-title">${esc(c.intent)}</div>
-      <div class="done-sub">${esc(c.developer || c.agent)}${c.summary ? ` · ${esc(c.summary)}` : ''}</div>
+      <div class="done-title" title="${esc(c.intent)}">${esc(c.intent)}</div>
+      <div class="done-sub" title="${esc(c.summary || '')}">${esc(c.developer || c.agent)}${c.summary ? ` · ${esc(c.summary)}` : ''}</div>
     </div>
     ${refs ? `<div class="done-refs">${refs}</div>` : ''}
     <span class="done-when">${ago(c.completedAt || c.updatedAt, now)} ago</span>
@@ -587,14 +628,18 @@ function renderProject() {
   return `<div class="view-project">${head}<div class="tabs">${tabs}</div>${body}</div>`;
 }
 
+const DONE_PREVIEW = 4;
+
 function renderNowTab(ps, now, pid) {
   const sessionsById = new Map(ps.sessions.map((s) => [s.id, s]));
 
-  const claimsHtml = ps.claims.length
-    ? ps.claims.map((c) => claimCard(c, sessionsById, ps.conflicts, now)).join('')
-    : emptyCard(ps.sessions.length
-      ? 'Sessions are live but nothing is claimed. Agents should claim work before editing.'
-      : `No active sessions.${ps.events.length ? ` Last activity ${ago(ps.events[0].at, now)} ago.` : ''}`);
+  const claimed = new Set(ps.claims.map((c) => c.sessionId));
+  const roughHtml = ps.sessions.filter((s) => !claimed.has(s.id))
+    .map((s) => roughClaimCard(s, now)).join('');
+
+  const claimsHtml = ps.claims.length || roughHtml
+    ? ps.claims.map((c) => claimCard(c, sessionsById, ps.conflicts, now)).join('') + roughHtml
+    : emptyCard(`No active sessions.${ps.events.length ? ` Last activity ${ago(ps.events[0].at, now)} ago.` : ''}`);
 
   const conflictsHtml = ps.conflicts.length
     ? `<div class="col-head"><span class="col-head-label">Possible conflicts</span>
@@ -602,10 +647,19 @@ function renderNowTab(ps, now, pid) {
        ${ps.conflicts.map(conflictCard).join('')}`
     : '';
 
+  /* History, not news: twenty finished claims with paragraph-long summaries
+     pushed the live half of this page off the screen. Show the newest few and
+     keep the rest one click away. */
+  const shownDone = state.allCompleted ? ps.completed : ps.completed.slice(0, DONE_PREVIEW);
+  const restDone = ps.completed.length - shownDone.length;
   const completedHtml = `<div class="panel">
     <div class="panel-head">Completed work<span class="panel-count">${ps.completed.length}</span></div>
     <div class="panel-body">${ps.completed.length
-      ? ps.completed.map((c) => completedRow(c, now)).join('')
+      ? shownDone.map((c) => completedRow(c, now)).join('')
+        + (restDone || state.allCompleted
+          ? `<button class="user-act-btn done-more" type="button" data-donemore="1"
+              >${restDone ? `Show ${restDone} older` : 'Show less'}</button>`
+          : '')
       : '<div class="empty-inline">Nothing completed yet.</div>'}</div>
   </div>`;
 
@@ -1612,6 +1666,12 @@ document.addEventListener('click', async (e) => {
     if (!arm(`rv-${id}`)) return; // first click arms, second confirms
     await send('DELETE', `/api/auth/credentials/${encodeURIComponent(id)}`);
     refresh();
+    return;
+  }
+
+  if (e.target.closest('[data-donemore]')) {
+    state.allCompleted = !state.allCompleted;
+    render();
     return;
   }
 

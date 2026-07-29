@@ -204,6 +204,30 @@ test('projects list includes summaries', async () => {
   assert.ok(Array.isArray(p.agents));
 });
 
+/* The resume path over the real routes: the claim is authorized against the
+   caller, so an agent whose MCP process was recycled can still finish it, and
+   the response says what the server had to do. */
+test('a claim survives its session and is adopted by the next one', async () => {
+  const first = (await post(`${P}/sessions`, { agent: 'agent-resume', worktree: 'wt-resume' })).body;
+  const claim = (await post(`${P}/claims`, {
+    sessionId: first.id, intent: 'work that outlives its session', files: ['src/resume.ts'],
+  })).body.claim;
+  assert.equal((await app.request(`${P}/sessions/${first.id}`, {
+    method: 'DELETE', headers: { ...auth(), 'x-mediation-session': capabilities.get(first.id)! },
+  })).status, 200);
+
+  const second = (await post(`${P}/sessions`, { agent: 'agent-resume', worktree: 'wt-resume' })).body;
+  claimCapabilities.set(claim.id, second.capability);
+  const done = await post(`${P}/claims/${claim.id}/complete`, { commits: ['c0ffee1'] });
+  assert.equal(done.status, 200);
+  assert.match(done.body.note, /previous session had ended/);
+  assert.equal(done.body.sessionId, second.id);
+
+  const state = (await get(`${P}/state?sessionId=${second.id}`)).body;
+  assert.ok(state.completed.some((c: { id: string }) => c.id === claim.id),
+    'the work still lands in the history it earned');
+});
+
 test('404s: unknown session, claim, bug, route', async () => {
   const s = await post(`${P}/sessions/nope/heartbeat`, {});
   assert.equal(s.status, 404);

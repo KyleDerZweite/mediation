@@ -149,15 +149,21 @@ test('listProjects summarizes sessions, claims, bugs, conflicts', () => {
   assert.ok(summary.lastActivityAt);
 });
 
-test('sessions expire without heartbeat; claims expire with them', async () => {
+// A session dying is a transport event: the harness recycles the MCP client
+// freely, and the work is still in the working tree. Deleting the claim with it
+// left live work uncovered by the overlap engine, which only widens CLAIMS by
+// dirty files, so a session holding none contributes nothing to any check.
+test('sessions expire without heartbeat; their claims stand until they expire themselves', async () => {
   const Q = 'expiry-project';
   const a = store.startSession(Q, { agent: 'agent-k' });
   store.createClaim(Q, mkClaim({ sessionId: a.id, intent: 'temporary work', files: ['tmp.js'] }));
   await new Promise((r) => setTimeout(r, 1100));
   const state = store.getState(Q); // getState triggers sweep
   assert.equal(state.sessions.length, 0);
-  assert.equal(state.claims.length, 0);
+  assert.equal(state.claims.length, 1, 'the claim outlives the session that made it');
+  assert.equal(state.claims[0].intent, 'temporary work');
   assert.ok(state.events.some((e) => e.message.includes('session expired')));
+  assert.ok(state.events.some((e) => e.message.includes('unattended')));
 });
 
 test('idle non-done claims expire; done claims survive sweep', async () => {
@@ -175,7 +181,7 @@ test('idle non-done claims expire; done claims survive sweep', async () => {
   idleStore.close();
 });
 
-test('endSession releases claims but keeps completed ones', () => {
+test('endSession leaves the claim standing so the agent can resume it', () => {
   const Q = 'release-project';
   const a = store.startSession(Q, { agent: 'agent-l' });
   const { claim: done } = store.createClaim(Q, mkClaim({ sessionId: a.id, intent: 'finished thing' }));
@@ -184,8 +190,119 @@ test('endSession releases claims but keeps completed ones', () => {
   store.endSession(Q, a.id);
   const state = store.getState(Q);
   assert.equal(state.sessions.length, 0);
-  assert.equal(state.claims.length, 0);
+  assert.equal(state.claims.length, 1);
+  assert.equal(state.claims[0].intent, 'some work');
   assert.equal(state.completed.length, 1);
+});
+
+/* The resume path. An agent whose MCP process was recycled comes back with a
+   new session and the old claimId still in its context; the claim is handed
+   over on the identity the server set, never on the client-declared worktree
+   alone. */
+test('a new session of the same developer and worktree adopts an orphaned claim', () => {
+  const s = new Store({ dbPath: ':memory:' });
+  const Q = 'adopt';
+  const first = s.startSession(Q, { agent: 'claude-code', developer: 'Kyle', worktree: 'w1' }, 'cap-one');
+  const { claim } = s.createClaim(Q, mkClaim({ sessionId: first.id, intent: 'ship the thing', files: ['src/a.ts'] }));
+  s.endSession(Q, first.id);
+
+  const second = s.startSession(Q, { agent: 'claude-code', developer: 'Kyle', worktree: 'w1' }, 'cap-two');
+  const { note } = s.authorizeClaimTouch(Q, claim.id, 'cap-two', 'complete');
+  assert.match(note!, /previous session had ended/);
+  const finished = s.completeClaim(Q, claim.id, claimComplete.parse({ commits: ['abc1234'] }));
+  assert.equal(finished.sessionId, second.id, 'the claim now belongs to the live session');
+  assert.deepEqual(s.getState(Q).completed.map((c) => c.intent), ['ship the thing']);
+  s.close();
+});
+
+// The worktree is client-declared and every member can read it out of the
+// project state, so it narrows to the right checkout and never authorizes.
+test('a stranger cannot take over an orphaned claim', () => {
+  const s = new Store({ dbPath: ':memory:' });
+  const Q = 'steal';
+  const mine = s.startSession(Q, { agent: 'claude-code', developer: 'Kyle', worktree: 'w1' }, 'cap-mine');
+  const { claim } = s.createClaim(Q, mkClaim({ sessionId: mine.id, intent: 'my work', files: ['src/a.ts'] }));
+  s.endSession(Q, mine.id);
+  s.startSession(Q, { agent: 'codex', developer: 'Someone Else', worktree: 'w1' }, 'cap-theirs');
+
+  assert.throws(() => s.authorizeClaimTouch(Q, claim.id, 'cap-theirs', 'patch'),
+    (err: Error & { statusCode?: number }) => {
+      assert.equal(err.statusCode, 403);
+      assert.match(err.message, /cannot be taken over/);
+      assert.match(err.message, /mediation_claim/, 'a refusal must still name the way forward');
+      return true;
+    });
+  s.close();
+});
+
+test('an expired claim is revived by its own agent, not lost', async () => {
+  const s = new Store({ dbPath: ':memory:', sessionTtlMs: 60_000, claimIdleTtlMs: 50 });
+  const Q = 'revive';
+  const a = s.startSession(Q, { agent: 'claude-code', developer: 'Kyle', worktree: 'w1' }, 'cap-a');
+  const { claim } = s.createClaim(Q, mkClaim({ sessionId: a.id, intent: 'long job', files: ['src/a.ts'] }));
+  await new Promise((r) => setTimeout(r, 80));
+  s.sweep();
+  assert.equal(s.getState(Q).claims.length, 0, 'an expired claim stops warning anyone');
+
+  const { note } = s.authorizeClaimTouch(Q, claim.id, 'cap-a', 'patch');
+  assert.match(note!, /had expired/);
+  assert.match(note!, /live again/);
+  const revived = s.updateClaim(Q, claim.id, claimPatch.parse({ finding: 'still on it' }));
+  assert.equal(revived.status, 'in-progress');
+  assert.equal(s.getState(Q).claims.length, 1);
+  s.close();
+});
+
+// Losing finished work from the history because a process restarted is worse
+// than a strict error, and the commits are verifiable in Git either way.
+test('an expired claim can still be completed with its commits', async () => {
+  const s = new Store({ dbPath: ':memory:', sessionTtlMs: 60_000, claimIdleTtlMs: 50 });
+  const Q = 'late-finish';
+  const a = s.startSession(Q, { agent: 'claude-code', developer: 'Kyle', worktree: 'w1' }, 'cap-a');
+  const { claim } = s.createClaim(Q, mkClaim({ sessionId: a.id, intent: 'the work', files: ['src/a.ts'] }));
+  await new Promise((r) => setTimeout(r, 80));
+  s.sweep();
+
+  s.authorizeClaimTouch(Q, claim.id, 'cap-a', 'complete');
+  s.completeClaim(Q, claim.id, claimComplete.parse({ commits: ['deadbee'], summary: 'landed' }));
+  const state = s.getState(Q);
+  assert.equal(state.completed.length, 1);
+  assert.deepEqual(state.completed[0].commits, ['deadbee']);
+  s.close();
+});
+
+// A resumed agent replaying its last step must not enter the history twice.
+test('completing an already completed claim merges instead of duplicating', () => {
+  const s = new Store({ dbPath: ':memory:' });
+  const Q = 'replay';
+  const a = s.startSession(Q, { agent: 'claude-code', developer: 'Kyle', worktree: 'w1' }, 'cap-a');
+  const { claim } = s.createClaim(Q, mkClaim({ sessionId: a.id, intent: 'the work' }));
+  s.completeClaim(Q, claim.id, claimComplete.parse({ commits: ['aaa1111'] }));
+  const { note } = s.authorizeClaimTouch(Q, claim.id, 'cap-a', 'complete');
+  assert.match(note!, /already completed/);
+  s.completeClaim(Q, claim.id, claimComplete.parse({ commits: ['bbb2222'] }));
+
+  const state = s.getState(Q);
+  assert.equal(state.completed.length, 1, 'one piece of work, one history entry');
+  assert.deepEqual(state.completed[0].commits, ['aaa1111', 'bbb2222']);
+  assert.equal(state.events.filter((e) => e.type === 'completed').length, 1);
+  s.close();
+});
+
+test('a completed claim cannot be reopened, and the refusal says what to do', () => {
+  const s = new Store({ dbPath: ':memory:' });
+  const Q = 'reopen';
+  const a = s.startSession(Q, { agent: 'claude-code', developer: 'Kyle', worktree: 'w1' }, 'cap-a');
+  const { claim } = s.createClaim(Q, mkClaim({ sessionId: a.id, intent: 'the work' }));
+  s.completeClaim(Q, claim.id, claimComplete.parse({ commits: ['aaa1111'] }));
+  assert.throws(() => s.authorizeClaimTouch(Q, claim.id, 'cap-a', 'patch'),
+    (err: Error & { statusCode?: number }) => {
+      assert.equal(err.statusCode, 409);
+      assert.match(err.message, /cannot be reopened/);
+      assert.match(err.message, /mediation_claim \{intent, files\}/);
+      return true;
+    });
+  s.close();
 });
 
 test('unknown session/claim/bug ids produce 404 errors', () => {
@@ -195,7 +312,7 @@ test('unknown session/claim/bug ids produce 404 errors', () => {
     return true;
   };
   assert.throws(() => store.heartbeat(P, 'nope', {}), is404(/session not found/));
-  assert.throws(() => store.updateClaim(P, 'nope', {}), is404(/claim not found/));
+  assert.throws(() => store.updateClaim(P, 'nope', {}), is404(/no claim with this id exists/));
   assert.throws(() => store.updateBug(P, 'nope', {}), is404(/bug not found/));
   assert.throws(() => store.endSession(P, 'nope'), is404(/session not found/));
 });
@@ -348,17 +465,19 @@ test('blockedOn tells the blocker someone waits, and the waiter when it clears',
   s.close();
 });
 
-// A claim row is DELETED when its session dies. Findings used to die with it,
-// which made them useless as the shared record Mediation asks agents to build.
+// Findings used to die with the claim row, which made them useless as the
+// shared record Mediation asks agents to build. They now survive every way a
+// claim can end: abandoned, expired, released, or its session simply vanishing.
 test('findings outlive the claim they were recorded on', () => {
   const s = new Store({ dbPath: ':memory:' });
   const a = s.startSession('durable', { agent: 'agent-a' });
   const { claim } = s.createClaim('durable', mkClaim({ sessionId: a.id, intent: 'investigate', files: ['src/x.ts'] }));
   s.updateClaim('durable', claim.id, claimPatch.parse({ finding: 'the parser eats CRLF' }));
+  s.completeClaim('durable', claim.id, claimComplete.parse({ status: 'abandoned' }));
   s.endSession('durable', a.id);
 
   const state = s.getState('durable');
-  assert.equal(state.claims.length, 0, 'the claim itself is released');
+  assert.equal(state.claims.length, 0, 'the claim itself is gone');
   assert.ok(state.events.some((e) => e.type === 'finding' && /eats CRLF/.test(e.message)),
     'what the agent learned must survive the claim it was learned under');
   s.close();
@@ -398,7 +517,9 @@ test('a waiter is released when the claim it waits on vanishes with its session'
   const forWaiter = s.newsFor('vanish', b.id);
   assert.equal(forWaiter.length, 1);
   assert.equal(forWaiter[0].reason, 'unblocked');
-  assert.match(forWaiter[0].message, /gone \(ended by agent\)/);
+  // The claim now stands unattended instead of vanishing, but the waiter is
+  // still let go: the agent that disappeared mid-block may never come back.
+  assert.match(forWaiter[0].message, /unattended \(ended by agent\)/);
   assert.equal(s.getState('vanish').claims.find((c) => c.sessionId === b.id)?.blockedOn, null);
   s.close();
 });

@@ -1,6 +1,6 @@
 ---
 name: mediation
-description: Coordinate work through the Mediation live-coordination server so you never duplicate another developer's or agent's in-flight work. In a repository already initialized with .mediation.json, use BEFORE coding or delegating, while working, and when finishing. Never initialize a repository unless the user explicitly asks to set up or connect Mediation.
+description: Coordinate work through the Mediation live-coordination server so you never duplicate another developer's or agent's in-flight work. Use at the START of every coding task whenever the mediation_* tools are available: it gives the one-step check for whether this repository coordinates, and how to claim work before editing, while working, and when finishing. Never initialize a repository unless the user explicitly asks to set up or connect Mediation.
 ---
 
 # Mediation: live work coordination
@@ -13,7 +13,14 @@ let the user decide.
 ## Activation boundary
 
 In a repository that contains `.mediation.json`, this workflow is required for
-every coding task, including work delegated to subagents.
+every coding task, including work you delegate.
+
+**Settle whether this repository coordinates at the start of the task, not
+after your first edit.**
+`.mediation.json` is usually gitignored, so it never appears in `git status`
+and a fresh clone or worktree may not have it yet. Look for the file itself at
+the repository root, or call `mediation_state`, which reports the directory it
+resolved and whether that directory is initialized.
 
 If `.mediation.json` is absent, do not call `mediation_init`, create a mapping,
 or otherwise initialize Mediation unless the user explicitly asks to set up or
@@ -62,7 +69,10 @@ Only when the user explicitly asks to set up or connect Mediation and
    is the push target.
 2. State the resolved repository and its source to the user in your reply.
    `.mediation.json` records only the server/repository mapping; it contains no
-   secret and no model-selected project id.
+   secret and no model-selected project id. Keep it out of Git anyway: the
+   mapping is per-checkout, and a shared one would bind every clone to one
+   person's server and break in any fork, whose push target is different. A
+   fresh clone starting uninitialized is the design, not a mistake to correct.
 
 `mediation_state` reports the directory it resolved. If that is not the
 project you are working in (some harnesses start MCP servers elsewhere), pass
@@ -81,15 +91,21 @@ One tool, `mediation_claim`, covers the whole life of a piece of work. Claiming
 is also how you check: the response carries the same overlap warnings a
 separate look-first call would have, so there is nothing to call before it.
 
-1. **Before you touch a file**: `mediation_claim` with intent, files,
-   components, task reference and branch. Keep the returned `claimId`. If it
-   warns about overlap: tell the user who is already on it and what they found,
-   then stop, narrow scope, or continue only if the user (or the situation
-   clearly) says so. If you stop, call
+1. **Before you touch a file**: `mediation_claim` with `intent`. That is the
+   only required field. Claim rough and claim early, then refine `files`,
+   `components`, `task` and `branch` through the same `claimId` as the scope
+   becomes clear; do not wait until you know your file list. Keep the returned
+   `claimId`. If it warns about overlap: tell the user who is on it already and
+   what they found, then stop, narrow scope, or continue only if the user (or
+   the situation clearly) says so. If you stop, call
    `mediation_claim {claimId, status: "abandoned"}` so your claim stops warning
    everyone else about work you are not doing.
    Use `dryRun: true` only when you truly must look without publishing. Prefer
    publishing: an agent nobody can see is the problem this server exists to fix.
+   Work you delegate is claimed too: a subagent inside your own harness shares
+   this session and may reuse your `claimId`, while a separately launched agent
+   has its own session and files its own claim. Only the session that created a
+   claim can update it.
 2. **While working**: same tool, same `claimId`. Push important discoveries with
    `finding`, and add `findingFiles` so it reaches the agents working on those
    files (`findingKind` is one of `root-cause`, `gotcha`, `decision`,
@@ -116,6 +132,16 @@ separate look-first call would have, so there is nothing to call before it.
    nobody duplicates the fix; `open` reopens it.
 6. **When done**: `mediation_claim {claimId, status: "done", commits, summary}`
    with the real commit SHAs after committing.
+
+**Already editing and never claimed?** Claim now with whatever you know and
+continue the rest of this workflow. A late claim still prevents the next
+collision; missing the start is not a reason to skip the remainder.
+
+**Resuming with an old `claimId`?** Use it normally. The server re-attaches it
+to your new session, or revives it if it had expired, and tells you what that
+was; work that finished can still be completed with its commits. Only if it
+answers that no claim with that id exists, claim again and finish there. A
+stale id is never a reason to stop coordinating.
 
 ## News
 
