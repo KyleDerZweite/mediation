@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.5.1: surviving broken IPv6
+
+A network that advertises IPv6 it cannot reach made ~25% of MCP client
+requests fail with an unretried `ETIMEDOUT` (#1): Node's Happy Eyeballs
+abandons each connect attempt after 250ms, which real Cloudflare TCP connects
+exceed under load, so both IPv4 fallback attempts were aborted while a plain
+socket to the same address connected in 40ms.
+
+- The client raises the attempt timeout to 2s at load — RFC 8305's ceiling for
+  this delay, and measured 20/20 against 15/20 at the default.
+- Connect-phase failures (`ETIMEDOUT`, `ENETUNREACH`, `EHOSTUNREACH`,
+  `EAI_AGAIN`, `UND_ERR_CONNECT_TIMEOUT`) are now retried once, like the
+  socket-death codes already were. They fail before a byte is written, so the
+  retry cannot duplicate a write. `ECONNREFUSED` and `ENOTFOUND` stay
+  unretried: those are answers, not accidents.
+- A request that exhausts its 5s budget is no longer reported as "mediation
+  server unreachable". The server may be fine and the write may even have been
+  recorded — the server has no idempotency key, so the client does not repeat
+  it and the message now says to check `mediation_state` first. Only a refused
+  connection or an unresolvable name still reads as unreachable.
+
 ## 0.5.0: five tools, and news that finds you
 
 **Eleven MCP tools became five.** Every tool description is context an agent

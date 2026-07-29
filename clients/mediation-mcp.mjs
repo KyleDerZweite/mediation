@@ -12,6 +12,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { setDefaultAutoSelectFamilyAttemptTimeout } from 'node:net';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -271,6 +272,21 @@ function repoReport() {
 
 /* ---------------- http ---------------- */
 
+/* Happy Eyeballs, sized for the real internet instead of a lab. Node races a
+   host's AAAA and A addresses and abandons each attempt after 250ms by
+   default. On a network that advertises IPv6 it cannot reach, both AAAA fail
+   instantly and a Cloudflare TCP connect that spikes past 250ms is abandoned
+   too, so fetch fails ETIMEDOUT while a plain socket to the same address
+   connects in 40ms: measured 5 failures in 20 requests at 250ms, 0 in 20 at
+   2s. 2s is the most RFC 8305 allows for this delay, so it is the ceiling,
+   not a guess, and it still leaves ~3s of the request budget below for the
+   fallback family. Process-global on purpose: this process is one MCP client
+   talking to one server, and undici is not importable to scope it narrower. */
+setDefaultAutoSelectFamilyAttemptTimeout(2000);
+
+// One request budget, shared by api()'s AbortSignal and renderError's wording.
+const TIMEOUT_MS = 5000;
+
 let session = null; // { id, capability, project, heartbeat }; never persisted
 let sessionPromise = null;
 let authMode = null;
@@ -280,12 +296,29 @@ let authMode = null;
 // the session. /api/health reports the real TTL; this is the fallback.
 let heartbeatMs = 60_000;
 
-// Connection-level failures where the request may never have reached the
-// server: typically a pooled keep-alive socket the edge (Cloudflare) already
-// closed. undici surfaces these as a bare "fetch failed" TypeError and never
-// retries a request with a body, so one immediate retry on a fresh socket is
-// ours to do. Worst case is a rare duplicate write, better than a lost one.
-const RETRYABLE_CAUSES = new Set(['ECONNRESET', 'EPIPE', 'UND_ERR_SOCKET']);
+// Connection-level failures where the request never (or may never have)
+// reached the server: a pooled keep-alive socket the edge (Cloudflare) already
+// closed, or a connection that never completed at all. undici surfaces both as
+// a bare "fetch failed" TypeError and never retries a request with a body, so
+// one immediate retry on a fresh socket is ours to do. For the socket-death
+// codes the worst case is a rare duplicate write, better than a lost one; the
+// connect-phase codes fail before a byte is written, so they cannot duplicate.
+// ECONNREFUSED and ENOTFOUND stay out deliberately: those are answers, not
+// accidents, and repeating them only doubles the wait before the human is
+// told the server is down. The 5s TimeoutError stays out too: that request
+// may have been executed, and the server has no idempotency key on writes.
+const RETRYABLE_CAUSES = new Set([
+  'ECONNRESET', 'EPIPE', 'UND_ERR_SOCKET', // socket died mid-request
+  'ETIMEDOUT', 'ENETUNREACH', 'EHOSTUNREACH', 'EAI_AGAIN', // never connected
+  'UND_ERR_CONNECT_TIMEOUT',
+]);
+
+// undici buries the real error one or two levels down, and a Happy Eyeballs
+// failure puts an AggregateError there whose `code` is its FIRST attempt's —
+// which is why the unreachable-family codes sit next to the timeout above: on
+// one machine the AAAA attempt fails ENETUNREACH first, on another the A
+// attempt times out.
+const causeCode = (error) => error.cause?.code || error.cause?.cause?.code;
 
 async function api(method, apiPath, body, { auth = true, sessionCapability = session?.capability } = {}) {
   const credential = readCredentials();
@@ -299,12 +332,15 @@ async function api(method, apiPath, body, { auth = true, sessionCapability = ses
         method,
         headers,
         body: body === undefined ? undefined : JSON.stringify(body),
-        signal: AbortSignal.timeout(5000),
+        signal: AbortSignal.timeout(TIMEOUT_MS),
       });
     } catch (error) {
-      const code = error.cause?.code || error.cause?.cause?.code;
+      const code = causeCode(error);
       if (attempt === 0 && RETRYABLE_CAUSES.has(code)) continue;
+      // Only when there is a code: the timeout error is a DOMException whose
+      // message is a getter with no setter, so assigning to it throws.
       if (code) error.message = `${error.message} (${code}) on ${method} ${apiPath}`;
+      else error.endpoint = `${method} ${apiPath}`; // so renderError can name the call
       throw error;
     }
     const data = await res.json().catch(() => ({}));
@@ -468,8 +504,19 @@ const ago = (ts) => {
 // through verbatim and stop the agent from retrying its way around them.
 function renderError(err) {
   const out = [`error: ${err.message}`];
+  const code = causeCode(err);
   if (err.status === 401) out.push('(device credential is missing, invalid, or revoked. Run mediation_setup again)');
-  else if (err.name === 'TimeoutError' || err.cause?.code === 'ECONNREFUSED') out.push(`(mediation server ${SERVER} unreachable)`);
+  // A refusal or an unresolvable name is the only evidence the server is not
+  // there. A timeout is not: on a slow network it says nothing about the
+  // server, and the request may even have been executed. Anything else
+  // connection-level survived a retry, so it is the path, not the peer.
+  else if (code === 'ECONNREFUSED' || code === 'ENOTFOUND') out.push(`(mediation server ${SERVER} unreachable)`);
+  else if (err.name === 'TimeoutError') {
+    out.push(`(no answer from ${SERVER} within ${TIMEOUT_MS / 1000}s${err.endpoint ? ` on ${err.endpoint}` : ''}: `
+      + 'slow network or slow server, not necessarily a down one. A write may still have been recorded, '
+      + 'so check mediation_state before repeating it)');
+  }
+  else if (code) out.push(`(the network path to ${SERVER} failed; the server itself may be fine)`);
   if (err.hint) {
     out.push(`\nNEXT STEP, tell your user verbatim: ${err.hint}`);
     if (err.status === 403) {

@@ -8,7 +8,8 @@ import { createServer, type Server } from 'node:http';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const PROJECT_ID = '0f9a2f5c-1111-2222-3333-444455556666';
 const ISSUE = 'https://github.com/acme/widgets/issues/12';
@@ -36,6 +37,8 @@ let stubIssueUrl: string | null = ISSUE; // what the stub says a patched bug is 
 // to /check because stray heartbeats from a dying child of an earlier test
 // would otherwise absorb the destruction (their failures are tolerated).
 let destroyCheckSockets = 0;
+// Never answer /check requests, so the client's own request budget expires.
+let hangCheck = false;
 
 before(async () => {
   server = createServer((req, res) => {
@@ -44,6 +47,7 @@ before(async () => {
       destroyCheckSockets -= 1;
       return req.socket.destroy();
     }
+    if (hangCheck && req.url?.includes('/check')) return;
     const send = (body: unknown, status = 200) => {
       res.writeHead(status, { 'content-type': 'application/json' });
       res.end(JSON.stringify(body));
@@ -486,5 +490,108 @@ test('a persistent connection failure names the socket error, not bare "fetch fa
     assert.match(out, /error: fetch failed \((ECONNRESET|EPIPE|UND_ERR_SOCKET)\) on GET \/api\/projects\/[0-9a-f-]+\/check/);
   } finally {
     destroyCheckSockets = 0;
+  }
+});
+
+// A repo and credential store bound to an origin other than the stub's, for
+// tests that need the client to talk to a dead or unroutable server.
+function repoFor(server: string): { dir: string, home: string, drop: () => void } {
+  const dir = mkdtempSync(join(tmpdir(), 'mediation-mcp-repo2-'));
+  const g = (...args: string[]) => spawnSync('git', args, { cwd: dir, stdio: 'ignore' });
+  g('init', '-b', 'main');
+  g('remote', 'add', 'origin', 'https://github.com/acme/widgets.git');
+  writeFileSync(join(dir, '.mediation.json'), JSON.stringify({
+    server, repository: { owner: 'acme', repository: 'widgets' },
+  }));
+  const home = mkdtempSync(join(tmpdir(), 'mediation-mcp-auth2-'));
+  writeFileSync(join(home, 'credentials.json'),
+    JSON.stringify({ [server]: { token: 'device-token', username: 'gh-acme' } }));
+  return { dir, home, drop: () => { rmSync(dir, { recursive: true, force: true }); rmSync(home, { recursive: true, force: true }); } };
+}
+
+// A local port that nothing listens on: bind, read the number, close.
+async function deadPort(): Promise<number> {
+  const srv = createServer();
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
+  const port = (srv.address() as { port: number }).port;
+  await new Promise<void>((r) => srv.close(() => r()));
+  return port;
+}
+
+// Node's Happy Eyeballs abandons each connect attempt after 250ms by default.
+// On a network advertising IPv6 it cannot reach, every request rides the IPv4
+// fallback, and a Cloudflare TCP connect that spikes past 250ms fails the
+// whole fetch with ETIMEDOUT (measured: 5 of 20 requests). The client must
+// raise the attempt timeout at load, before any fetch.
+test('the client widens the Happy Eyeballs attempt timeout at load', () => {
+  const probe = `import { getDefaultAutoSelectFamilyAttemptTimeout } from 'node:net';
+    await import(${JSON.stringify(pathToFileURL(resolve(CLIENT)).href)});
+    console.log(getDefaultAutoSelectFamilyAttemptTimeout());
+    process.exit(0);`;
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', probe],
+    { env: { ...process.env, MEDIATION_URL: origin }, encoding: 'utf8' as const, input: '', timeout: 10_000 });
+  assert.equal(r.stdout.trim(), '2000');
+});
+
+// The request budget expiring says nothing about the server, and the request
+// may even have been executed: the server has no idempotency key on writes,
+// so repeating it can duplicate one. Not retried, not reported as a down
+// server — the agent is told to check mediation_state instead.
+test('a timed-out request reads as slow, not unreachable, and is never sent twice', async () => {
+  hangCheck = true;
+  seen.length = 0;
+  try {
+    const out = await callTool('mediation_claim', { files: ['src/app.ts'], intent: 'slow', dryRun: true });
+    assert.match(out, /no answer from .+ within 5s on GET \/api\/projects\/[0-9a-f-]+\/check/);
+    assert.doesNotMatch(out, /unreachable/);
+    assert.equal(seen.filter((s) => s.includes('/check')).length, 1, 'a timed-out request must not be repeated');
+  } finally {
+    hangCheck = false;
+  }
+});
+
+// A refusal is an answer, not an accident: nothing listens there. It is the
+// one code (with ENOTFOUND) that keeps the "unreachable" verdict, and
+// retrying it would only double the wait before the human is told.
+test('a refused connection still reads as unreachable and fails fast', async () => {
+  const dead = `http://127.0.0.1:${await deadPort()}`;
+  const bound = repoFor(dead);
+  try {
+    const started = Date.now();
+    const out = await callTool('mediation_state', {},
+      { MEDIATION_URL: dead, MEDIATION_DIR: bound.dir, MEDIATION_AUTH_HOME: bound.home });
+    assert.match(out, /\(ECONNREFUSED\) on GET \/api\/health/);
+    assert.match(out, /unreachable/);
+    assert.ok(Date.now() - started < 5000, 'a refusal must fail fast, not burn retries or timeouts');
+  } finally {
+    bound.drop();
+  }
+});
+
+// The real-world failure shape end to end: the first address black-holes, so
+// Happy Eyeballs abandons it and falls through to a refused local port, and
+// fetch fails with an AggregateError whose code is the FIRST attempt's. That
+// is a path failure the server never saw: retried, and never called a down
+// server. (A sandbox with no default route fails the first address instantly
+// with ENETUNREACH instead — same classification, hence the alternation.)
+test('a connect-phase timeout is a retried path failure, not a down server', async () => {
+  const bh = `http://blackhole.invalid:${await deadPort()}`;
+  const bound = repoFor(bh);
+  try {
+    const started = Date.now();
+    const out = await callTool('mediation_state', {}, {
+      MEDIATION_URL: bh, MEDIATION_DIR: bound.dir, MEDIATION_AUTH_HOME: bound.home,
+      NODE_OPTIONS: `--import ${pathToFileURL(resolve('test/dns-blackhole.mjs')).href}`,
+    });
+    assert.match(out, /\((ETIMEDOUT|ENETUNREACH|EHOSTUNREACH)\) on GET \/api\/health/);
+    assert.match(out, /server itself may be fine/);
+    assert.doesNotMatch(out, /unreachable\)/);
+    // Two attempts of ~2s each when the first address truly black-holes; the
+    // guard exists because the instant-ENETUNREACH sandbox has no such floor.
+    if (/ETIMEDOUT/.test(out)) {
+      assert.ok(Date.now() - started >= 3500, 'expected the timed-out connect to be retried once');
+    }
+  } finally {
+    bound.drop();
   }
 });

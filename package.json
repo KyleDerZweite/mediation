@@ -1,6 +1,6 @@
 {
   "name": "mediation",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "private": true,
   "description": "Live coordination service for developers and coding agents. See overlapping work before Git makes it visible.",
   "type": "module",
