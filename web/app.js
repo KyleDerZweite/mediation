@@ -170,6 +170,7 @@ const state = {
   armed: null,             // key of a destructive button armed for its second click
   allCompleted: false,     // Now tab: completed work expanded past its preview
   menu: null,              // key of the open row menu (role editor / overflow)
+  crewClosed: new Set(),   // logical agent ids collapsed in the live Crew panel
   userFilter: { q: '', role: 'all', status: 'all' },
   activityFilter: { q: '', kind: 'all', agent: 'all', project: 'all' },
   version: '',             // server version, shown in the sidebar footer
@@ -506,6 +507,137 @@ function sessionRow(s, now) {
   </div>`;
 }
 
+function crewSort(a, b) {
+  return (a.startedAt || 0) - (b.startedAt || 0) || String(a.id).localeCompare(String(b.id));
+}
+
+function crewStatus(node, now) {
+  const reported = typeof node.state === 'string' ? node.state.trim().toLowerCase() : '';
+  const claims = node.claims || [];
+  const blocked = reported === 'blocked' || claims.some((c) => c.status === 'blocked');
+  const stale = !node.endedAt && node.stale === true;
+  const raw = blocked ? 'blocked' : stale ? 'stale' : reported || claims[0]?.status || 'unknown';
+  const label = raw.replaceAll('-', ' ').replaceAll('_', ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+  const tone = blocked || ['failed', 'error'].includes(raw) ? 'attention' : stale ? 'stale' : 'normal';
+  return { blocked, stale, label, tone };
+}
+
+function crewRow(node, now) {
+  const status = crewStatus(node, now);
+  const name = node.name || node.harness || 'Unnamed agent';
+  const task = node.task || node.claims[0]?.intent || 'No task reported';
+  const provenance = {
+    'harness-reported': 'Harness-reported', 'environment-reported': 'Environment-reported',
+    harness: 'Harness-reported', environment: 'Environment-reported',
+  }[node.provenance] || '';
+  const reason = typeof node.stateReason === 'string' ? node.stateReason.trim() : '';
+  const identity = [node.developer, node.harness].filter(Boolean).join(' · ');
+  return `<span class="crew-row-content">
+    <span class="avatar" style="width:28px;height:28px;font-size:10px;background:${AVATAR_FALLBACK}">${esc(initials(name))}</span>
+    <span class="crew-body">
+      <span class="crew-name">${esc(name)}${node.role ? `<span class="crew-role">${esc(node.role)}</span>` : ''}${provenance ? `<span class="crew-source">${esc(provenance)}</span>` : ''}</span>
+      <span class="crew-task" title="${esc(task)}">${esc(task)}</span>
+      ${identity ? `<span class="crew-meta">${esc(identity)}</span>` : ''}
+      ${reason ? `<span class="crew-reason">${esc(reason)}</span>` : ''}
+    </span>
+    <span class="crew-state-wrap">
+      ${status.stale
+        ? `<span class="crew-state stale crew-stale">Stale · last reported ${ago(node.updatedAt, now)} ago</span>`
+        : `<span class="crew-state ${status.tone}">${esc(status.label)}</span><span class="sess-ago">${ago(node.updatedAt, now)} ago</span>`}
+    </span>
+  </span>`;
+}
+
+function renderCrewNode(node, now) {
+  if (!node.children.length) return `<div class="crew-row">${crewRow(node, now)}</div>`;
+  return `<details class="crew-branch" data-crew-node="${esc(node.id)}"${state.crewClosed.has(String(node.id)) ? '' : ' open'}>
+    <summary>${crewRow(node, now)}</summary>
+    <div class="crew-children">${node.children.map((child) => renderCrewNode(child, now)).join('')}</div>
+  </details>`;
+}
+
+function renderCrewPanel(agents, sessions, claims, now) {
+  const claimsBySession = new Map();
+  for (const claim of claims) {
+    const list = claimsBySession.get(claim.sessionId) || [];
+    list.push(claim);
+    claimsBySession.set(claim.sessionId, list);
+  }
+  /* `parentId` is server-resolved. Raw harness ids are correlation metadata,
+     not trusted relationships, so this view never joins parentAgentId itself. */
+  const source = agents.length ? agents : sessions.filter((s) => s.runId && s.agentId).map((s) => ({
+    id: s.id,
+    parentId: s.parentId ?? null,
+    harness: s.agent,
+    name: s.agentName,
+    role: s.agentRole,
+    task: s.agentTask,
+    state: s.agentState,
+    stateReason: s.agentStateReason,
+    provenance: s.agentProvenance,
+    sessionId: s.id,
+    developer: s.developer,
+    startedAt: s.createdAt,
+    updatedAt: s.lastSeenAt,
+    endedAt: null,
+    stale: false,
+  }));
+  const nodes = [];
+  const byId = new Map();
+  for (const raw of source) {
+    if (!raw?.id || byId.has(String(raw.id))) continue;
+    const node = { ...raw, id: String(raw.id), claims: claimsBySession.get(raw.sessionId) || [], children: [] };
+    nodes.push(node);
+    byId.set(node.id, node);
+  }
+  if (!nodes.length) return '';
+
+  const roots = [];
+  const unattached = [];
+  const reachesRoot = (node) => {
+    const seen = new Set();
+    let current = node;
+    while (current.parentId != null) {
+      if (seen.has(current.id)) return false;
+      seen.add(current.id);
+      current = byId.get(String(current.parentId));
+      if (!current) return false;
+    }
+    return true;
+  };
+  for (const node of nodes) {
+    if (!reachesRoot(node)) unattached.push(node);
+    else if (node.parentId == null) roots.push(node);
+    else byId.get(String(node.parentId)).children.push(node);
+  }
+  const sortTree = (node) => {
+    node.children.sort(crewSort);
+    node.children.forEach(sortTree);
+  };
+  roots.sort(crewSort).forEach(sortTree);
+  unattached.sort(crewSort);
+
+  const statuses = nodes.map((n) => crewStatus(n, now));
+  const blocked = statuses.filter((s) => s.blocked).length;
+  const stale = statuses.filter((s) => s.stale).length;
+  const metric = (value, label, alert) => `<span class="crew-attention-item${alert ? ' alert' : ''}"><b>${value}</b> ${label}</span>`;
+  const attention = `<div class="crew-attention" aria-label="Crew attention summary">
+    <span class="crew-attention-label">Attention</span>
+    ${metric(blocked, 'blocked', blocked)}${metric(stale, 'stale', stale)}${metric(unattached.length, 'unattached', unattached.length)}
+  </div>`;
+  const tree = roots.map((root) => renderCrewNode(root, now)).join('');
+  const loose = unattached.length ? `<div class="crew-unattached">
+    <div class="crew-unattached-head">Unattached agents <span>${unattached.length}</span></div>
+    ${unattached.map((node) => `<div class="crew-row">${crewRow(node, now)}</div>`).join('')}
+  </div>` : '';
+  const body = `<div class="crew-tree" aria-label="Agent crew lineage">${tree}${loose}</div>`;
+
+  return `<div class="panel crew-panel">
+    <div class="panel-head"><span class="dot dot-ok pulse"></span>Crew<span class="panel-count">${nodes.length}</span></div>
+    <div class="panel-body">${attention}${body}</div>
+  </div>`;
+}
+
 /* A live session that has claimed nothing is exactly the case this server
    exists to catch, and it used to render as one line of advice nobody can act
    on. Git already answers "what is this agent touching": the heartbeat carries
@@ -663,9 +795,15 @@ function renderNowTab(ps, now, pid) {
       : '<div class="empty-inline">Nothing completed yet.</div>'}</div>
   </div>`;
 
+  const crewPanel = renderCrewPanel(Array.isArray(ps.agents) ? ps.agents : [], ps.sessions, ps.claims, now);
+
+  const agentSessionIds = new Set((ps.agents || []).map((a) => a.sessionId).filter(Boolean));
+  const unavailableLineage = ps.sessions.filter((s) => !agentSessionIds.has(s.id) && (!s.runId || !s.agentId));
   const sessionsPanel = `<div class="panel">
     <div class="panel-head"><span class="dot dot-ok pulse"></span>Active sessions<span class="panel-count">${ps.sessions.length}</span></div>
-    <div class="panel-body">${ps.sessions.length
+    <div class="panel-body">${unavailableLineage.length
+      ? `<div class="crew-lineage-note" role="note"><strong>Lineage unavailable</strong><span>${plural(unavailableLineage.length, 'session')} did not report logical agent metadata.</span></div>`
+      : ''}${ps.sessions.length
       ? ps.sessions.map((s) => sessionRow(s, now)).join('')
       : '<div class="empty-inline">No sessions connected right now.</div>'}</div>
   </div>`;
@@ -709,7 +847,7 @@ function renderNowTab(ps, now, pid) {
       ${completedHtml}
     </div>
     <div class="now-col">
-      ${sessionsPanel}
+      ${crewPanel}${sessionsPanel}
       ${filesPanel}
       ${bugsPanel}
     </div>
@@ -1560,6 +1698,13 @@ $('searchIcon').innerHTML = icon('search', '#98a2b3', 15);
 // Delegated listeners: elements are re-created/morphed on every poll, so all
 // feedback goes through `state` + render(), never direct DOM mutation.
 let copiedTimer = null;
+document.addEventListener('toggle', (e) => {
+  const id = e.target?.dataset?.crewNode;
+  if (!id) return;
+  if (e.target.open) state.crewClosed.delete(id);
+  else state.crewClosed.add(id);
+}, true);
+
 document.addEventListener('click', async (e) => {
   const authEl = e.target.closest('[data-auth]');
   if (authEl) {
