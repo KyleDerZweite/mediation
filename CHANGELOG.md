@@ -1,5 +1,46 @@
 # Changelog
 
+## Unreleased: live agent crews
+
+- `GET /api/projects/:p/state` now includes durable logical agent executions.
+  The dashboard groups their server-resolved parent edges into a collapsible
+  Crew tree, highlights blocked, stale, and unattached agents, and falls back
+  to the existing flat sessions when no lineage is available. Claims remain
+  the source of truth for work ownership. Shared state strips raw harness
+  correlation ids. Children whose parent falls outside the bounded preview get
+  `parentOutsidePreview: true` and no dangling `parentId`. The Crew groups them
+  under **Lineage continues outside preview**.
+- `POST /api/projects/:p/agent-events` accepts idempotent lifecycle reports.
+  It requires a device Bearer and uses its owner even when a cookie is present.
+  Exact retries must have identical content. The server rejects changed reuse
+  with 409. `occurredAt` is required. Reports more than five minutes old cannot
+  create an execution and cannot change an existing one. This prevents replay
+  from restoring history after retention. The server bounds future times and
+  derives developer identity, provenance, parent edges, missing-parent state,
+  and stale state.
+- The installer adds fail-open `SessionStart`, `SessionEnd`, `SubagentStart`,
+  and `SubagentStop` hooks for Codex and Claude Code. Codex requires explicit
+  review/trust in `/hooks`. Kimi stays MCP/environment-only.
+- The MCP client accepts optional `MEDIATION_RUN_ID`, agent/parent ids, name,
+  role, task, state, and state-reason variables, with a repository-scoped hash
+  of `CODEX_THREAD_ID` as a run-id-only fallback. Static environment metadata
+  is read at session start, invalid metadata is omitted, and legacy sessions
+  work unchanged.
+- Lifecycle hooks send only stable event identity and role metadata. They do
+  not forward prompts, transcripts, assistant messages, tool I/O, secrets,
+  model/permission data, or local paths, and silently degrade when reporting
+  is unavailable. Each invocation has a unique event id and timestamp, so a
+  later start can resume a completed execution. A child stop no longer reports
+  the root as active.
+- Agent history is bounded. State returns 200 active and 50 recent terminal
+  executions. The server keeps 1,000 unlinked executions per project user plus
+  all session-linked work, and removes seven-day-old terminal or stale unlinked
+  history during lifecycle reports and state reads.
+- At phone widths, the dashboard sidebar becomes an icon rail and the Crew
+  rows stack status and freshness below the agent details. The Crew tree uses
+  a bounded, keyboard-focusable scroll region. Stale is a secondary freshness
+  qualifier, so blocked, needs-input, and failed lifecycle states stay visible.
+
 ## 0.5.1: surviving broken IPv6
 
 A network that advertises IPv6 it cannot reach made ~25% of MCP client

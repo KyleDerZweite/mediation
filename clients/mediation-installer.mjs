@@ -27,6 +27,7 @@ const authRoot = process.env.MEDIATION_AUTH_HOME || (platform === 'win32'
   : path.join(process.env.XDG_CONFIG_HOME || path.join(home, '.config'), 'mediation'));
 const manifestFile = path.join(dataRoot, 'install-manifest.json');
 const clientFile = path.join(dataRoot, 'mediation-mcp.mjs');
+const hookFile = path.join(dataRoot, 'mediation-hook.mjs');
 const skillFile = path.join(dataRoot, 'SKILL.md');
 const selfFile = path.join(dataRoot, 'mediation-installer.mjs');
 const uninstallFile = path.join(dataRoot, platform === 'win32' ? 'uninstall.cmd' : 'uninstall.sh');
@@ -89,6 +90,34 @@ function jsonConfig(file, expected, remove = false, accepted = [expected]) {
   else obj.mcpServers = { ...(obj.mcpServers || {}), mediation: expected };
   return JSON.stringify(obj, null, 2) + '\n';
 }
+const hookEvents = ['SessionStart', 'SessionEnd', 'SubagentStart', 'SubagentStop'];
+function hookJsonConfig(file, command, remove = false, accepted = [command]) {
+  const raw = read(file); let obj = {};
+  if (raw !== undefined) { try { obj = JSON.parse(raw); } catch { fail(`refusing malformed JSON: ${file}`); } }
+  if (!obj || Array.isArray(obj) || typeof obj !== 'object') fail(`refusing non-object JSON: ${file}`);
+  if (obj.hooks !== undefined && (!obj.hooks || Array.isArray(obj.hooks) || typeof obj.hooks !== 'object')) {
+    fail(`refusing invalid hooks: ${file}`);
+  }
+  const hooks = { ...(obj.hooks || {}) };
+  for (const event of hookEvents) {
+    if (hooks[event] !== undefined && !Array.isArray(hooks[event])) fail(`refusing invalid ${event} hooks: ${file}`);
+    const groups = [];
+    for (const group of hooks[event] || []) {
+      if (!group || Array.isArray(group) || typeof group !== 'object' || !Array.isArray(group.hooks)) {
+        fail(`refusing invalid ${event} hook group: ${file}`);
+      }
+      const handlers = group.hooks.filter((handler) => !(handler?.type === 'command'
+        && accepted.includes(handler.command)));
+      if (handlers.length || Object.keys(group).some((key) => key !== 'hooks')) groups.push({ ...group, hooks: handlers });
+    }
+    if (!remove) groups.push({ hooks: [{ type: 'command', command, timeout: 3 }] });
+    if (groups.length) hooks[event] = groups;
+    else delete hooks[event];
+  }
+  if (Object.keys(hooks).length) obj.hooks = hooks;
+  else delete obj.hooks;
+  return JSON.stringify(obj, null, 2) + '\n';
+}
 function tomlConfig(file, expected, remove = false) {
   let text = read(file) || ''; validMarkers(text, marker.toml, file);
   // A non-marker table is owned by another tool/user and must never be replaced.
@@ -99,7 +128,8 @@ function targetPaths(agent) {
   if (agent === 'codex') return [{ file: path.join(process.env.CODEX_HOME || path.join(home, '.codex'), 'config.toml'), kind: 'toml' }, { file: path.join(process.env.CODEX_HOME || path.join(home, '.codex'), 'AGENTS.md'), kind: 'md' }, { skill: path.join(process.env.CODEX_HOME || path.join(home, '.codex'), 'skills', 'mediation', 'SKILL.md') }];
   if (agent === 'claude-code') {
     const dir = process.env.CLAUDE_HOME || path.join(home, '.claude');
-    return [{ file: path.join(dir, 'CLAUDE.md'), kind: 'md' }, { skill: path.join(dir, 'skills', 'mediation', 'SKILL.md') }];
+    return [{ file: path.join(dir, 'CLAUDE.md'), kind: 'md' }, { file: path.join(dir, 'settings.json'), kind: 'claude-hooks' },
+      { skill: path.join(dir, 'skills', 'mediation', 'SKILL.md') }];
   }
   const dir = agent === 'kimi-code' ? (process.env.KIMI_CODE_HOME || path.join(home, '.kimi-code')) : (process.env.KIMI_SHARE_DIR || path.join(home, '.kimi'));
   return [{ file: path.join(dir, 'mcp.json'), kind: 'json' }, { skill: path.join(dir, 'skills', 'mediation', 'SKILL.md') }, ...(agent === 'kimi-code' ? [{ file: path.join(dir, 'AGENTS.md'), kind: 'md' }] : [])];
@@ -121,6 +151,20 @@ function usage() {
 }
 function expected(server, agent) {
   return { command: 'node', args: [clientFile], env: { MEDIATION_URL: server, MEDIATION_HARNESS: agent } };
+}
+const shellQuote = (value) => `"${String(value).replace(/(["\\$`])/g, '\\$1')}"`;
+const windowsQuote = (value) => `"${String(value).replaceAll('"', '""')}"`;
+function hookCommand(server, agent, windows = platform === 'win32') {
+  const quote = windows ? windowsQuote : shellQuote;
+  return `node ${quote(hookFile)} --harness ${agent} --server ${quote(server)}`;
+}
+function codexConfig(server) {
+  const lines = [`[mcp_servers.mediation]`, `command = "node"`, `args = [${JSON.stringify(clientFile)}]`,
+    `env = { MEDIATION_URL = ${JSON.stringify(server)}, MEDIATION_HARNESS = "codex" }`];
+  for (const event of hookEvents) lines.push('', `[[hooks.${event}]]`, `[[hooks.${event}.hooks]]`, 'type = "command"',
+    `command = ${JSON.stringify(hookCommand(server, 'codex', false))}`,
+    `command_windows = ${JSON.stringify(hookCommand(server, 'codex', true))}`, 'timeout = 3');
+  return lines.join('\n');
 }
 function manifest() { try { return JSON.parse(read(manifestFile) || '{}'); } catch { fail(`refusing malformed install manifest: ${manifestFile}`); } }
 function ensureSkill(file, source, prior) {
@@ -160,24 +204,33 @@ async function install(opt) {
   }
   const mcp = await download(`${server}/install/mediation-mcp.mjs`);
   const skill = await download(`${server}/install/SKILL.md`);
+  const nativeHooks = selected.some((agent) => agent === 'codex' || agent === 'claude-code');
+  const hook = nativeHooks ? await download(`${server}/install/mediation-hook.mjs`) : null;
   if (!mcp.includes("serverInfo: { name: 'mediation'") || !skill.includes('name: mediation')) {
     fail('downloaded Mediation client or skill failed validation');
+  }
+  if (hook !== null && !hook.includes('Fail-open lifecycle bridge for Codex and Claude Code')) {
+    fail('downloaded Mediation lifecycle hook failed validation');
   }
   const uninstall = platform === 'win32'
     ? `@echo off\r\nnode "${selfFile}" --uninstall %*\r\n`
     : `#!/usr/bin/env sh\nexec node ${JSON.stringify(selfFile)} --uninstall "$@"\n`;
   const writes = new Map([[clientFile, mcp], [skillFile, skill],
     [selfFile, fs.readFileSync(new URL(import.meta.url), 'utf8')], [uninstallFile, uninstall]]);
+  if (hook !== null) writes.set(hookFile, hook);
   const ownedSkills = new Set(prior.skills || []);
   const configs = new Map((prior.configs || []).map((c) => [c.file, c]));
   for (const agent of selected) for (const t of targetPaths(agent)) {
     if (t.skill) { writes.set(t.skill, ensureSkill(t.skill, skill, prior)); ownedSkills.add(t.skill); continue; }
-    const before = read(t.file) || ''; const body = t.kind === 'toml' ? `[mcp_servers.mediation]\ncommand = "node"\nargs = [${JSON.stringify(clientFile)}]\nenv = { MEDIATION_URL = ${JSON.stringify(server)} }` : usage();
+    const before = read(t.file) || ''; const body = t.kind === 'toml' ? codexConfig(server) : usage();
     const oldAgent = configs.get(t.file)?.agent || agent;
     const oldServer = prior.server || server;
     if (t.kind === 'toml') {
-      const tomlBody = `[mcp_servers.mediation]\ncommand = "node"\nargs = [${JSON.stringify(clientFile)}]\nenv = { MEDIATION_URL = ${JSON.stringify(server)}, MEDIATION_HARNESS = ${JSON.stringify(agent)} }`;
+      const tomlBody = codexConfig(server);
       writes.set(t.file, tomlConfig(t.file, tomlBody));
+    } else if (t.kind === 'claude-hooks') {
+      writes.set(t.file, hookJsonConfig(t.file, hookCommand(server, 'claude-code'), false,
+        [hookCommand(server, 'claude-code'), hookCommand(oldServer, 'claude-code')]));
     } else if (t.kind === 'json') {
       const legacy = { command: 'node', args: [clientFile], env: { MEDIATION_URL: oldServer } };
       writes.set(t.file, jsonConfig(t.file, expected(server, agent), false,
@@ -187,7 +240,7 @@ async function install(opt) {
     }
     configs.set(t.file, { file: t.file, kind: t.kind, agent });
   }
-  const next = { version: 2, server, agents: selected, skills: [...ownedSkills],
+  const next = { version: 3, server, agents: selected, skills: [...ownedSkills],
     skillHashes: Object.fromEntries([...ownedSkills].map((file) => [file, sha256(writes.get(file))])),
     configs: [...configs.values()], claudeMcp: selected.includes('claude-code'), files: [...writes.keys()] };
   writes.set(manifestFile, JSON.stringify(next, null, 2) + '\n');
@@ -215,8 +268,10 @@ async function install(opt) {
     throw e;
   }
   try { fs.chmodSync(uninstallFile, 0o700); } catch {}
+  if (selected.includes('codex')) say('Codex lifecycle hooks require review and trust in /hooks before they run.');
   return { action: 'install', agents: selected, dataRoot, authRoot, uninstall: uninstallFile,
-    authenticated: fs.existsSync(path.join(authRoot, 'credentials.json')), loginRequired: !opt.noLogin };
+    authenticated: fs.existsSync(path.join(authRoot, 'credentials.json')), loginRequired: !opt.noLogin,
+    codexHookReviewRequired: selected.includes('codex') };
 }
 function uninstall(opt) {
   const prior = manifest(); const files = prior.files || []; const skills = new Set(prior.skills || []); const writes = new Map();
@@ -224,12 +279,14 @@ function uninstall(opt) {
   let deleteAuthFile = false;
   const configByFile = new Map((prior.configs || []).map((c) => [c.file, c]));
   for (const file of files) {
-    if (file === clientFile || file === skillFile || file === selfFile || file === uninstallFile || file === manifestFile || skills.has(file)) continue;
-    const kind = file.endsWith('.json') ? 'json' : file.endsWith('.toml') ? 'toml' : 'md'; const text = read(file); if (text === undefined) continue;
+    if (file === clientFile || file === hookFile || file === skillFile || file === selfFile || file === uninstallFile || file === manifestFile || skills.has(file)) continue;
+    const configuredKind = (prior.configs || []).find((entry) => entry.file === file)?.kind;
+    const kind = configuredKind || (file.endsWith('.json') ? 'json' : file.endsWith('.toml') ? 'toml' : 'md'); const text = read(file); if (text === undefined) continue;
     const c = configByFile.get(file);
     const wanted = expected(prior.server, c?.agent || 'kimi-code');
     const legacy = { command: 'node', args: [clientFile], env: { MEDIATION_URL: prior.server } };
     writes.set(file, kind === 'json' ? jsonConfig(file, wanted, true, [wanted, legacy])
+      : kind === 'claude-hooks' ? hookJsonConfig(file, hookCommand(prior.server, 'claude-code'), true)
       : kind === 'toml' ? tomlConfig(file, '', true) : removeBlock(text, marker.md, file));
   }
   if (!opt.keepAuth) {
@@ -267,7 +324,7 @@ function uninstall(opt) {
     }
     try { fs.rmSync(file, { force: true }); } catch {}
   }
-  for (const file of [clientFile, skillFile, uninstallFile, selfFile, manifestFile]) {
+  for (const file of [clientFile, hookFile, skillFile, uninstallFile, selfFile, manifestFile]) {
     try { fs.rmSync(file, { force: true }); } catch {}
   }
   return { action: 'uninstall', keptAuth: opt.keepAuth };

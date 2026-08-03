@@ -41,6 +41,7 @@ Enforcement is strict (single point in `src/server/app.ts`; matrix in
 `docs/auth.md`, served at `/auth.md`). Identity is a global **device Bearer**
 (issued after the user account is active) and/or a **human user session
 cookie**. Levels below: PUBLIC (none), A|U (device bearer OR active user),
+DEVICE (device Bearer only),
 MEMBER (member of the project, or instance-admin cookie), OWNER (project owner
 or instance-admin cookie, human only), USER (active user, human only), ADMIN
 (active admin user).
@@ -59,6 +60,7 @@ or instance-admin cookie, human only), USER (active user, human only), ADMIN
 | MEMBER | POST | `/api/projects/:p/sessions/:id/heartbeat` | `heartbeat` |
 | MEMBER | DELETE | `/api/projects/:p/sessions/:id` | none |
 | MEMBER | POST | `/api/projects/:p/sessions/:id/repo` | `repoReport` |
+| DEVICE | POST | `/api/projects/:p/agent-events` | `agentEvent` → `AgentExecution` (idempotent harness lifecycle report) |
 | MEMBER | POST | `/api/projects/:p/claims` | `claimCreate` → `{ claim, conflicts }` |
 | MEMBER | PATCH | `/api/projects/:p/claims/:id` | `claimPatch` |
 | MEMBER | POST | `/api/projects/:p/claims/:id/complete` | `claimComplete` |
@@ -85,6 +87,7 @@ or instance-admin cookie, human only), USER (active user, human only), ADMIN
 | PUBLIC | GET | `/install.sh` | installer script, `__MEDIATION_URL__` templated from request proto+host |
 | PUBLIC | GET | `/install.ps1` | Windows installer bootstrap, URL templated likewise |
 | PUBLIC | GET | `/install/mediation-mcp.mjs` | dependency-free MCP client (stdio), served from `clients/` |
+| PUBLIC | GET | `/install/mediation-hook.mjs` | dependency-free Codex/Claude Code lifecycle bridge |
 | PUBLIC | GET | `/install/SKILL.md` | agent skill file, served from `clients/skills/mediation/` |
 
 User accounts + sessions live in the same SQLite store (`users`,
@@ -114,6 +117,7 @@ Enforcement summary (all of it in the one `/api/*` middleware in
 `src/server/app.ts`; don't scatter permission checks beyond it):
 
 - Actor for project authorization = cookie user ?? the credential's owner.
+  Exception: `/agent-events` always uses the device credential owner.
   Instance-admin power comes from the **cookie** only, never a credential.
 - The project id is validated on the raw path **segment**
   (`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`) before anything else. `%2F`, `%00`,
@@ -138,6 +142,21 @@ Enforcement summary (all of it in the one `/api/*` middleware in
   user machines by the installer; must stay self-contained. All state I/O and
   git calls resolve against one base directory (`directory` argument >
   `MEDIATION_DIR` > git toplevel of cwd > cwd), never bare `process.cwd()`.
+  Optional `MEDIATION_*` crew metadata is untrusted. Names, roles, tasks,
+  states, and reasons are visible to all project members. Shared state strips
+  the raw run, agent, and parent agent ids. Read environment metadata once when
+  the transport session starts. Do not resend static environment state on
+  heartbeat. The native `CODEX_THREAD_ID` fallback is server-and-repository
+  scoped and hashed before upload.
+- `clients/mediation-hook.mjs` is the fail-open lifecycle bridge for Codex and
+  Claude Code. It accepts only `SessionStart`, `SessionEnd`, `SubagentStart`,
+  and `SubagentStop`. It sends scoped, hashed session/agent ids and maps
+  `agent_type` to the reported role. Each hook invocation gets one occurrence
+  timestamp and a unique event id. A later start can resume a completed
+  execution. `SubagentStop` reports only the child completion.
+  It never sends prompts, transcripts, messages, tool data, secrets, model or
+  permission data, or `cwd`. It uses `cwd` only to find `.mediation.json`.
+  Codex users must review/trust the command in `/hooks`. Kimi stays MCP-only.
 - `clients/install.sh` is the installer template; the server serves it with
   `__MEDIATION_URL__` replaced. Its dependency-free Node helper performs
   transactional, manifest-owned changes and supports wizard or headless use.
@@ -167,6 +186,26 @@ Enforcement summary (all of it in the one `/api/*` middleware in
   (7 days) with no activity one is merely hidden from `GET /api/projects`,
   and reappears on the next event. Completed claims
   are kept (`status: 'done'`).
+- A `Session` is a short-lived authenticated transport. An `AgentExecution` is
+  a durable logical harness execution that can survive transport recycling.
+  The server derives its developer, provenance, resolved `parentId`,
+  `parentUnavailable`, and `stale` values. `ProjectState.agents` returns at most
+  200 active and 50 recent terminal executions. `agentCount` reports the full
+  retained count. If a persisted parent is outside that preview, the child has
+  `parentOutsidePreview: true` and `parentId: null`. Shared agents omit raw
+  harness ids. Shared sessions expose only `agentLineage`, not their raw lineage
+  ids. Lifecycle reports and state reads prune terminal and stale, unlinked
+  nonterminal executions after seven days. Each project user keeps the newest
+  1,000 unlinked executions plus all session-linked executions. Event
+  deduplication is capped at 5,000 records per project user.
+- `POST /api/projects/:p/agent-events` is device-Bearer-only. A cookie cannot
+  report lifecycle state or lend its membership to another user's credential.
+  The credential owner supplies identity even when a cookie is also present.
+  `occurredAt` is required. An `eventId` retry succeeds only with identical
+  canonical content. Changed content gets 409. A report more than five minutes
+  old gets 409 instead of creating an execution. It is a no-op when that
+  execution still exists. This prevents replay from restoring pruned history.
+  Future timestamps are bounded to server receipt time.
 - Errors: JSON `{ error }` with proper status; validation failures are 400 with
   Zod issue details. A denial the human can act on also carries `hint`, which
   agents relay verbatim; GitHub setup failures (App not installed, repository

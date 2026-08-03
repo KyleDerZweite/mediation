@@ -236,6 +236,16 @@ test('static assets serve over http', async () => {
   assert.equal(helper.status, 200);
   assert.match(helper.headers.get('content-type') ?? '', /javascript/);
 
+  const mcp = await json('GET', `${BASE}/install/mediation-mcp.mjs`);
+  assert.equal(mcp.status, 200);
+  assert.match(mcp.headers.get('content-type') ?? '', /javascript/);
+  assert.match(await mcp.text(), /serverInfo: \{ name: 'mediation'/);
+
+  const hook = await json('GET', `${BASE}/install/mediation-hook.mjs`);
+  assert.equal(hook.status, 200);
+  assert.match(hook.headers.get('content-type') ?? '', /javascript/);
+  assert.match(await hook.text(), /Fail-open lifecycle bridge for Codex and Claude Code/);
+
   const powershell = await json('GET', `${BASE}/install.ps1`);
   assert.equal(powershell.status, 200);
   assert.match(await powershell.text(), new RegExp(`${HOST}:${PORT}`));

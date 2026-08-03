@@ -176,6 +176,9 @@ const state = {
   armed: null,             // key of a destructive button armed for its second click
   allCompleted: false,     // Now tab: completed work expanded past its preview
   menu: null,              // key of the open row menu (role editor / overflow)
+  crewClosed: new Set(),   // logical agent ids collapsed in the live Crew panel
+  crewOrder: new Map(),    // first-seen order keeps 3s polling from moving focused rows
+  crewNextOrder: 0,
   userFilter: { q: '', role: 'all', status: 'all' },
   activityFilter: { q: '', kind: 'all', agent: 'all', project: 'all' },
   version: '',             // server version, shown in the sidebar footer
@@ -296,7 +299,7 @@ function renderSidebar() {
   const nav = state.me?.role === 'admin' ? [...NAV, ['users', 'Users', 'shield', '#/users']] : NAV;
   morph($('sideNav'), nav.map(([key, label, ic, href]) => {
     const active = r.view === key;
-    return `<a class="side-nav-item${active ? ' active' : ''}" href="${href}">
+    return `<a class="side-nav-item${active ? ' active' : ''}" href="${href}" aria-label="${esc(label)}" title="${esc(label)}">
       ${icon(ic, active ? '#8fc0ff' : '#7b8496', 18)}<span>${label}</span></a>`;
   }).join(''));
 
@@ -531,6 +534,219 @@ function sessionRow(s, now) {
   </div>`;
 }
 
+function crewSort(a, b) {
+  return (a.crewOrder ?? Number.MAX_SAFE_INTEGER) - (b.crewOrder ?? Number.MAX_SAFE_INTEGER)
+    || (a.startedAt || 0) - (b.startedAt || 0) || String(a.id).localeCompare(String(b.id));
+}
+
+function crewStatus(node, now) {
+  const reported = typeof node.state === 'string' ? node.state.trim().toLowerCase() : '';
+  const claims = node.claims || [];
+  const stale = !node.endedAt && node.stale === true;
+  // Logical lifecycle is authoritative. Claim status is useful only for legacy
+  // session fallbacks that have no execution state of their own.
+  const raw = reported || claims[0]?.status || 'unknown';
+  const blocked = raw === 'blocked';
+  const label = {
+    starting: 'Working', active: 'Working', running: 'Working', investigating: 'Working',
+    'in-progress': 'Working', testing: 'Working', waiting: 'Waiting', blocked: 'Blocked',
+    'needs-input': 'Needs input', completed: 'Done', done: 'Done', failed: 'Failed', error: 'Failed',
+    cancelled: 'Stopped', stopped: 'Stopped',
+  }[raw] || 'Unknown';
+  const needsInput = raw === 'needs-input';
+  const failed = ['failed', 'error'].includes(raw);
+  const tone = blocked || needsInput || failed ? 'attention' : stale ? 'stale' : 'normal';
+  return { blocked, needsInput, failed, stale, label, tone };
+}
+
+function crewRow(node, now) {
+  const status = crewStatus(node, now);
+  const name = node.name || node.harness || 'Unnamed agent';
+  const task = node.task || node.claims[0]?.intent || 'No task reported';
+  const provenance = {
+    'harness-reported': 'Harness-reported', 'environment-reported': 'Environment-reported',
+    harness: 'Harness-reported', environment: 'Environment-reported',
+  }[node.provenance] || '';
+  const reason = typeof node.stateReason === 'string' ? node.stateReason.trim() : '';
+  const identity = [node.developer, node.harness].filter(Boolean).join(' · ');
+  const updatedAt = Number(node.updatedAt);
+  const knownFreshness = Number.isFinite(updatedAt) && updatedAt > 0;
+  const relative = knownFreshness ? `${ago(updatedAt, now)} ago` : 'Freshness unknown';
+  const freshness = knownFreshness
+    ? `<time class="sess-ago" datetime="${new Date(updatedAt).toISOString()}">${status.stale ? `last reported ${relative}` : relative}</time>`
+    : `<span class="sess-ago">${relative}</span>`;
+  const stateLabel = status.stale ? `${status.label} · stale` : status.label;
+  return `<span class="crew-row-content">
+    <span class="avatar" style="width:28px;height:28px;font-size:10px;background:${AVATAR_FALLBACK}">${esc(initials(name))}</span>
+    <span class="crew-body">
+      <span class="crew-name">${esc(name)}${node.role ? `<span class="crew-role">${esc(node.role)}</span>` : ''}${provenance ? `<span class="crew-source">${esc(provenance)}</span>` : ''}</span>
+      <span class="crew-task" title="${esc(task)}">${esc(task)}</span>
+      ${identity ? `<span class="crew-meta">${esc(identity)}</span>` : ''}
+      ${reason ? `<span class="crew-reason${status.tone === 'attention' ? ' attention' : ''}">${esc(reason)}</span>` : ''}
+    </span>
+    <span class="crew-state-wrap">
+      <span class="crew-state ${status.tone}">${esc(stateLabel)}</span>${freshness}
+    </span>
+  </span>`;
+}
+
+// Harness trees are untrusted input. Render with an explicit stack so a very
+// deep but valid lineage cannot overflow the browser's call stack.
+function renderCrewForest(roots, now, pid) {
+  const html = [];
+  const stack = roots.slice().reverse().map((node) => ({ node, close: false }));
+  while (stack.length) {
+    const item = stack.pop();
+    if (item.close) {
+      html.push('</ul></details></li>');
+      continue;
+    }
+    const { node } = item;
+    if (!node.children.length) {
+      html.push(`<li class="crew-item"><div class="crew-row">${crewRow(node, now)}</div></li>`);
+      continue;
+    }
+    const key = `${pid}:${node.id}`;
+    html.push(`<li class="crew-item"><details class="crew-branch" data-crew-node="${esc(key)}"${state.crewClosed.has(key) ? '' : ' open'}>
+      <summary>${crewRow(node, now)}</summary><ul class="crew-children">`);
+    stack.push({ node, close: true });
+    for (let i = node.children.length - 1; i >= 0; i -= 1) stack.push({ node: node.children[i], close: false });
+  }
+  return html.join('');
+}
+
+function renderCrewPanel(agents, sessions, claims, now, pid, reportedCount) {
+  const claimsBySession = new Map();
+  for (const claim of claims) {
+    const list = claimsBySession.get(claim.sessionId) || [];
+    list.push(claim);
+    claimsBySession.set(claim.sessionId, list);
+  }
+  /* `parentId` is server-resolved. Raw harness ids are correlation metadata,
+     not trusted relationships, so this view never joins parentAgentId itself. */
+  const source = agents.length ? agents : sessions.filter((s) => s.agentLineage).map((s) => ({
+    id: s.id,
+    parentId: s.parentId ?? null,
+    harness: s.agent,
+    name: s.agentName,
+    role: s.agentRole,
+    task: s.agentTask,
+    state: s.agentState,
+    stateReason: s.agentStateReason,
+    provenance: s.agentProvenance,
+    sessionId: s.id,
+    developer: s.developer,
+    startedAt: s.createdAt,
+    updatedAt: s.lastSeenAt,
+    endedAt: null,
+    stale: false,
+  }));
+  const crewPrefix = `${pid}:`;
+  const currentCrewKeys = new Set(source.filter((item) => item?.id).map((item) => `${crewPrefix}${item.id}`));
+  // Polling can replace the bounded preview indefinitely. Forget executions
+  // that left this project's latest snapshot so one long-lived tab does not
+  // retain every agent id it has ever seen.
+  for (const key of state.crewOrder.keys()) {
+    if (key.startsWith(crewPrefix) && !currentCrewKeys.has(key)) state.crewOrder.delete(key);
+  }
+  for (const key of state.crewClosed) {
+    if (key.startsWith(crewPrefix) && !currentCrewKeys.has(key)) state.crewClosed.delete(key);
+  }
+  const nodes = [];
+  const byId = new Map();
+  const orderedSource = source.slice().sort((a, b) =>
+    (a.startedAt || 0) - (b.startedAt || 0) || String(a.id).localeCompare(String(b.id)));
+  for (const raw of orderedSource) {
+    if (!raw?.id || byId.has(String(raw.id))) continue;
+    const id = String(raw.id);
+    const orderKey = `${pid}:${id}`;
+    if (!state.crewOrder.has(orderKey)) state.crewOrder.set(orderKey, state.crewNextOrder++);
+    const node = { ...raw, id, crewOrder: state.crewOrder.get(orderKey),
+      claims: claimsBySession.get(raw.sessionId) || [], children: [] };
+    nodes.push(node);
+    byId.set(node.id, node);
+  }
+  if (!nodes.length) return '';
+
+  const roots = [];
+  const unattached = [];
+  const continued = [];
+  const lineageKind = (node) => {
+    const seen = new Set();
+    let current = node;
+    while (true) {
+      if (current.parentUnavailable === true) return 'unattached';
+      if (current.parentOutsidePreview === true) return 'preview';
+      if (current.parentId == null) return 'rooted';
+      if (seen.has(current.id)) return 'cycle';
+      seen.add(current.id);
+      current = byId.get(String(current.parentId));
+      if (!current) return 'unattached';
+    }
+  };
+  let unattachedCount = 0;
+  let continuedCount = 0;
+  for (const node of nodes) {
+    const kind = lineageKind(node);
+    if (kind === 'rooted') {
+      if (node.parentId == null) roots.push(node);
+      else byId.get(String(node.parentId)).children.push(node);
+      continue;
+    }
+    const parent = node.parentId == null ? null : byId.get(String(node.parentId));
+    if (kind === 'preview') {
+      continuedCount += 1;
+      if (node.parentOutsidePreview !== true && parent) parent.children.push(node);
+      else continued.push(node);
+      continue;
+    }
+    unattachedCount += 1;
+    // Preserve known relationships below a missing parent. Cycles are kept
+    // flat so malformed input can never create an infinite render traversal.
+    if (kind === 'unattached' && node.parentUnavailable !== true && parent) parent.children.push(node);
+    else unattached.push(node);
+  }
+  roots.sort(crewSort);
+  unattached.sort(crewSort);
+  continued.sort(crewSort);
+  const pending = [...roots, ...unattached, ...continued];
+  while (pending.length) {
+    const node = pending.pop();
+    node.children.sort(crewSort);
+    pending.push(...node.children);
+  }
+  const statuses = nodes.map((n) => crewStatus(n, now));
+  const blocked = statuses.filter((s) => s.blocked).length;
+  const needsInput = statuses.filter((s) => s.needsInput).length;
+  const failed = statuses.filter((s) => s.failed).length;
+  const stale = statuses.filter((s) => s.stale).length;
+  const metric = (value, label, alert) => `<span class="crew-attention-item${alert ? ' alert' : ''}"><b>${value}</b> ${label}</span>`;
+  const attention = `<div class="crew-attention" aria-label="Crew attention summary">
+    <span class="crew-attention-label">Attention</span>
+    ${metric(blocked, 'blocked', blocked)}${metric(needsInput, 'need input', needsInput)}${metric(failed, 'failed', failed)}${metric(stale, 'stale', stale)}${metric(unattachedCount, 'unattached', unattachedCount)}
+  </div>`;
+  const tree = renderCrewForest(roots, now, pid);
+  const loose = unattached.length ? `<div class="crew-unattached">
+    <div class="crew-unattached-head">Unattached agents <span>${unattachedCount}</span></div>
+    <ul>${renderCrewForest(unattached, now, pid)}</ul>
+  </div>` : '';
+  const continuation = continued.length ? `<div class="crew-continuation">
+    <div class="crew-continuation-head">Lineage continues outside preview <span>${continuedCount}</span></div>
+    <ul>${renderCrewForest(continued, now, pid)}</ul>
+  </div>` : '';
+  const total = Number.isFinite(Number(reportedCount)) ? Math.max(nodes.length, Number(reportedCount)) : nodes.length;
+  const omitted = total - nodes.length;
+  const truncated = omitted ? `<div class="crew-truncated" role="note">${plural(omitted, 'additional execution')} outside this preview.</div>` : '';
+  const body = `<div class="crew-scroll" role="region" aria-label="Scrollable agent crew" tabindex="0">
+    <ul class="crew-tree" aria-label="Agent crew lineage">${tree}</ul>${continuation}${loose}
+  </div>${truncated}`;
+
+  return `<div class="panel crew-panel">
+    <div class="panel-head" role="heading" aria-level="2"><span class="dot dot-idle"></span>Crew<span class="panel-count">${total}</span></div>
+    <div class="panel-body">${attention}${body}</div>
+  </div>`;
+}
+
 /* A live session that has claimed nothing is exactly the case this server
    exists to catch, and it used to render as one line of advice nobody can act
    on. Git already answers "what is this agent touching": the heartbeat carries
@@ -688,9 +904,19 @@ function renderNowTab(ps, now, pid) {
       : '<div class="empty-inline">Nothing completed yet.</div>'}</div>
   </div>`;
 
+  const crewPanel = renderCrewPanel(Array.isArray(ps.agents) ? ps.agents : [], ps.sessions, ps.claims,
+    now, pid, ps.agentCount);
+
+  const agentSessionIds = new Set((ps.agents || []).map((a) => a.sessionId).filter(Boolean));
+  const unavailableLineage = ps.sessions.filter((s) => !agentSessionIds.has(s.id) && !s.agentLineage);
+  const omittedLineage = ps.sessions.filter((s) => s.agentLineage && !agentSessionIds.has(s.id));
   const sessionsPanel = `<div class="panel">
     <div class="panel-head"><span class="dot dot-ok pulse"></span>Active sessions<span class="panel-count">${ps.sessions.length}</span></div>
-    <div class="panel-body">${ps.sessions.length
+    <div class="panel-body">${unavailableLineage.length
+      ? `<div class="crew-lineage-note" role="note"><strong>Lineage unavailable</strong><span>${plural(unavailableLineage.length, 'session')} did not report logical agent metadata.</span></div>`
+      : ''}${omittedLineage.length
+      ? `<div class="crew-lineage-note" role="note"><strong>Crew preview bounded</strong><span>${plural(omittedLineage.length, 'lineaged session')} is outside this Crew preview.</span></div>`
+      : ''}${ps.sessions.length
       ? ps.sessions.map((s) => sessionRow(s, now)).join('')
       : '<div class="empty-inline">No sessions connected right now.</div>'}</div>
   </div>`;
@@ -734,7 +960,7 @@ function renderNowTab(ps, now, pid) {
       ${completedHtml}
     </div>
     <div class="now-col">
-      ${sessionsPanel}
+      ${crewPanel}${sessionsPanel}
       ${filesPanel}
       ${bugsPanel}
     </div>
@@ -1587,6 +1813,13 @@ $('searchIcon').innerHTML = icon('search', '#98a2b3', 15);
 // Delegated listeners: elements are re-created/morphed on every poll, so all
 // feedback goes through `state` + render(), never direct DOM mutation.
 let copiedTimer = null;
+document.addEventListener('toggle', (e) => {
+  const id = e.target?.dataset?.crewNode;
+  if (!id) return;
+  if (e.target.open) state.crewClosed.delete(id);
+  else state.crewClosed.add(id);
+}, true);
+
 document.addEventListener('click', async (e) => {
   if (e.target.closest('[data-theme-toggle]')) {
     toggleTheme();

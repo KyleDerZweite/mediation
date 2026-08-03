@@ -32,12 +32,15 @@ test('GitHub mode creates only verified immutable-repository sessions', async ()
   const headers = { authorization: `Bearer ${device.token}`, 'content-type': 'application/json' };
   const response = await app.request('/api/repositories/github/session', {
     method: 'POST', headers,
-    body: JSON.stringify({ owner: 'org', repository: 'repo', agent: 'codex', machine: 'box' }),
+    body: JSON.stringify({
+      owner: 'org', repository: 'repo', agent: 'codex', machine: 'box',
+      runId: 'github-run', agentId: 'github-agent', agentTask: 'Verify repository', agentState: 'active',
+    }),
   });
   assert.equal(response.status, 200);
   const body = await response.json() as {
     project: { id: string; externalRepositoryId: string; authorizationSource: string };
-    session: { id: string };
+    session: { id: string; runId: string; agentId: string; agentProvenance: string };
     authorization: { repositoryPermission: string };
     capability: string;
   };
@@ -45,6 +48,10 @@ test('GitHub mode creates only verified immutable-repository sessions', async ()
   assert.equal(body.project.authorizationSource, 'github');
   assert.equal(body.authorization.repositoryPermission, 'write');
   assert.ok(body.capability);
+  assert.equal(body.session.runId, 'github-run');
+  assert.equal(body.session.agentId, 'github-agent');
+  assert.equal(body.session.agentProvenance, 'environment-reported');
+  assert.equal(store.getState(body.project.id).agents[0]?.task, 'Verify repository');
   assert.equal(store.getGithubSessionAuthorization(body.project.id, body.session.id)?.githubUserId, '42');
 
   const bypass = await app.request(`/api/projects/${body.project.id}/sessions`, {

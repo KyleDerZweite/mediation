@@ -56,14 +56,30 @@ Before beginning work, an agent reads the current project state and checks for o
 
 A minimal dashboard shows:
 
-* active sessions;
-* current work claims;
-* recently changed files;
-* discovered bugs and observations;
-* possible conflicts;
+* harness-reported root agents and subagents, their current state, and lineage.
+* active sessions.
+* current work claims.
+* recently changed files.
+* discovered bugs and observations.
+* possible conflicts.
 * recent commits, pull requests, and completed work.
 
-The product does not replace an issue tracker, roadmap, wiki, Git provider, CI system, or agent runtime.
+Crew visibility is best when the harness reports it directly. Native
+lifecycle hooks enrich the shared project state, while optional MCP
+session metadata provides a graceful fallback. Reporting provenance and stale
+state must be explicit: a reported parent edge is useful context, not proof of
+delegation. Claims remain the primary work-ownership view.
+
+Shared project state exposes server ids and server-resolved parent edges. It
+does not expose raw harness run, agent, or parent agent ids. Only an authorized
+device can report lifecycle events.
+
+The dashboard treats stale as freshness, not as a replacement lifecycle state.
+It distinguishes missing lineage from a parent omitted by a bounded preview.
+
+The product does not replace an issue tracker, roadmap, wiki, Git provider, CI
+system, agent runtime, or agent orchestrator. It observes execution state but
+does not spawn, steer, approve, cancel, or score agents.
 
 ## Development MVP
 
