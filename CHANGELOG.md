@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased: live agent crews
+
+- `GET /api/projects/:p/state` now includes durable logical agent executions.
+  The dashboard groups their server-resolved parent edges into a collapsible
+  Crew tree, highlights blocked, stale, and unattached agents, and falls back
+  to the existing flat sessions when no lineage is available. Claims remain
+  the source of truth for work ownership.
+- `POST /api/projects/:p/agent-events` accepts idempotent lifecycle reports.
+  The server scopes parent lookup to the project, authenticated user, and run.
+  It also derives the developer identity, provenance, and stale state.
+- The installer adds fail-open `SessionStart`, `SessionEnd`, `SubagentStart`,
+  and `SubagentStop` hooks for Codex and Claude Code. Codex requires explicit
+  review/trust in `/hooks`. Kimi stays MCP/environment-only.
+- The MCP client accepts optional `MEDIATION_RUN_ID`, agent/parent ids, name,
+  role, task, state, and state-reason variables, with a repository-scoped hash
+  of `CODEX_THREAD_ID` as a run-id-only fallback. Static environment metadata
+  is read at session start, invalid metadata is omitted, and legacy sessions
+  work unchanged.
+- Lifecycle hooks send only stable event identity and role metadata. They do
+  not forward prompts, transcripts, assistant messages, tool I/O, secrets,
+  model/permission data, or local paths, and silently degrade when reporting
+  is unavailable.
+
 ## 0.5.1: surviving broken IPv6
 
 A network that advertises IPv6 it cannot reach made ~25% of MCP client

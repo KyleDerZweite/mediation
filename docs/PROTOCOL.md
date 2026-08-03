@@ -110,8 +110,117 @@ Conflicts are **warnings, not locks**. No operation is ever rejected because of
 overlap. If you find overlap: stop, coordinate with the owner (they are named
 in the response), narrow your scope, or explicitly continue.
 
-Also useful: `GET /api/projects/{project}/state` returns all active sessions,
-claims, bugs, pairwise conflicts, recent files, events, and completed work.
+Also useful: `GET /api/projects/{project}/state` returns logical agent
+executions, active sessions, claims, bugs, pairwise conflicts, recent files,
+events, and completed work. The server always returns `agents`, which is empty
+when the harness reports no lineage. `agentCount` gives the total before the
+bounded state preview.
+
+### Optional harness crew reporting
+
+Mediation can show a harness's root agent and subagents as a crew without
+making that tree part of coordination or authorization. Claims remain the
+source of truth for work ownership. The crew tree supplies execution context.
+
+The official MCP client adds optional lineage metadata to session creation:
+`runId`, `agentId`, `parentAgentId`, `agentName`, `agentRole`, `agentTask`,
+`agentState`, and `agentStateReason`. These describe the MCP process when its
+session starts. A heartbeat does not treat static environment values as live
+lifecycle updates. The client reads them from this exact environment allowlist:
+
+| Environment variable | Session field |
+| --- | --- |
+| `MEDIATION_HARNESS` | session `agent` / execution `harness` |
+| `MEDIATION_RUN_ID` | `runId` |
+| `MEDIATION_AGENT_ID` | `agentId` |
+| `MEDIATION_PARENT_AGENT_ID` | `parentAgentId` |
+| `MEDIATION_AGENT_NAME` | `agentName` |
+| `MEDIATION_AGENT_ROLE` | `agentRole` |
+| `MEDIATION_AGENT_TASK` | `agentTask` |
+| `MEDIATION_AGENT_STATE` | `agentState` |
+| `MEDIATION_AGENT_STATE_REASON` | `agentStateReason` |
+
+`CODEX_THREAD_ID` is a fallback for `runId` only. The client scopes and hashes
+it to the server and repository before upload. The client does not infer an
+agent or parent id. The client omits blank, unsafe, invalid, or overlong values.
+Thus, older harnesses and sessions continue to work unchanged. If several
+subagents share one MCP process, its environment describes that process. It
+does not identify the caller.
+
+The heartbeat schema also accepts `agentTask`, `agentState`, and
+`agentStateReason` for clients that have a real live signal. The official MCP
+client does not copy the static environment values into heartbeats.
+
+All explicit environment metadata is project-member data. The raw HTTP state
+returns the explicit run and agent ids, names, roles, tasks, states, and
+reasons. Do not put a secret or a reusable cross-project identifier in these
+variables. The dashboard does not display raw ids. Only the native harness id
+fallback is automatically scoped and hashed.
+
+Harness lifecycle adapters instead report explicit events:
+
+```
+POST /api/projects/{project}/agent-events
+{ "eventId": "opaque-retry-stable-id", "runId": "run-42", "agentId": "worker-3",
+  "parentAgentId": "root", "harness": "codex", "name": "Test worker",
+  "role": "worker", "task": "Run focused tests", "state": "active",
+  "stateReason": null, "occurredAt": 1753257600000 }
+```
+
+`eventId`, `runId`, and `agentId` are required. States are `starting`,
+`active`, `waiting`, `blocked`, `needs-input`, `completed`, `failed`, or
+`cancelled`. Event retries are idempotent. The authenticated endpoint derives
+the developer and provenance. Clients cannot submit either. The server resolves
+parent references only within the same project, authenticated user, and run.
+It returns the parent's server id in `parentId`.
+
+Each `ProjectState.agents` entry has this shape:
+
+```
+{ "id": "server-execution-id", "projectId": "...", "runId": "run-42",
+  "agentId": "worker-3", "parentId": "server-parent-id",
+  "parentUnavailable": false, "harness": "codex",
+  "name": "Test worker", "role": "worker", "task": "Run focused tests",
+  "state": "active", "stateReason": null, "provenance": "harness-reported",
+  "sessionId": null, "developer": "Alice", "startedAt": 1753257600000,
+  "updatedAt": 1753257600000, "endedAt": null, "stale": false }
+```
+
+The server derives `provenance`. Native lifecycle events are
+`harness-reported`. Session/environment metadata is `environment-reported`.
+This value identifies the reporting channel, not verified identity or
+delegation. The server also derives `stale` from lifecycle freshness and a
+live transport session for the same actor and run. Terminal executions are not
+stale. The dashboard uses
+only the resolved `parentId` for the tree and does not display the raw run or
+agent ids. `parentUnavailable` distinguishes a reported parent that is absent
+from a true root. Missing parents and cycles render under **Unattached agents**.
+
+A transport `Session` still expires after its normal heartbeat TTL. Its linked
+logical execution remains and loses only the `sessionId` association.
+Transport shutdown does not mean logical completion. The server returns at
+most 200 active executions and 50 recent terminal executions in `agents`.
+`agentCount` reports all retained executions. The server prunes terminal
+executions and event retry records after seven days on a later lifecycle
+report. It also limits retry records to 5,000 per project user.
+
+The installer wires the dependency-free lifecycle bridge into Codex and
+Claude Code for `SessionStart`, `SessionEnd`, `SubagentStart`, and
+`SubagentStop`. Codex requires the user to open `/hooks` and review/trust the
+installed command before it runs. The hook is silent and fail-open when the
+server, repository mapping, credential, or input is unavailable. Kimi has no
+native lifecycle hook and therefore remains MCP/environment-only. Its sessions
+stay visible, but a crew tree appears only when valid lineage is available.
+Native session and agent ids are scoped and hashed before upload.
+
+Crew task and reason text is visible to every project member. Report only a
+short telemetry-safe summary: never copy a prompt, transcript, assistant
+message, tool input/output, secret, permission data, model setting, or absolute
+path. The native hook reads only the lifecycle event name, stable session and
+agent ids, agent type, and `cwd`. It uses `cwd` locally to find
+`.mediation.json`. It does not send `cwd` or the excluded content. The
+dashboard and raw HTTP state show free-text crew metadata. MCP
+`mediation_state` news does not include it.
 
 ### 3. Claim your work
 
