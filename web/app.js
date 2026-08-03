@@ -97,6 +97,7 @@ const ICON_DEFS = {
   branch: [['line', 6, 3, 6, 15], ['circle', 18, 6, 3], ['circle', 6, 18, 3], ['path', 'M18 9a9 9 0 0 1-9 9']],
   plug: [['path', 'M9 2v6'], ['path', 'M15 2v6'], ['path', 'M7 8h10v3a5 5 0 0 1-10 0z'], ['path', 'M12 16v6']],
   check: [['polyline', '4 12 10 18 20 6']],
+  refresh: [['polyline', '23 4 23 10 17 10'], ['polyline', '1 20 1 14 7 14'], ['path', 'M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15']],
   person: [['circle', 12, 8, 3.6], ['path', 'M5 20a7 7 0 0 1 14 0']],
   pencil: [['path', 'M4 20h4L19 9a2.1 2.1 0 0 0-3-3L5 17z'], ['line', 14.5, 6.5, 17.5, 9.5]],
   dots: [['circle', 12, 5, 1.4], ['circle', 12, 12, 1.4], ['circle', 12, 19, 1.4]],
@@ -1249,6 +1250,40 @@ function renderInstallPanel() {
   </div>`;
 }
 
+// Updating IS reinstalling: /install.sh always serves the version this server
+// is running and the install is manifest-owned and idempotent, so one fixed
+// prompt stays correct across every future release. Deliberately reads no
+// version number — a prompt that named one would rot the moment it was copied.
+function renderUpdatePanel() {
+  const origin = location.origin && location.origin !== 'null' ? location.origin : 'http://localhost:4100';
+  const prompt = [
+    'Update Mediation (live work coordination) on this machine to the newest version.',
+    `Server: ${origin}`,
+    '',
+    '1. Re-run the installer. It is idempotent and manifest-owned: it brings the',
+    '   client, harness hooks, and skill to this server’s current version while',
+    '   keeping this machine’s credential and repository mappings:',
+    `   curl -fsSL ${origin}/install.sh | bash`,
+    '2. Reload your MCP servers (or restart this harness) so the updated client',
+    '   is the one running.',
+    '3. Run mediation_state and tell me what it reports. If the installer printed',
+    '   an error, show me that output instead of retrying.',
+  ].join('\n');
+
+  return `<div class="dark-panel" style="margin-bottom:22px">
+    <div class="dark-panel-head">
+      <span class="dp-icon">${icon('refresh', '#8fc0ff', 18)}</span>
+      <span class="dp-title">Update installed agents</span>
+    </div>
+    <div class="dp-note" style="margin:0 0 8px">Already installed on a machine? Paste this prompt into an agent
+      there. Re-running the installer always lands on this server's newest version.</div>
+    <div class="snippet-wrap">
+      <pre class="snippet" id="updateSnippet">${esc(prompt)}</pre>
+      <button class="copy-btn" type="button" data-copy="${esc(prompt)}" data-copy-key="update">${state.copied === 'update' ? 'Copied' : 'Copy'}</button>
+    </div>
+  </div>`;
+}
+
 function renderInstanceAgents() {
   const now = Date.now();
   // This page is personal: your machines, your agents. A project's page is
@@ -1266,6 +1301,7 @@ function renderInstanceAgents() {
   return `<div class="view-activity" style="max-width:960px">
     <div class="view-note">Install Mediation on a machine, then see its device credentials and your own live agent sessions.</div>
     ${renderInstallPanel()}
+    ${renderUpdatePanel()}
     ${renderDeviceCredentials()}
     <div class="settings-section" style="margin-bottom:12px"><h3>My live sessions</h3>
       <div class="pair-note">Other people's sessions appear on each project's own Agents tab.</div></div>

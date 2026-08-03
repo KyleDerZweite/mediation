@@ -2,6 +2,11 @@
 
 ## Unreleased: live agent crews
 
+- The Agents page gains an **Update installed agents** panel next to the
+  install one: a fixed paste-into-an-agent prompt that re-runs the idempotent
+  installer. It names no version on purpose — `/install.sh` always serves what
+  the server is running, so the prompt stays correct across releases.
+
 - `GET /api/projects/:p/state` now includes durable logical agent executions.
   The dashboard groups their server-resolved parent edges into a collapsible
   Crew tree, highlights blocked, stale, and unattached agents, and falls back

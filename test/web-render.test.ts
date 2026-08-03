@@ -45,7 +45,7 @@ function loadApp(storedTheme?: string) {
   });
   ctx.document = document;
   ctx.globalThis = ctx;
-  vm.runInContext(`${src}\n;globalThis.__app = { renderNowTab, renderProject, state, applyTheme, toggleTheme };`, ctx);
+  vm.runInContext(`${src}\n;globalThis.__app = { renderNowTab, renderProject, renderUpdatePanel, state, applyTheme, toggleTheme };`, ctx);
   return { ...ctx.__app, theme: { shell, toggle, values } };
 }
 
@@ -415,4 +415,16 @@ test('a throwing tab body degrades to an error card instead of blanking the view
   assert.match(html, /Could not render this tab/);
   assert.match(html, /boom/);
   assert.match(html, /class="tabs"/);
+});
+
+test('the agents page update prompt re-runs the installer and names no version', () => {
+  const { renderUpdatePanel } = loadApp();
+  const html = renderUpdatePanel();
+  assert.match(html, /Update installed agents/);
+  // The whole design: one fixed prompt that is correct forever because
+  // /install.sh always serves what the server is running.
+  assert.match(html, /curl -fsSL http:\/\/localhost:4100\/install\.sh \| bash/);
+  assert.match(html, /mediation_state/);
+  assert.doesNotMatch(html, /\d+\.\d+\.\d+/);
+  assert.match(html, /data-copy-key="update"/);
 });
