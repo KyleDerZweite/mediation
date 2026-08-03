@@ -119,6 +119,8 @@ test('pre-Alpha database upgrades in place: projects, ownership, legacy credenti
     "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'agent_executions'").n, 1);
   assert.equal(row<{ n: number }>(
     "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'agent_events'").n, 1);
+  assert.equal(row<{ n: number }>(
+    "SELECT COUNT(*) AS n FROM pragma_table_info('agent_events') WHERE name = 'payload_hash'").n, 1);
   const lineaged = store.startSession('mediation', sessionCreate.parse({
     agent: 'codex', runId: 'migrated-run', agentId: 'migrated-agent', agentState: 'active',
   }), 'cap', 'u-kyle');
@@ -130,8 +132,8 @@ test('pre-Alpha database upgrades in place: projects, ownership, legacy credenti
   assert.equal(Number(members.n), 3); // kyle x2 owner + gang member
   assert.equal((again.db.prepare('SELECT created_at FROM projects WHERE id = ?').get('mediation') as { created_at: number }).created_at, T0 + 900);
   const state = again.getState('mediation');
-  assert.equal(state.sessions.find((s) => s.id === lineaged.id)?.runId, 'migrated-run');
-  assert.equal(state.agents.find((a) => a.runId === 'migrated-run')?.agentId, 'migrated-agent');
+  assert.equal(state.sessions.find((s) => s.id === lineaged.id)?.agentLineage, true);
+  assert.equal(state.agents.find((a) => a.sessionId === lineaged.id)?.provenance, 'environment-reported');
   again.close();
   rmSync(path.dirname(file), { recursive: true, force: true });
 });

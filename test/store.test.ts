@@ -33,7 +33,9 @@ test('session metadata creates a durable execution, heartbeat updates it, and tr
     agentName: 'Worker', agentRole: 'tester', agentTask: 'Run focused tests', agentState: 'starting',
   }), 'cap', 'user-1');
   let state = s.getState('crew-session');
-  assert.equal(state.sessions[0]?.runId, 'run-1');
+  assert.equal(state.sessions[0]?.agentLineage, true);
+  assert.ok(!('runId' in state.sessions[0]!) && !('agentId' in state.sessions[0]!)
+    && !('parentAgentId' in state.sessions[0]!), 'shared session state omits raw harness ids');
   assert.equal(state.sessions[0]?.agentProvenance, 'environment-reported');
   assert.equal(state.agents[0]?.sessionId, session.id);
   assert.equal(state.agents[0]?.state, 'starting');
@@ -70,18 +72,26 @@ test('native agent events are idempotent, ordered by occurredAt, and heal child-
   assert.equal(child.parentUnavailable, true);
   assert.ok(!('parentAgentId' in child), 'raw external parent ids never reach the read model');
 
-  const duplicate = s.reportAgentEvent('crew-events', 'user-1', 'Ada',
-    { ...childInput, state: 'failed' });
+  const duplicate = s.reportAgentEvent('crew-events', 'user-1', 'Ada', childInput);
   assert.equal(duplicate.id, child.id);
-  assert.equal(duplicate.state, 'active', 'the same event id is processed once');
+  assert.equal(duplicate.state, 'active', 'an exact retry is processed once');
+  assert.throws(() => s.reportAgentEvent('crew-events', 'user-1', 'Ada',
+    { ...childInput, state: 'failed' }), (error: any) => error.statusCode === 409,
+  'the same event id cannot be reused with different content');
+  s.db.prepare("UPDATE agent_events SET payload_hash = NULL WHERE event_id = 'child-start'").run();
+  assert.equal(s.reportAgentEvent('crew-events', 'user-1', 'Ada',
+    { ...childInput, state: 'failed' }).state, 'active', 'legacy NULL hashes remain best-effort idempotent');
 
   const root = s.reportAgentEvent('crew-events', 'user-1', 'Ada', agentEvent.parse({
     eventId: 'root-start', runId: 'run-tree', agentId: 'root', harness: 'codex', state: 'active',
     occurredAt: now,
   }));
   assert.equal(root.parentUnavailable, false);
-  assert.equal(s.getState('crew-events').agents.find((a) => a.id === child.id)?.parentId, root.id,
+  const sharedChild = s.getState('crew-events').agents.find((a) => a.id === child.id)!;
+  assert.equal(sharedChild.parentId, root.id,
     'a parent arriving later backfills unresolved children');
+  assert.ok(!('runId' in sharedChild) && !('agentId' in sharedChild),
+    'shared execution state omits raw harness ids');
 
   s.reportAgentEvent('crew-events', 'user-1', 'Ada', agentEvent.parse({
     eventId: 'child-stop', runId: 'run-tree', agentId: 'child', parentAgentId: 'root', harness: 'codex',
@@ -95,6 +105,12 @@ test('native agent events are idempotent, ordered by occurredAt, and heal child-
   assert.ok(afterOlder.endedAt);
   assert.equal(afterOlder.stale, false, 'terminal executions are never stale');
 
+  const afterAncient = s.reportAgentEvent('crew-events', 'user-1', 'Ada', agentEvent.parse({
+    eventId: 'child-ancient', runId: 'run-tree', agentId: 'child', parentAgentId: 'root', harness: 'codex',
+    state: 'active', occurredAt: now - 10 * 60_000,
+  }));
+  assert.equal(afterAncient.state, 'completed', 'an out-of-window past event cannot reopen terminal work');
+
   assert.throws(() => s.reportAgentEvent('crew-events', 'user-1', 'Ada', agentEvent.parse({
     eventId: 'child-start', runId: 'other-run', agentId: 'other', harness: 'codex', state: 'active',
   })), (error: any) => error.statusCode === 409);
@@ -106,6 +122,21 @@ test('native agent events are idempotent, ordered by occurredAt, and heal child-
   }));
   assert.ok(secondsScale.updatedAt >= receivedAfter && secondsScale.updatedAt <= Date.now(),
     'timestamps outside the skew window use server receipt time');
+  const ignoredAncient = s.reportAgentEvent('crew-events', 'user-1', 'Ada', agentEvent.parse({
+    eventId: 'seconds-clock-late', runId: 'clock-run', agentId: 'clock-agent', parentAgentId: 'invented',
+    harness: 'other', task: 'stale task', state: 'waiting', occurredAt: 1_700_000_001,
+  }));
+  assert.equal(ignoredAncient.state, 'active');
+  assert.equal(ignoredAncient.task, null);
+  assert.equal(ignoredAncient.parentUnavailable, false, 'ancient events cannot change current parent metadata');
+
+  const futureReceivedAfter = Date.now();
+  const future = s.reportAgentEvent('crew-events', 'user-1', 'Ada', agentEvent.parse({
+    eventId: 'future-clock', runId: 'future-run', agentId: 'future-agent', harness: 'codex',
+    state: 'active', occurredAt: Date.now() + 10 * 60_000,
+  }));
+  assert.ok(future.updatedAt >= futureReceivedAfter && future.updatedAt <= Date.now(),
+    'far-future timestamps are bounded to server receipt time');
   s.close();
 });
 
@@ -144,7 +175,9 @@ test('a root hook event attaches a unique run-only session without inventing an 
     eventId: 'hook-root', runId: 'thread-1', agentId: 'root', harness: 'codex', state: 'active',
   }));
   assert.equal(root.sessionId, session.id);
-  assert.equal(s.getState('crew-run-only').sessions[0]?.agentId, null);
+  const shared = s.getState('crew-run-only').sessions[0]!;
+  assert.equal(shared.agentLineage, true);
+  assert.ok(!('agentId' in shared));
   s.close();
 });
 
@@ -182,6 +215,78 @@ test('stale is derived from lifecycle age and a fresh session for the same actor
 
   s.startSession('crew-stale', sessionCreate.parse({ agent: 'codex', runId: 'run-stale' }), 'cap', 'user-1');
   assert.equal(s.getState('crew-stale').agents[0]?.stale, false);
+  s.close();
+});
+
+test('state reads prune old executions for every actor, preserve live runs, and heal children', () => {
+  const s = new Store({ dbPath: ':memory:', sessionTtlMs: 60_000 });
+  const report = (userId: string, eventId: string, runId: string, agentId: string,
+    state: 'active' | 'completed', parentAgentId?: string) => s.reportAgentEvent(
+    'crew-retention', userId, userId, agentEvent.parse({
+      eventId, runId, agentId, parentAgentId, harness: 'codex', state,
+    }));
+  const terminal = report('alice', 'old-terminal-event', 'old-terminal-run', 'terminal', 'completed');
+  const stale = report('bob', 'old-active-event', 'old-active-run', 'stale', 'active');
+  const live = report('alice', 'live-terminal-event', 'live-run', 'live', 'completed');
+  const oldParent = report('bob', 'old-parent-event', 'tree-run', 'parent', 'active');
+  const child = report('bob', 'fresh-child-event', 'tree-run', 'child', 'active', 'parent');
+  s.startSession('crew-retention', sessionCreate.parse({ agent: 'codex', runId: 'live-run' }),
+    'cap', 'alice');
+
+  const old = Date.now() - 8 * 24 * 60 * 60_000;
+  s.db.prepare(`UPDATE agent_executions SET updated_at = ?,
+    ended_at = CASE WHEN ended_at IS NULL THEN NULL ELSE ? END WHERE id IN (?, ?, ?, ?)`)
+    .run(old, old, terminal.id, stale.id, live.id, oldParent.id);
+  s.db.prepare(`UPDATE agent_events SET received_at = ? WHERE execution_id IN (?, ?, ?, ?)`)
+    .run(old, terminal.id, stale.id, live.id, oldParent.id);
+
+  const state = s.getState('crew-retention');
+  assert.ok(!state.agents.some((a) => a.id === terminal.id), 'old terminal history is pruned');
+  assert.ok(!state.agents.some((a) => a.id === stale.id), 'old stale nonterminal history is pruned');
+  assert.ok(state.agents.some((a) => a.id === live.id), 'a fresh same-actor/run session preserves execution history');
+  const healed = state.agents.find((a) => a.id === child.id)!;
+  assert.equal(healed.parentId, null);
+  assert.equal(healed.parentUnavailable, true);
+  assert.equal(Number((s.db.prepare(`SELECT COUNT(*) AS n FROM agent_events
+    WHERE execution_id IN (?, ?, ?)`).get(terminal.id, stale.id, oldParent.id) as { n: number }).n), 0,
+  'dedupe rows are removed with pruned executions');
+  s.close();
+});
+
+test('execution history keeps 1000 newest unlinked rows plus every session-linked row', () => {
+  const s = new Store({ dbPath: ':memory:' });
+  const linked = s.startSession('crew-cap', sessionCreate.parse({
+    agent: 'codex', runId: 'linked-run', agentId: 'linked-agent', agentState: 'active',
+  }), 'cap', 'cap-user');
+  s.db.prepare(`UPDATE agent_executions SET updated_at = 0 WHERE session_id = ?`).run(linked.id);
+  const insertExecution = s.db.prepare(`INSERT INTO agent_executions
+    (id, project_id, user_id, run_id, agent_id, parent_agent_id, parent_id, harness,
+     name, role, task, state, state_reason, provenance, session_id, developer,
+     started_at, updated_at, ended_at)
+    VALUES (?, 'crew-cap', 'cap-user', 'history-run', ?, ?, ?, 'codex', NULL, NULL, NULL,
+      'active', NULL, 'harness-reported', NULL, 'Ada', ?, ?, NULL)`);
+  const base = Date.now() - 2000;
+  s.db.exec('BEGIN');
+  for (let i = 0; i < 1002; i += 1) {
+    insertExecution.run(`history-id-${i}`, `history-${i}`, i === 1001 ? 'history-0' : null,
+      i === 1001 ? 'history-id-0' : null, base + i, base + i);
+  }
+  s.db.prepare(`INSERT INTO agent_events
+    (project_id, user_id, event_id, execution_id, occurred_at, received_at, payload_hash)
+    VALUES ('crew-cap', 'cap-user', 'old-dedupe', 'history-id-0', ?, ?, NULL)`).run(base, base);
+  s.db.exec('COMMIT');
+
+  const state = s.getState('crew-cap');
+  assert.equal(Number((s.db.prepare(`SELECT COUNT(*) AS n FROM agent_executions
+    WHERE project_id = 'crew-cap' AND user_id = 'cap-user' AND session_id IS NULL`).get() as { n: number }).n),
+  1000);
+  assert.equal(state.agentCount, 1001, 'the bounded history count excludes no live session-linked row');
+  assert.equal(state.agents[0]?.id, 'history-id-1001', 'active preview is ordered by freshest update');
+  assert.equal(state.agents[0]?.parentId, null, 'a parent removed by the cap leaves no dangling edge');
+  assert.equal(state.agents[0]?.parentUnavailable, true);
+  assert.equal(Number((s.db.prepare(
+    "SELECT COUNT(*) AS n FROM agent_events WHERE event_id = 'old-dedupe'").get() as { n: number }).n), 0);
+  assert.ok(s.db.prepare('SELECT 1 FROM agent_executions WHERE session_id = ?').get(linked.id));
   s.close();
 });
 

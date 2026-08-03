@@ -12,7 +12,7 @@ import {
 } from '../core/types.ts';
 import type {
   AgentExecution, AgentState, Bug, Claim, ConflictWarning, EventEntry, EventType, Finding, MemberRole, NewsItem,
-  ProjectState, ProjectSummary, RecentFile, RepoState, Session, WorkScope,
+  ProjectAgentExecution, ProjectSession, ProjectState, ProjectSummary, RecentFile, RepoState, Session, WorkScope,
 } from '../core/types.ts';
 import type {
   AgentEvent, BugCreate, BugPatch, ClaimComplete, ClaimCreate, ClaimPatch,
@@ -38,6 +38,8 @@ const TERMINAL_AGENT_STATES: AgentState[] = ['completed', 'failed', 'cancelled']
 const ACTIVE_AGENT_LIMIT = 200;
 const TERMINAL_AGENT_LIMIT = 50;
 const AGENT_EVENT_CAP = 5000;
+// Unlinked executions are bounded history; session-linked work is always kept.
+const AGENT_EXECUTION_HISTORY_CAP = 1000;
 const AGENT_HISTORY_RETENTION_MS = 7 * 24 * 60 * 60_000;
 
 // Project ids are slugs. Enforced on CREATION only, because ids created before the
@@ -91,6 +93,7 @@ const ADD_COLUMNS: [table: string, column: string, decl: string][] = [
   ['sessions', 'agentStateReason', 'TEXT'],
   ['sessions', 'agentProvenance', 'TEXT'],
   ['sessions', 'agent_execution_id', 'TEXT'],
+  ['agent_events', 'payload_hash', 'TEXT'],
   ['claims', 'worktree', 'TEXT'],
   ['claims', 'blockedOn', 'TEXT'],
 ];
@@ -305,6 +308,21 @@ function agentExecutionFromRow(r: Row, stale: boolean): AgentExecution {
   };
 }
 
+function agentEventPayloadHash(input: AgentEvent): string {
+  const keys = Object.keys(input).sort();
+  return createHash('sha256').update(JSON.stringify(input, keys)).digest('base64url');
+}
+
+function sharedAgentExecution(execution: AgentExecution): ProjectAgentExecution {
+  const { runId: _runId, agentId: _agentId, ...shared } = execution;
+  return shared;
+}
+
+function sharedSession(session: Session): ProjectSession {
+  const { runId, agentId: _agentId, parentAgentId: _parentAgentId, ...shared } = session;
+  return { ...shared, agentLineage: runId != null };
+}
+
 function claimFromRow(r: Row): Claim {
   return {
     id: r.id as string,
@@ -409,6 +427,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS agent_events (
         project_id TEXT NOT NULL, user_id TEXT NOT NULL, event_id TEXT NOT NULL,
         execution_id TEXT NOT NULL, occurred_at INTEGER NOT NULL, received_at INTEGER NOT NULL,
+        payload_hash TEXT,
         PRIMARY KEY (project_id, user_id, event_id)
       );
       CREATE TABLE IF NOT EXISTS pair_requests (
@@ -725,21 +744,28 @@ export class Store {
     const skew = 5 * 60_000;
     const reportedAt = input.occurredAt ?? receivedAt;
     const occurredAt = Math.abs(reportedAt - receivedAt) <= skew ? reportedAt : receivedAt;
+    const payloadHash = agentEventPayloadHash(input);
     let execution!: Row;
+    let applied = true;
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const existing = this.executionRow(projectId, userId, input.runId, input.agentId);
       const executionId = (existing?.id as string | undefined) ?? randomUUID();
       const inserted = this.db.prepare(`INSERT OR IGNORE INTO agent_events
-        (project_id, user_id, event_id, execution_id, occurred_at, received_at) VALUES (?, ?, ?, ?, ?, ?)`)
-        .run(projectId, userId, input.eventId, executionId, occurredAt, receivedAt);
+        (project_id, user_id, event_id, execution_id, occurred_at, received_at, payload_hash)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`)
+        .run(projectId, userId, input.eventId, executionId, occurredAt, receivedAt, payloadHash);
       if (inserted.changes === 0) {
-        const recorded = this.db.prepare(`SELECT execution_id FROM agent_events
+        const recorded = this.db.prepare(`SELECT execution_id, payload_hash FROM agent_events
           WHERE project_id = ? AND user_id = ? AND event_id = ?`)
           .get(projectId, userId, input.eventId) as Row;
         if (recorded.execution_id !== executionId) fail('eventId already used for another agent execution', 409);
+        if (recorded.payload_hash != null && recorded.payload_hash !== payloadHash) {
+          fail('eventId already used with different content', 409);
+        }
         execution = this.executionRow(projectId, userId, input.runId, input.agentId)
           ?? (() => { throw new Error('agent event exists without its execution'); })();
+        applied = false;
       } else if (!existing) {
         const endedAt = TERMINAL_AGENT_STATES.includes(input.state) ? occurredAt : null;
         this.db.prepare(`INSERT INTO agent_executions
@@ -752,35 +778,43 @@ export class Store {
             input.state, input.stateReason ?? null, developer, occurredAt, occurredAt, endedAt);
         execution = this.executionRow(projectId, userId, input.runId, input.agentId)!;
       } else {
-        const newer = occurredAt >= Number(existing.updated_at);
-        const parentAgentId = newer
-          ? input.parentAgentId ?? null
-          : (existing.parent_agent_id as string | null) ?? input.parentAgentId ?? null;
-        const endedAt = newer
-          ? (TERMINAL_AGENT_STATES.includes(input.state) ? occurredAt : null)
-          : existing.ended_at;
-        this.db.prepare(`UPDATE agent_executions SET parent_agent_id = ?,
-          harness = CASE WHEN ? THEN ? ELSE harness END,
-          name = CASE WHEN ? THEN ? ELSE name END, role = CASE WHEN ? THEN ? ELSE role END,
-          task = CASE WHEN ? THEN ? ELSE task END, state = CASE WHEN ? THEN ? ELSE state END,
-          state_reason = CASE WHEN ? THEN ? ELSE state_reason END,
-          provenance = 'harness-reported', developer = COALESCE(developer, ?),
-          started_at = MIN(started_at, ?), updated_at = CASE WHEN ? THEN ? ELSE updated_at END,
-          ended_at = CASE WHEN ? THEN ? ELSE ended_at END WHERE id = ?`)
-          .run(parentAgentId,
-            newer ? 1 : 0, input.harness,
-            newer ? 1 : 0, input.name ?? null, newer ? 1 : 0, input.role ?? null,
-            newer ? 1 : 0, input.task ?? null, newer ? 1 : 0, input.state,
-            newer ? 1 : 0, input.stateReason ?? null, developer, occurredAt,
-            newer ? 1 : 0, occurredAt, newer ? 1 : 0, endedAt as number | null, existing.id as string);
-        execution = this.executionRow(projectId, userId, input.runId, input.agentId)!;
+        const outOfWindowPast = input.occurredAt != null && input.occurredAt < receivedAt - skew;
+        if (outOfWindowPast) {
+          execution = existing;
+          applied = false;
+        } else {
+          const newer = occurredAt >= Number(existing.updated_at);
+          const parentAgentId = newer
+            ? input.parentAgentId ?? null
+            : (existing.parent_agent_id as string | null) ?? input.parentAgentId ?? null;
+          const endedAt = newer
+            ? (TERMINAL_AGENT_STATES.includes(input.state) ? occurredAt : null)
+            : existing.ended_at;
+          this.db.prepare(`UPDATE agent_executions SET parent_agent_id = ?,
+            harness = CASE WHEN ? THEN ? ELSE harness END,
+            name = CASE WHEN ? THEN ? ELSE name END, role = CASE WHEN ? THEN ? ELSE role END,
+            task = CASE WHEN ? THEN ? ELSE task END, state = CASE WHEN ? THEN ? ELSE state END,
+            state_reason = CASE WHEN ? THEN ? ELSE state_reason END,
+            provenance = 'harness-reported', developer = COALESCE(developer, ?),
+            started_at = MIN(started_at, ?), updated_at = CASE WHEN ? THEN ? ELSE updated_at END,
+            ended_at = CASE WHEN ? THEN ? ELSE ended_at END WHERE id = ?`)
+            .run(parentAgentId,
+              newer ? 1 : 0, input.harness,
+              newer ? 1 : 0, input.name ?? null, newer ? 1 : 0, input.role ?? null,
+              newer ? 1 : 0, input.task ?? null, newer ? 1 : 0, input.state,
+              newer ? 1 : 0, input.stateReason ?? null, developer, occurredAt,
+              newer ? 1 : 0, occurredAt, newer ? 1 : 0, endedAt as number | null, existing.id as string);
+          execution = this.executionRow(projectId, userId, input.runId, input.agentId)!;
+        }
       }
 
-      this.resolveExecutionParents(projectId, userId, input.runId);
-      const sessionId = this.uniqueSessionForExecution(projectId, userId, input.runId, input.agentId,
-        (execution.parent_agent_id as string | null) == null);
-      if (sessionId) this.linkSessionExecution(sessionId, execution.id as string);
-      execution = this.executionRow(projectId, userId, input.runId, input.agentId)!;
+      if (applied) {
+        this.resolveExecutionParents(projectId, userId, input.runId);
+        const sessionId = this.uniqueSessionForExecution(projectId, userId, input.runId, input.agentId,
+          (execution.parent_agent_id as string | null) == null);
+        if (sessionId) this.linkSessionExecution(sessionId, execution.id as string);
+        execution = this.executionRow(projectId, userId, input.runId, input.agentId)!;
+      }
       this.pruneAgentHistory(projectId, userId, receivedAt);
       this.db.exec('COMMIT');
     } catch (error) {
@@ -790,18 +824,44 @@ export class Store {
     return agentExecutionFromRow(execution, this.executionIsStale(execution, Date.now()));
   }
 
-  private pruneAgentHistory(projectId: string, userId: string, now: number): void {
+  private pruneAgentHistory(projectId: string, userId: string | null, now: number): void {
     const cutoff = now - AGENT_HISTORY_RETENTION_MS;
-    this.db.prepare(`DELETE FROM agent_events WHERE project_id = ? AND user_id = ?
-      AND (received_at < ? OR rowid NOT IN (
-        SELECT rowid FROM agent_events WHERE project_id = ? AND user_id = ?
-        ORDER BY received_at DESC, rowid DESC LIMIT ?
-      ))`).run(projectId, userId, cutoff, projectId, userId, AGENT_EVENT_CAP);
-    this.db.prepare(`DELETE FROM agent_executions WHERE project_id = ? AND user_id = ?
-      AND ended_at IS NOT NULL AND ended_at < ?`).run(projectId, userId, cutoff);
-    this.db.prepare(`UPDATE agent_executions SET parent_id = NULL WHERE project_id = ? AND user_id = ?
-      AND parent_id IS NOT NULL AND parent_id NOT IN (SELECT id FROM agent_executions)`)
-      .run(projectId, userId);
+    const actors = this.db.prepare(`SELECT DISTINCT user_id FROM agent_executions
+      WHERE project_id = ? AND (? IS NULL OR user_id = ?)`)
+      .all(projectId, userId, userId) as Row[];
+    for (const actor of actors) {
+      const actorId = actor.user_id as string;
+      const oldExecutions = `SELECT e.id FROM agent_executions e WHERE e.project_id = ? AND e.user_id = ?
+        AND ((e.ended_at IS NOT NULL AND e.ended_at < ?)
+          OR (e.ended_at IS NULL AND e.updated_at < ?))
+        AND NOT EXISTS (SELECT 1 FROM sessions s WHERE s.projectId = e.project_id
+          AND s.user_id = e.user_id AND s.runId = e.run_id AND s.lastSeenAt >= ?)`;
+      const oldArgs = [projectId, actorId, cutoff, cutoff, now - this.sessionTtlMs] as const;
+      this.db.prepare(`DELETE FROM agent_events WHERE execution_id IN (${oldExecutions})`).run(...oldArgs);
+      this.db.prepare(`DELETE FROM agent_executions WHERE id IN (${oldExecutions})`).run(...oldArgs);
+
+      const excessExecutions = `SELECT id FROM agent_executions WHERE project_id = ? AND user_id = ?
+        AND session_id IS NULL ORDER BY updated_at DESC, started_at DESC, id DESC
+        LIMIT -1 OFFSET ?`;
+      const excessArgs = [projectId, actorId, AGENT_EXECUTION_HISTORY_CAP] as const;
+      this.db.prepare(`DELETE FROM agent_events WHERE execution_id IN (${excessExecutions})`).run(...excessArgs);
+      this.db.prepare(`DELETE FROM agent_executions WHERE id IN (${excessExecutions})`).run(...excessArgs);
+
+      this.db.prepare(`DELETE FROM agent_events WHERE project_id = ? AND user_id = ?
+        AND (received_at < ? OR rowid NOT IN (
+          SELECT rowid FROM agent_events WHERE project_id = ? AND user_id = ?
+          ORDER BY received_at DESC, rowid DESC LIMIT ?
+        ))`).run(projectId, actorId, cutoff, projectId, actorId, AGENT_EVENT_CAP);
+    }
+    this.db.prepare(`UPDATE agent_executions AS child SET parent_id = NULL WHERE project_id = ?
+      AND parent_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM agent_executions parent WHERE parent.id = child.parent_id
+          AND parent.project_id = child.project_id AND parent.user_id = child.user_id)`)
+      .run(projectId);
+    this.db.prepare(`DELETE FROM agent_events AS event WHERE project_id = ? AND NOT EXISTS (
+      SELECT 1 FROM agent_executions execution WHERE execution.id = event.execution_id
+        AND execution.project_id = event.project_id AND execution.user_id = event.user_id)`)
+      .run(projectId);
   }
 
   private executionIsStale(row: Row, now: number): boolean {
@@ -1944,10 +2004,18 @@ export class Store {
   getState(projectId: string): ProjectState {
     this.sweep(); // reading state also reaps expired sessions/claims
     const now = Date.now();
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.pruneAgentHistory(projectId, null, now);
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
     const sessions = (this.db.prepare('SELECT * FROM sessions WHERE projectId = ? ORDER BY createdAt')
-      .all(projectId) as Row[]).map(sessionFromRow);
+      .all(projectId) as Row[]).map(sessionFromRow).map(sharedSession);
     const activeAgents = this.db.prepare(`SELECT * FROM agent_executions
-      WHERE project_id = ? AND ended_at IS NULL ORDER BY started_at, id LIMIT ?`)
+      WHERE project_id = ? AND ended_at IS NULL ORDER BY updated_at DESC, id DESC LIMIT ?`)
       .all(projectId, ACTIVE_AGENT_LIMIT) as Row[];
     const terminalAgents = this.db.prepare(`SELECT * FROM agent_executions
       WHERE project_id = ? AND ended_at IS NOT NULL ORDER BY ended_at DESC, id DESC LIMIT ?`)
@@ -1955,7 +2023,7 @@ export class Store {
     const agentCount = Number((this.db.prepare(`SELECT COUNT(*) AS n FROM agent_executions
       WHERE project_id = ?`).get(projectId) as Row).n);
     const agents = [...activeAgents, ...terminalAgents]
-      .map((row) => agentExecutionFromRow(row, this.executionIsStale(row, now)));
+      .map((row) => sharedAgentExecution(agentExecutionFromRow(row, this.executionIsStale(row, now))));
     const claims = this.activeClaims(projectId);
     const bugs = (this.db.prepare('SELECT * FROM bugs WHERE projectId = ? ORDER BY createdAt')
       .all(projectId) as Row[]).map(bugFromRow);

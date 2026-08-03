@@ -182,15 +182,19 @@ export function buildApp(store: Store, options: AppOptions = {}): Hono {
       const pid = seg[3] ?? '';
       if (!PROJECT_SEG_RE.test(pid)) return c.json({ error: 'project not found', project: pid }, 404);
       if (!cred && !user) return unauthorized(c);
+      const credentialOnly = m === 'POST' && seg[4] === 'agent-events';
+      if (credentialOnly && !cred) {
+        return c.json({ error: 'device Bearer required for agent lifecycle events', docs: AUTH_MD }, 403);
+      }
 
       // Project administration (members, deletion) is never available to agents.
       const isAdminSurface = seg[4] === 'members' || (m === 'DELETE' && seg.length === 4);
       if (isAdminSurface && !user) {
         return c.json({ error: 'project administration is human-only', docs: AUTH_MD }, 403);
       }
-      const actor = user?.id ?? cred!.userId;
+      const actor = credentialOnly ? cred!.userId : user?.id ?? cred!.userId;
       const githubProject = authMode === 'github-app' ? store.getGithubProjectById(pid) : null;
-      const instanceAdmin = user?.role === 'admin' && !githubProject;
+      const instanceAdmin = !credentialOnly && user?.role === 'admin' && !githubProject;
 
       if (!store.projectExists(pid)) {
         // The one creation path agents have: first session on an unknown id.
@@ -227,7 +231,7 @@ export function buildApp(store: Store, options: AppOptions = {}): Hono {
       // when the last GitHub verification has gone stale; an agent's device
       // bearer still needs a fresh grant (its session creation re-verifies).
       const role = githubProject
-        ? store.githubMemberRole(pid, actor, { fresh: !user })
+        ? store.githubMemberRole(pid, actor, { fresh: credentialOnly || !user })
         : store.memberRole(pid, actor);
       if (!role && !instanceAdmin) {
         return c.json({
@@ -533,10 +537,8 @@ export function buildApp(store: Store, options: AppOptions = {}): Hono {
   });
 
   app.post('/api/projects/:p/agent-events', async (c) => {
-    const userId = actorId(c);
-    if (!userId) return unauthorized(c);
-    const developer = getUser(c)?.displayName ?? getCred(c)?.ownerDisplayName ?? null;
-    return c.json(store.reportAgentEvent(c.req.param('p'), userId, developer,
+    const cred = getCred(c)!; // credential-scoped by the single auth middleware
+    return c.json(store.reportAgentEvent(c.req.param('p'), cred.userId, cred.ownerDisplayName,
       await parseBody(c, schemas.agentEvent)));
   });
 

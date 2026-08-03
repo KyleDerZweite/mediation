@@ -98,14 +98,16 @@ test('session execution metadata round-trips through create, heartbeat and proje
   assert.equal(beat.body.agentState, 'waiting');
 
   const state = (await get(`${P}/state`)).body;
-  const execution = state.agents.find((a: { runId: string; agentId: string }) =>
-    a.runId === 'api-run' && a.agentId === 'api-worker');
+  const execution = state.agents.find((a: { sessionId: string }) => a.sessionId === created.body.id);
   assert.equal(execution.task, 'Test route');
   assert.equal(execution.stateReason, 'waiting for fixtures');
   assert.equal(execution.sessionId, created.body.id);
   assert.equal(execution.stale, false);
   assert.equal(execution.parentUnavailable, false);
-  assert.ok(!('parentAgentId' in execution));
+  assert.ok(!('runId' in execution) && !('agentId' in execution) && !('parentAgentId' in execution));
+  const sharedSession = state.sessions.find((s: { id: string }) => s.id === created.body.id);
+  assert.equal(sharedSession.agentLineage, true);
+  assert.ok(!('runId' in sharedSession) && !('agentId' in sharedSession) && !('parentAgentId' in sharedSession));
 });
 
 test('agent event endpoint is idempotent and ignores older lifecycle updates', async () => {
@@ -119,10 +121,16 @@ test('agent event endpoint is idempotent and ignores older lifecycle updates', a
 
   const duplicate = await post(`${P}/agent-events`, {
     eventId: 'api-event-start', runId: 'event-run', agentId: 'event-worker', harness: 'codex',
-    state: 'failed', occurredAt: now + 100,
+    task: 'Inspect server', state: 'active', occurredAt: now,
   });
   assert.equal(duplicate.status, 200);
   assert.equal(duplicate.body.state, 'active');
+
+  const changedRetry = await post(`${P}/agent-events`, {
+    eventId: 'api-event-start', runId: 'event-run', agentId: 'event-worker', harness: 'codex',
+    state: 'failed', occurredAt: now,
+  });
+  assert.equal(changedRetry.status, 409);
 
   const stop = await post(`${P}/agent-events`, {
     eventId: 'api-event-stop', runId: 'event-run', agentId: 'event-worker', harness: 'codex',

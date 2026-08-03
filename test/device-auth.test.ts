@@ -18,6 +18,24 @@ test('device login is global, waits for approval, and sessions cannot cross-cont
   const token = (await jb(login)).token;
   assert.ok(token.length > 30);
   await req('POST', '/api/projects', { id: 'private' }, { cookie: alice.cookie });
+  const lifecycle = {
+    eventId: 'alice-lifecycle', runId: 'alice-run', agentId: 'worker', harness: 'codex', state: 'active',
+  };
+  const cookieOnly = await req('POST', '/api/projects/private/agent-events', lifecycle, { cookie: alice.cookie });
+  assert.equal(cookieOnly.status, 403);
+  assert.match((await jb(cookieOnly)).error, /device Bearer/);
+
+  const mixedLifecycle = await jb(await req('POST', '/api/projects/private/agent-events', lifecycle,
+    { token, cookie: admin }));
+  assert.equal(mixedLifecycle.developer, 'alice', 'event attribution comes only from the credential owner');
+  const adminToken = (await jb(await req('POST', '/api/auth/device-login', {
+    username: 'admin', password: PW, machine: 'admin-box',
+  }))).token;
+  assert.equal((await req('POST', '/api/projects/private/agent-events', {
+    ...lifecycle, eventId: 'admin-lifecycle', runId: 'admin-run',
+  }, { token: adminToken, cookie: alice.cookie })).status, 403,
+  'a member cookie cannot lend its project access to another user credential');
+
   const first = await jb(await req('POST', '/api/projects/private/sessions', { agent: 'claude-code' }, { token }));
   const second = await jb(await req('POST', '/api/projects/private/sessions', { agent: 'claude-code' }, { token }));
   assert.match(first.agent, /^claude-code-[0-9a-f]{8}@alice$/);
