@@ -91,6 +91,14 @@ function jsonConfig(file, expected, remove = false, accepted = [expected]) {
   return JSON.stringify(obj, null, 2) + '\n';
 }
 const hookEvents = ['SessionStart', 'SessionEnd', 'SubagentStart', 'SubagentStop'];
+// Claude Code also reports observed activity. The timeout stays at 3s even for
+// the per-tool-call events: the harness waits for this process, and a report
+// that does go out spends up to two 750ms requests. The hook debounces
+// unchanged state locally, so the usual PreToolUse cost is process start alone.
+// Codex is left at the lifecycle four: no tool-level Codex hook event name is
+// verifiable from this repository, and guessing one installs dead config.
+const claudeHookEvents = [...hookEvents,
+  'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Notification', 'Stop', 'PreCompact'];
 function hookJsonConfig(file, command, remove = false, accepted = [command]) {
   const raw = read(file); let obj = {};
   if (raw !== undefined) { try { obj = JSON.parse(raw); } catch { fail(`refusing malformed JSON: ${file}`); } }
@@ -99,7 +107,7 @@ function hookJsonConfig(file, command, remove = false, accepted = [command]) {
     fail(`refusing invalid hooks: ${file}`);
   }
   const hooks = { ...(obj.hooks || {}) };
-  for (const event of hookEvents) {
+  for (const event of claudeHookEvents) {
     if (hooks[event] !== undefined && !Array.isArray(hooks[event])) fail(`refusing invalid ${event} hooks: ${file}`);
     const groups = [];
     for (const group of hooks[event] || []) {

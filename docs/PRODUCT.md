@@ -77,6 +77,14 @@ device can report lifecycle events.
 The dashboard treats stale as freshness, not as a replacement lifecycle state.
 It distinguishes missing lineage from a parent omitted by a bounded preview.
 
+Where the harness reports tool-level events, the crew card also shows what the
+agent is doing right now, paired with the age of that observation: *running a
+command · 8s ago*. The phrasing is a fixed coarse category, never the tool
+name, its input, or any text the human or the model wrote. **Needs input** is
+rendered distinctly, because an agent stopped on a permission prompt is the one
+state a person has to act on rather than merely watch. Nothing here steers the
+agent: the product observes, it does not approve or cancel.
+
 The product does not replace an issue tracker, roadmap, wiki, Git provider, CI
 system, agent runtime, or agent orchestrator. It observes execution state but
 does not spawn, steer, approve, cancel, or score agents.

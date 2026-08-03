@@ -225,7 +225,11 @@ user.
 
 The installer wires the dependency-free lifecycle bridge into Codex and
 Claude Code for `SessionStart`, `SessionEnd`, `SubagentStart`, and
-`SubagentStop`. Codex requires the user to open `/hooks` and review/trust the
+`SubagentStop`. For Claude Code it also wires the observed-activity events
+`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Notification`, `Stop`, and
+`PreCompact`. Codex stays lifecycle-only: no tool-level Codex hook event name
+is verifiable here, and a guessed one would install dead configuration.
+Codex requires the user to open `/hooks` and review/trust the
 installed command before it runs. The hook is silent and fail-open when the
 server, repository mapping, credential, or input is unavailable. Kimi has no
 native lifecycle hook and therefore remains MCP/environment-only. Its sessions
@@ -237,6 +241,35 @@ event id. Thus, a `Start` after `End` resumes the same logical execution.
 `SubagentStart` refreshes the root and starts the child. `SubagentStop` reports
 only the child's completion and does not reopen the root.
 
+Observed activity reuses the existing states. It adds no new ones:
+
+| Event | `state` | `stateReason` |
+| --- | --- | --- |
+| `UserPromptSubmit` | `active` | `processing prompt` |
+| `PreToolUse` | `active` | one coarse category per tool name |
+| `PostToolUse` | `active` | `working` |
+| `Notification` | `needs-input` | `waiting for approval`, else `needs attention` |
+| `Stop` | `waiting` | `idle` |
+| `PreCompact` | `active` | `compacting context` |
+
+The `PreToolUse` categories are `running a command`, `editing files`,
+`reading code`, `delegating to a subagent`, `using an MCP tool`, `browsing`,
+and `using a tool` for anything unrecognised. No state in the table above is
+terminal, so an observed event never sets `endedAt`; only `SessionEnd` and
+`SubagentStop` end an execution.
+
+The hook debounces observed activity against a per-run cache file in a scratch
+directory, keyed by the hashed run id. An unchanged state makes no request at
+all, not even the project lookup, because the harness waits for the hook on
+every tool call. A changed state always posts. A changed reason within the same
+state posts once when there was no reason before, and is otherwise rate limited
+to one report per fifteen seconds, so read/edit/read alternation does not spam.
+The cache is advisory: any read or write failure behaves as an empty cache and
+costs at most one redundant report. Lifecycle events are never debounced,
+because a repeat still has to deliver parent links, resumption, or a terminal
+state. Each occurrence keeps its own event id, so a repeat is never a
+changed-payload reuse of an existing one.
+
 The dashboard bounds the Crew tree in a keyboard-focusable scroll region.
 `stale` is a secondary freshness qualifier. It does not replace a lifecycle
 state such as **Blocked**, **Needs input**, or **Failed**.
@@ -244,9 +277,13 @@ state such as **Blocked**, **Needs input**, or **Failed**.
 Crew task and reason text is visible to every project member. Report only a
 short telemetry-safe summary: never copy a prompt, transcript, assistant
 message, tool input/output, secret, permission data, model setting, or absolute
-path. The native hook reads only the lifecycle event name, stable session and
+path. The native hook reads only the event name, stable session and
 agent ids, agent type, and `cwd`. It uses `cwd` locally to find
-`.mediation.json`. It does not send `cwd` or the excluded content. The
+`.mediation.json`. It does not send `cwd` or the excluded content. A tool name
+and a notification message are read locally only to select one of the fixed
+phrases above; neither the tool name itself nor any tool input, path, command,
+URL, or message text is sent, and an unrecognised tool falls back to a generic
+phrase so a custom or MCP tool name cannot leak through the mapping. The
 dashboard and raw HTTP state show free-text crew metadata. MCP
 `mediation_state` news does not include it.
 

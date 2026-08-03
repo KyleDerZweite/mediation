@@ -61,6 +61,29 @@ test('session metadata creates a durable execution, heartbeat updates it, and tr
   s.close();
 });
 
+test('observed activity updates one execution in place and never ends it', () => {
+  const s = new Store({ dbPath: ':memory:', sessionTtlMs: 1000 });
+  const now = Date.now();
+  const report = (eventId: string, state: string, stateReason: string, at: number) =>
+    s.reportAgentEvent('crew-observed', 'user-1', 'Ada', mkAgentEvent({
+      eventId, runId: 'run-obs', agentId: 'run-obs', harness: 'claude-code', state, stateReason, occurredAt: at,
+    }));
+
+  const reading = report('obs-1', 'active', 'reading code', now);
+  const asking = report('obs-2', 'needs-input', 'waiting for approval', now + 10);
+  const idle = report('obs-3', 'waiting', 'idle', now + 20);
+
+  assert.equal(new Set([reading.id, asking.id, idle.id]).size, 1, 'one execution, not one per event');
+  assert.equal(idle.state, 'waiting');
+  assert.equal(idle.stateReason, 'idle');
+  assert.equal(asking.endedAt, null, 'needs-input is not terminal');
+  assert.equal(idle.endedAt, null, 'waiting is not terminal');
+  assert.equal(idle.startedAt, reading.startedAt);
+  assert.ok(idle.updatedAt > reading.updatedAt);
+  assert.equal(s.getState('crew-observed').agents.length, 1);
+  s.close();
+});
+
 test('native agent events are idempotent, ordered by occurredAt, and heal child-first parentage', () => {
   const s = new Store({ dbPath: ':memory:', sessionTtlMs: 1000 });
   const now = Date.now();

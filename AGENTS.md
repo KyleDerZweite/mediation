@@ -149,13 +149,21 @@ Enforcement summary (all of it in the one `/api/*` middleware in
   heartbeat. The native `CODEX_THREAD_ID` fallback is server-and-repository
   scoped and hashed before upload.
 - `clients/mediation-hook.mjs` is the fail-open lifecycle bridge for Codex and
-  Claude Code. It accepts only `SessionStart`, `SessionEnd`, `SubagentStart`,
-  and `SubagentStop`. It sends scoped, hashed session/agent ids and maps
+  Claude Code. It accepts the lifecycle four, `SessionStart`, `SessionEnd`,
+  `SubagentStart`, and `SubagentStop`, plus the Claude Code observed-activity
+  events `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `Notification`,
+  `Stop`, and `PreCompact`, which map onto the existing `AgentState` enum. It
+  sends scoped, hashed session/agent ids and maps
   `agent_type` to the reported role. Each hook invocation gets one occurrence
   timestamp and a unique event id. A later start can resume a completed
   execution. `SubagentStop` reports only the child completion.
   It never sends prompts, transcripts, messages, tool data, secrets, model or
   permission data, or `cwd`. It uses `cwd` only to find `.mediation.json`.
+  A tool name and a notification message are read locally only to choose one
+  fixed coarse phrase; unknown tools fall back to `using a tool`. Observed
+  activity is debounced against a scratch-file cache of the last posted state
+  per run, so an unchanged state makes no request at all; lifecycle events are
+  never debounced.
   Codex users must review/trust the command in `/hooks`. Kimi stays MCP-only.
 - `clients/install.sh` is the installer template; the server serves it with
   `__MEDIATION_URL__` replaced. Its dependency-free Node helper performs

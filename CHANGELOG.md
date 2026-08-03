@@ -21,6 +21,15 @@
 - The installer adds fail-open `SessionStart`, `SessionEnd`, `SubagentStart`,
   and `SubagentStop` hooks for Codex and Claude Code. Codex requires explicit
   review/trust in `/hooks`. Kimi stays MCP/environment-only.
+- Claude Code additionally reports observed activity from `UserPromptSubmit`,
+  `PreToolUse`, `PostToolUse`, `Notification`, `Stop`, and `PreCompact`, mapped
+  onto the existing states, so the Crew shows what an agent is doing right now
+  and when it stopped for a permission prompt. The reason is a fixed coarse
+  category derived from the tool name alone; no tool name, input, path,
+  command, prompt, or notification text is sent. The hook debounces against a
+  per-run scratch cache, so an unchanged state makes no request at all and a
+  reason change within one state is rate limited. Codex stays lifecycle-only
+  because no tool-level Codex hook event name is verifiable here.
 - The MCP client accepts optional `MEDIATION_RUN_ID`, agent/parent ids, name,
   role, task, state, and state-reason variables, with a repository-scoped hash
   of `CODEX_THREAD_ID` as a run-id-only fallback. Static environment metadata

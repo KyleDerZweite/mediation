@@ -17,6 +17,10 @@ const server = createServer((req, res) => {
   res.writeHead(body ? 200 : 404); res.end(body || 'missing');
 });
 let origin = '';
+// Every event the hook is registered for in Claude Code: reinstall must leave
+// exactly one owned handler on each, and uninstall must leave none.
+const claudeHookEvents = ['SessionStart', 'SessionEnd', 'SubagentStart', 'SubagentStop',
+  'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Notification', 'Stop', 'PreCompact'];
 before(async () => { await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve)); origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`; });
 after(() => { server.close(); rmSync(root, { recursive: true, force: true }); });
 
@@ -42,6 +46,9 @@ test('installer is idempotent and uninstaller preserves unrelated configuration'
   for (const event of ['SessionStart', 'SessionEnd', 'SubagentStart', 'SubagentStop']) {
     assert.equal((codexConfig.match(new RegExp(`\\[\\[hooks\\.${event}\\]\\]`, 'g')) || []).length, 1);
   }
+  // Codex stays lifecycle-only: no tool-level Codex hook event name is
+  // verifiable from this repository, and a guessed one installs dead config.
+  assert.doesNotMatch(codexConfig, /hooks\.(PreToolUse|PostToolUse|UserPromptSubmit|Notification|Stop|PreCompact)/);
   assert.match(result.stderr, /review and trust in \/hooks/);
   assert.equal(existsSync(join(home, 'data', 'mediation-hook.mjs')), true);
   const auth = join(home, 'auth'); mkdirSync(auth, { recursive: true });
@@ -75,7 +82,7 @@ test('Claude receives the initialized-repository skill rule without losing its o
   let result = await run(home, ['--server', origin, '--agent', 'claude-code', '--yes', '--no-login'], env);
   assert.equal(result.status, 0, result.stderr);
   const modified = JSON.parse(readFileSync(join(claudeHome, 'settings.json'), 'utf8'));
-  for (const event of ['SessionStart', 'SessionEnd', 'SubagentStart', 'SubagentStop']) {
+  for (const event of claudeHookEvents) {
     const handler = modified.hooks[event].flatMap((group: { hooks: { command?: string; timeout?: number }[] }) => group.hooks)
       .find((candidate: { command?: string }) => candidate.command?.includes('mediation-hook.mjs'));
     handler.timeout = 99;
@@ -95,7 +102,7 @@ test('Claude receives the initialized-repository skill rule without losing its o
   const settings = JSON.parse(readFileSync(join(claudeHome, 'settings.json'), 'utf8'));
   assert.equal(settings.keep, true);
   assert.equal(settings.hooks.Stop[0].hooks[0].command, 'my-hook');
-  for (const event of ['SessionStart', 'SessionEnd', 'SubagentStart', 'SubagentStop']) {
+  for (const event of claudeHookEvents) {
     const installed = settings.hooks[event].flatMap((group: { hooks: { command?: string }[] }) => group.hooks)
       .filter((handler: { command?: string }) => handler.command?.includes('mediation-hook.mjs'));
     assert.equal(installed.length, 1);
@@ -107,6 +114,44 @@ test('Claude receives the initialized-repository skill rule without losing its o
   assert.equal(readFileSync(join(claudeHome, 'CLAUDE.md'), 'utf8').trim(), '# Mine');
   assert.deepEqual(JSON.parse(readFileSync(join(claudeHome, 'settings.json'), 'utf8')), mine);
   assert.equal(existsSync(join(home, 'data', 'mediation-hook.mjs')), false);
+});
+
+test('upgrading a lifecycle-only Claude install adds the observed-activity events', async () => {
+  const home = join(root, 'claude-upgrade');
+  const claudeHome = join(home, '.claude');
+  const bin = join(home, 'bin');
+  mkdirSync(claudeHome, { recursive: true });
+  mkdirSync(bin, { recursive: true });
+  const fakeClaude = join(bin, 'claude');
+  writeFileSync(fakeClaude, '#!/bin/sh\n[ "$1" = "--version" ] && exit 0\n[ "$1 $2" = "mcp get" ] && exit 1\nexit 0\n');
+  chmodSync(fakeClaude, 0o700);
+  const env = { CLAUDE_HOME: claudeHome, PATH: `${bin}:${process.env.PATH}` };
+
+  let result = await run(home, ['--server', origin, '--agent', 'claude-code', '--yes', '--no-login'], env);
+  assert.equal(result.status, 0, result.stderr);
+  // Rewind to what a previous release installed: the lifecycle four only, plus
+  // hooks of the user's own on events the upgrade is about to start managing.
+  const settings = JSON.parse(readFileSync(join(claudeHome, 'settings.json'), 'utf8'));
+  const owned = settings.hooks.SessionStart;
+  settings.hooks = { SessionStart: owned, SessionEnd: owned, SubagentStart: owned, SubagentStop: owned,
+    PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'my-audit' }] }] };
+  writeFileSync(join(claudeHome, 'settings.json'), JSON.stringify(settings, null, 2));
+
+  result = await run(home, ['--server', origin, '--agent', 'claude-code', '--yes', '--no-login'], env);
+  assert.equal(result.status, 0, result.stderr);
+  const upgraded = JSON.parse(readFileSync(join(claudeHome, 'settings.json'), 'utf8'));
+  for (const event of claudeHookEvents) {
+    const installed = upgraded.hooks[event].flatMap((group: { hooks: { command?: string }[] }) => group.hooks)
+      .filter((handler: { command?: string }) => handler.command?.includes('mediation-hook.mjs'));
+    assert.equal(installed.length, 1, event);
+  }
+  assert.equal(upgraded.hooks.PreToolUse[0].hooks[0].command, 'my-audit');
+
+  result = await run(home, ['--uninstall', '--keep-auth'], env);
+  assert.equal(result.status, 0, result.stderr);
+  const removed = JSON.parse(readFileSync(join(claudeHome, 'settings.json'), 'utf8'));
+  assert.deepEqual(Object.keys(removed.hooks), ['PreToolUse']);
+  assert.deepEqual(removed.hooks.PreToolUse, [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'my-audit' }] }]);
 });
 
 test('Kimi remains MCP-only', async () => {

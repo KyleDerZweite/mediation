@@ -328,9 +328,13 @@ input, button { font-family: inherit; }
 .crew-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; color: #98a2b3; }
 .crew-reason { overflow-wrap: anywhere; font-size: 10.5px; color: #667085; }
 .crew-reason.attention { color: #b42318; }
+/* Needs input is the one crew state a human has to act on, so it is the one
+   that gets weight and a fill rather than another shade of red text. */
+.crew-reason.needs-input { font-weight: 600; }
 .crew-state-wrap { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
 .crew-state { font-size: 10.5px; font-weight: 600; color: #475467; }
 .crew-state.attention { color: #b42318; }
+.crew-state.needs-input { background: #fef3f2; border-radius: 5px; padding: 1px 5px; }
 .crew-state.stale { color: #b45309; }
 .crew-stale { max-width: 90px; text-align: right; line-height: 1.3; }
 .crew-children { margin-left: 13px; padding-left: 14px; border-left: 1px solid #dce3eb; }
@@ -775,6 +779,15 @@ input, button { font-family: inherit; }
 .shell[data-theme="dark"] .stat-hint.info { color: var(--dm-blue); }
 .shell[data-theme="dark"] .stat-hint.warn { color: #f4c56d; }
 .shell[data-theme="dark"] .stat-hint.danger { color: #ff8fa5; }
+/* The crew tree sets its own light-mode colors on .crew-row-content, so it does
+   not inherit the dark surface rules above and has to be restated here. */
+.shell[data-theme="dark"] .crew-row-content { color: var(--dm-text); }
+.shell[data-theme="dark"] :is(.crew-task, .crew-reason) { color: var(--dm-muted-text); }
+.shell[data-theme="dark"] .crew-meta { color: var(--dm-faint); }
+.shell[data-theme="dark"] .crew-state { color: var(--dm-strong); }
+.shell[data-theme="dark"] :is(.crew-reason.attention, .crew-state.attention) { color: #ff8fa5; }
+.shell[data-theme="dark"] .crew-state.stale { color: #f4c56d; }
+.shell[data-theme="dark"] .crew-state.needs-input { background: #321a20; }
 .shell[data-theme="dark"] .tab.active { border-bottom-color: var(--dm-blue); }
 .shell[data-theme="dark"] .menu-item.selected,
 .shell[data-theme="dark"] .filter-pill.active .filter-count { color: var(--dm-blue); }

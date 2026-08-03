@@ -235,6 +235,21 @@ test('Crew preserves actionable lifecycle state when freshness is stale', () => 
   assert.match(html, /crew-reason attention[^>]*>Waiting for review/);
 });
 
+test('Crew pairs observed activity with its own freshness and flags needs input', () => {
+  const { renderNowTab } = loadApp();
+  const agents = [
+    { id: 'awaiting', parentId: null, harness: 'claude-code', name: 'Root agent', state: 'needs-input',
+      stateReason: 'waiting for approval', startedAt: now - 60_000, updatedAt: now - 8_000, endedAt: null },
+    { id: 'busy', parentId: null, harness: 'claude-code', name: 'Busy agent', state: 'active',
+      stateReason: 'running a command', startedAt: now - 60_000, updatedAt: now - 2_000, endedAt: null },
+  ];
+  const html = renderNowTab({ ...projectState, agents }, now, 'proj-42');
+
+  assert.match(html, /crew-reason attention needs-input">waiting for approval · 8s ago</);
+  assert.match(html, /crew-state attention needs-input">Needs input</);
+  assert.match(html, /crew-reason">running a command · 2s ago</);
+});
+
 test('Crew renders a very deep valid lineage without recursion overflow', () => {
   const { renderNowTab } = loadApp();
   const agents = Array.from({ length: 1200 }, (_, i) => ({

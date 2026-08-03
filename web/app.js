@@ -576,16 +576,21 @@ function crewRow(node, now) {
     ? `<time class="sess-ago" datetime="${new Date(updatedAt).toISOString()}">${status.stale ? `last reported ${relative}` : relative}</time>`
     : `<span class="sess-ago">${relative}</span>`;
   const stateLabel = status.stale ? `${status.label} · stale` : status.label;
+  // The reason carries its own age. It sits in the left column, the state rail
+  // on the right, and "waiting for approval" from an hour ago means something
+  // very different from the same words eight seconds old.
+  const reasonAge = knownFreshness ? ` · ${ago(updatedAt, now)} ago` : '';
+  const reasonTone = `${status.tone === 'attention' ? ' attention' : ''}${status.needsInput ? ' needs-input' : ''}`;
   return `<span class="crew-row-content">
     <span class="avatar" style="width:28px;height:28px;font-size:10px;background:${AVATAR_FALLBACK}">${esc(initials(name))}</span>
     <span class="crew-body">
       <span class="crew-name">${esc(name)}${node.role ? `<span class="crew-role">${esc(node.role)}</span>` : ''}${provenance ? `<span class="crew-source">${esc(provenance)}</span>` : ''}</span>
       <span class="crew-task" title="${esc(task)}">${esc(task)}</span>
       ${identity ? `<span class="crew-meta">${esc(identity)}</span>` : ''}
-      ${reason ? `<span class="crew-reason${status.tone === 'attention' ? ' attention' : ''}">${esc(reason)}</span>` : ''}
+      ${reason ? `<span class="crew-reason${reasonTone}">${esc(reason)}${reasonAge}</span>` : ''}
     </span>
     <span class="crew-state-wrap">
-      <span class="crew-state ${status.tone}">${esc(stateLabel)}</span>${freshness}
+      <span class="crew-state ${status.tone}${status.needsInput ? ' needs-input' : ''}">${esc(stateLabel)}</span>${freshness}
     </span>
   </span>`;
 }
