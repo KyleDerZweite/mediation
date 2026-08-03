@@ -74,6 +74,13 @@ test('Claude receives the initialized-repository skill rule without losing its o
   const env = { CLAUDE_HOME: claudeHome, PATH: `${bin}:${process.env.PATH}` };
   let result = await run(home, ['--server', origin, '--agent', 'claude-code', '--yes', '--no-login'], env);
   assert.equal(result.status, 0, result.stderr);
+  const modified = JSON.parse(readFileSync(join(claudeHome, 'settings.json'), 'utf8'));
+  for (const event of ['SessionStart', 'SessionEnd', 'SubagentStart', 'SubagentStop']) {
+    const handler = modified.hooks[event].flatMap((group: { hooks: { command?: string; timeout?: number }[] }) => group.hooks)
+      .find((candidate: { command?: string }) => candidate.command?.includes('mediation-hook.mjs'));
+    handler.timeout = 99;
+  }
+  writeFileSync(join(claudeHome, 'settings.json'), JSON.stringify(modified, null, 2));
   result = await run(home, ['--server', origin, '--agent', 'claude-code', '--yes', '--no-login'], env);
   assert.equal(result.status, 0, result.stderr);
   const instructions = readFileSync(join(claudeHome, 'CLAUDE.md'), 'utf8');
@@ -92,12 +99,14 @@ test('Claude receives the initialized-repository skill rule without losing its o
     const installed = settings.hooks[event].flatMap((group: { hooks: { command?: string }[] }) => group.hooks)
       .filter((handler: { command?: string }) => handler.command?.includes('mediation-hook.mjs'));
     assert.equal(installed.length, 1);
+    assert.equal(installed[0].timeout, 3);
   }
 
   result = await run(home, ['--uninstall', '--keep-auth'], env);
   assert.equal(result.status, 0, result.stderr);
   assert.equal(readFileSync(join(claudeHome, 'CLAUDE.md'), 'utf8').trim(), '# Mine');
   assert.deepEqual(JSON.parse(readFileSync(join(claudeHome, 'settings.json'), 'utf8')), mine);
+  assert.equal(existsSync(join(home, 'data', 'mediation-hook.mjs')), false);
 });
 
 test('Kimi remains MCP-only', async () => {

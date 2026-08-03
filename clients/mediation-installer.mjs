@@ -107,7 +107,7 @@ function hookJsonConfig(file, command, remove = false, accepted = [command]) {
         fail(`refusing invalid ${event} hook group: ${file}`);
       }
       const handlers = group.hooks.filter((handler) => !(handler?.type === 'command'
-        && accepted.includes(handler.command) && handler.timeout === 3));
+        && accepted.includes(handler.command)));
       if (handlers.length || Object.keys(group).some((key) => key !== 'hooks')) groups.push({ ...group, hooks: handlers });
     }
     if (!remove) groups.push({ hooks: [{ type: 'command', command, timeout: 3 }] });
