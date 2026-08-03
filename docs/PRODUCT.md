@@ -74,6 +74,9 @@ Shared project state exposes server ids and server-resolved parent edges. It
 does not expose raw harness run, agent, or parent agent ids. Only an authorized
 device can report lifecycle events.
 
+The dashboard treats stale as freshness, not as a replacement lifecycle state.
+It distinguishes missing lineage from a parent omitted by a bounded preview.
+
 The product does not replace an issue tracker, roadmap, wiki, Git provider, CI
 system, agent runtime, or agent orchestrator. It observes execution state but
 does not spawn, steer, approve, cancel, or score agents.

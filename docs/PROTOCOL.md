@@ -171,23 +171,27 @@ POST /api/projects/{project}/agent-events
   "stateReason": null, "occurredAt": 1753257600000 }
 ```
 
-`eventId`, `runId`, and `agentId` are required. States are `starting`,
-`active`, `waiting`, `blocked`, `needs-input`, `completed`, `failed`, or
-`cancelled`. An `eventId` retry is idempotent only when its canonical content is
-identical. Reusing the id with changed content gets 409. The endpoint derives
+`eventId`, `runId`, `agentId`, and `occurredAt` are required. States are
+`starting`, `active`, `waiting`, `blocked`, `needs-input`, `completed`,
+`failed`, or `cancelled`. An `eventId` retry is idempotent only when its
+canonical content is identical. Reusing the id with changed content gets 409.
+The endpoint derives
 the developer and provenance from the device credential. Clients cannot submit
 either. The server resolves parent references only within the same project,
 credential owner, and run. It returns the parent's server id in `parentId`.
 
 The server accepts client event times within five minutes of receipt for
-ordering. A past time outside that window cannot change an existing execution.
+ordering. A past time outside that window gets 409 when no execution exists.
+It is a no-op when the execution still exists. This rule prevents an old retry
+from recreating history after retention removes the execution and retry row.
 The server bounds a future time outside the window to receipt time.
 
 Each `ProjectState.agents` entry has this shape:
 
 ```
 { "id": "server-execution-id", "projectId": "...",
-  "parentId": "server-parent-id", "parentUnavailable": false, "harness": "codex",
+  "parentId": "server-parent-id", "parentUnavailable": false,
+  "parentOutsidePreview": false, "harness": "codex",
   "name": "Test worker", "role": "worker", "task": "Run focused tests",
   "state": "active", "stateReason": null, "provenance": "harness-reported",
   "sessionId": null, "developer": "Alice", "startedAt": 1753257600000,
@@ -203,6 +207,11 @@ live transport session for the same actor and run. Terminal executions are not
 stale. The dashboard uses only the resolved `parentId` for the tree.
 `parentUnavailable` distinguishes a reported parent that is absent from a true
 root. Missing parents and cycles render under **Unattached agents**.
+
+`parentOutsidePreview` means the server still has the parent, but the bounded
+preview omitted it. In that case the server clears `parentId` to avoid a
+dangling edge. The dashboard groups the child under **Lineage continues outside
+preview**, not under **Unattached agents**.
 
 A transport `Session` still expires after its normal heartbeat TTL. Its linked
 logical execution remains and loses only the `sessionId` association.
@@ -227,6 +236,10 @@ Each native hook invocation creates one occurrence timestamp and a unique
 event id. Thus, a `Start` after `End` resumes the same logical execution.
 `SubagentStart` refreshes the root and starts the child. `SubagentStop` reports
 only the child's completion and does not reopen the root.
+
+The dashboard bounds the Crew tree in a keyboard-focusable scroll region.
+`stale` is a secondary freshness qualifier. It does not replace a lifecycle
+state such as **Blocked**, **Needs input**, or **Failed**.
 
 Crew task and reason text is visible to every project member. Report only a
 short telemetry-safe summary: never copy a prompt, transcript, assistant

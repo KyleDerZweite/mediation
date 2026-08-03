@@ -191,18 +191,21 @@ Enforcement summary (all of it in the one `/api/*` middleware in
   The server derives its developer, provenance, resolved `parentId`,
   `parentUnavailable`, and `stale` values. `ProjectState.agents` returns at most
   200 active and 50 recent terminal executions. `agentCount` reports the full
-  retained count. Shared agents omit raw harness ids. Shared sessions expose
-  only `agentLineage`, not their raw lineage ids. Lifecycle reports and state
-  reads prune terminal and stale, unlinked nonterminal executions after seven
-  days. Each project user keeps the newest 1,000 unlinked executions plus all
-  session-linked executions. Event deduplication is capped at 5,000 records per
-  project user.
+  retained count. If a persisted parent is outside that preview, the child has
+  `parentOutsidePreview: true` and `parentId: null`. Shared agents omit raw
+  harness ids. Shared sessions expose only `agentLineage`, not their raw lineage
+  ids. Lifecycle reports and state reads prune terminal and stale, unlinked
+  nonterminal executions after seven days. Each project user keeps the newest
+  1,000 unlinked executions plus all session-linked executions. Event
+  deduplication is capped at 5,000 records per project user.
 - `POST /api/projects/:p/agent-events` is device-Bearer-only. A cookie cannot
   report lifecycle state or lend its membership to another user's credential.
   The credential owner supplies identity even when a cookie is also present.
-  An `eventId` retry succeeds only with identical canonical content. Changed
-  content gets 409. An old out-of-window report cannot change an existing
-  execution, and future timestamps are bounded to server receipt time.
+  `occurredAt` is required. An `eventId` retry succeeds only with identical
+  canonical content. Changed content gets 409. A report more than five minutes
+  old gets 409 instead of creating an execution. It is a no-op when that
+  execution still exists. This prevents replay from restoring pruned history.
+  Future timestamps are bounded to server receipt time.
 - Errors: JSON `{ error }` with proper status; validation failures are 400 with
   Zod issue details. A denial the human can act on also carries `hint`, which
   agents relay verbatim; GitHub setup failures (App not installed, repository

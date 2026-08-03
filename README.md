@@ -110,11 +110,15 @@ overlap. Full agent-facing instructions with request/response examples:
 
 `ProjectState.agents` is a bounded flat preview of durable logical executions.
 `agentCount` gives the total, and `parentId` gives the server-resolved edge.
+When a parent falls outside the preview, the child has
+`parentOutsidePreview: true` and a cleared `parentId`.
 Shared state strips raw run, agent, and parent agent ids. Sessions expose only
 an `agentLineage` marker. The dashboard turns the preview into a collapsible
-crew tree and keeps claims as the primary ownership view. Native hook reports
-are labelled `harness-reported`, while optional MCP environment metadata is
-`environment-reported`. Both labels describe the reporting channel, not
+crew tree with a bounded scroll region. It keeps lifecycle state primary and
+shows stale as a freshness qualifier. Claims remain the primary ownership
+view. Native hook reports are labelled `harness-reported`, while optional MCP
+environment metadata is `environment-reported`. Both labels describe the
+reporting channel, not
 verified delegation. Hooks never forward prompts, transcripts, messages, tool
 I/O, secrets, model/permission data, or paths, and all failures degrade to the
 existing flat session view. Native harness ids are scoped and hashed before
