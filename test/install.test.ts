@@ -9,6 +9,7 @@ import { spawn, spawnSync } from 'node:child_process';
 const root = mkdtempSync(join(tmpdir(), 'mediation-install-'));
 const assets = {
   '/install/mediation-mcp.mjs': readFileSync('clients/mediation-mcp.mjs', 'utf8'),
+  '/install/mediation-hook.mjs': readFileSync('clients/mediation-hook.mjs', 'utf8'),
   '/install/SKILL.md': readFileSync('clients/skills/mediation/SKILL.md', 'utf8'),
 };
 const server = createServer((req, res) => {
@@ -36,7 +37,13 @@ test('installer is idempotent and uninstaller preserves unrelated configuration'
   assert.equal(result.status, 0, result.stderr);
   result = await run(home, ['--server', origin, '--agent', 'codex', '--yes']);
   assert.equal(result.status, 0, result.stderr);
-  assert.equal((readFileSync(join(home, '.codex', 'config.toml'), 'utf8').match(/>>> mediation >>>/g) || []).length, 1);
+  const codexConfig = readFileSync(join(home, '.codex', 'config.toml'), 'utf8');
+  assert.equal((codexConfig.match(/>>> mediation >>>/g) || []).length, 1);
+  for (const event of ['SessionStart', 'SessionEnd', 'SubagentStart', 'SubagentStop']) {
+    assert.equal((codexConfig.match(new RegExp(`\\[\\[hooks\\.${event}\\]\\]`, 'g')) || []).length, 1);
+  }
+  assert.match(result.stderr, /review and trust in \/hooks/);
+  assert.equal(existsSync(join(home, 'data', 'mediation-hook.mjs')), true);
   const auth = join(home, 'auth'); mkdirSync(auth, { recursive: true });
   writeFileSync(join(auth, 'credentials.json'), JSON.stringify({
     [origin]: { token: 'remove-me' },
@@ -58,6 +65,8 @@ test('Claude receives the initialized-repository skill rule without losing its o
   mkdirSync(claudeHome, { recursive: true });
   mkdirSync(bin, { recursive: true });
   writeFileSync(join(claudeHome, 'CLAUDE.md'), '# Mine\n');
+  const mine = { hooks: { Stop: [{ matcher: 'mine', hooks: [{ type: 'command', command: 'my-hook' }] }] }, keep: true };
+  writeFileSync(join(claudeHome, 'settings.json'), JSON.stringify(mine, null, 2));
   const fakeClaude = join(bin, 'claude');
   writeFileSync(fakeClaude, '#!/bin/sh\n[ "$1" = "--version" ] && exit 0\n[ "$1 $2" = "mcp get" ] && exit 1\nexit 0\n');
   chmodSync(fakeClaude, 0o700);
@@ -76,10 +85,28 @@ test('Claude receives the initialized-repository skill rule without losing its o
   assert.match(instructions, /`mediation_state`/);
   assert.match(instructions, /do not initialize Mediation unless the user explicitly asks/);
   assert.equal((instructions.match(/>>> mediation >>>/g) || []).length, 1);
+  const settings = JSON.parse(readFileSync(join(claudeHome, 'settings.json'), 'utf8'));
+  assert.equal(settings.keep, true);
+  assert.equal(settings.hooks.Stop[0].hooks[0].command, 'my-hook');
+  for (const event of ['SessionStart', 'SessionEnd', 'SubagentStart', 'SubagentStop']) {
+    const installed = settings.hooks[event].flatMap((group: { hooks: { command?: string }[] }) => group.hooks)
+      .filter((handler: { command?: string }) => handler.command?.includes('mediation-hook.mjs'));
+    assert.equal(installed.length, 1);
+  }
 
   result = await run(home, ['--uninstall', '--keep-auth'], env);
   assert.equal(result.status, 0, result.stderr);
   assert.equal(readFileSync(join(claudeHome, 'CLAUDE.md'), 'utf8').trim(), '# Mine');
+  assert.deepEqual(JSON.parse(readFileSync(join(claudeHome, 'settings.json'), 'utf8')), mine);
+});
+
+test('Kimi remains MCP-only', async () => {
+  const home = join(root, 'kimi-only');
+  mkdirSync(join(home, '.kimi-code'), { recursive: true });
+  const result = await run(home, ['--server', origin, '--agent', 'kimi-code', '--yes']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(existsSync(join(home, 'data', 'mediation-hook.mjs')), false);
+  assert.equal(JSON.parse(readFileSync(join(home, '.kimi-code', 'mcp.json'), 'utf8')).mcpServers.mediation.env.MEDIATION_HARNESS, 'kimi-code');
 });
 
 test('malformed JSON and marker files remain untouched', async () => {
