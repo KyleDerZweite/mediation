@@ -6,10 +6,13 @@
   The dashboard groups their server-resolved parent edges into a collapsible
   Crew tree, highlights blocked, stale, and unattached agents, and falls back
   to the existing flat sessions when no lineage is available. Claims remain
-  the source of truth for work ownership.
+  the source of truth for work ownership. Shared state strips raw harness
+  correlation ids.
 - `POST /api/projects/:p/agent-events` accepts idempotent lifecycle reports.
-  The server scopes parent lookup to the project, authenticated user, and run.
-  It also derives the developer identity, provenance, and stale state.
+  It requires a device Bearer and uses its owner even when a cookie is present.
+  Exact retries must have identical content. The server rejects changed reuse
+  with 409 and bounds untrusted timestamps. It derives developer identity,
+  provenance, parent edges, missing-parent state, and stale state.
 - The installer adds fail-open `SessionStart`, `SessionEnd`, `SubagentStart`,
   and `SubagentStop` hooks for Codex and Claude Code. Codex requires explicit
   review/trust in `/hooks`. Kimi stays MCP/environment-only.
@@ -21,7 +24,15 @@
 - Lifecycle hooks send only stable event identity and role metadata. They do
   not forward prompts, transcripts, assistant messages, tool I/O, secrets,
   model/permission data, or local paths, and silently degrade when reporting
-  is unavailable.
+  is unavailable. Each invocation has a unique event id and timestamp, so a
+  later start can resume a completed execution. A child stop no longer reports
+  the root as active.
+- Agent history is bounded. State returns 200 active and 50 recent terminal
+  executions. The server keeps 1,000 unlinked executions per project user plus
+  all session-linked work, and removes seven-day-old terminal or stale unlinked
+  history during lifecycle reports and state reads.
+- At phone widths, the dashboard sidebar becomes an icon rail and the Crew
+  rows stack status and freshness below the agent details.
 
 ## 0.5.1: surviving broken IPv6
 

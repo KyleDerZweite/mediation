@@ -151,13 +151,17 @@ The heartbeat schema also accepts `agentTask`, `agentState`, and
 `agentStateReason` for clients that have a real live signal. The official MCP
 client does not copy the static environment values into heartbeats.
 
-All explicit environment metadata is project-member data. The raw HTTP state
-returns the explicit run and agent ids, names, roles, tasks, states, and
-reasons. Do not put a secret or a reusable cross-project identifier in these
-variables. The dashboard does not display raw ids. Only the native harness id
-fallback is automatically scoped and hashed.
+Names, roles, tasks, states, and reasons from explicit environment metadata are
+project-member data. Shared `ProjectState` strips raw run, agent, and parent
+agent ids. Its sessions expose only `agentLineage: true|false`. Mutation
+responses to the reporting device can return its submitted correlation ids.
+Do not put a secret or a reusable cross-project identifier in these variables.
+Only the native harness id fallback is automatically scoped and hashed.
 
-Harness lifecycle adapters instead report explicit events:
+Harness lifecycle adapters instead report explicit events. This route requires
+a device Bearer. A cookie alone gets 403, and no session capability is needed.
+If both credentials are present, the credential owner supplies identity and
+membership.
 
 ```
 POST /api/projects/{project}/agent-events
@@ -169,17 +173,21 @@ POST /api/projects/{project}/agent-events
 
 `eventId`, `runId`, and `agentId` are required. States are `starting`,
 `active`, `waiting`, `blocked`, `needs-input`, `completed`, `failed`, or
-`cancelled`. Event retries are idempotent. The authenticated endpoint derives
-the developer and provenance. Clients cannot submit either. The server resolves
-parent references only within the same project, authenticated user, and run.
-It returns the parent's server id in `parentId`.
+`cancelled`. An `eventId` retry is idempotent only when its canonical content is
+identical. Reusing the id with changed content gets 409. The endpoint derives
+the developer and provenance from the device credential. Clients cannot submit
+either. The server resolves parent references only within the same project,
+credential owner, and run. It returns the parent's server id in `parentId`.
+
+The server accepts client event times within five minutes of receipt for
+ordering. A past time outside that window cannot change an existing execution.
+The server bounds a future time outside the window to receipt time.
 
 Each `ProjectState.agents` entry has this shape:
 
 ```
-{ "id": "server-execution-id", "projectId": "...", "runId": "run-42",
-  "agentId": "worker-3", "parentId": "server-parent-id",
-  "parentUnavailable": false, "harness": "codex",
+{ "id": "server-execution-id", "projectId": "...",
+  "parentId": "server-parent-id", "parentUnavailable": false, "harness": "codex",
   "name": "Test worker", "role": "worker", "task": "Run focused tests",
   "state": "active", "stateReason": null, "provenance": "harness-reported",
   "sessionId": null, "developer": "Alice", "startedAt": 1753257600000,
@@ -188,21 +196,23 @@ Each `ProjectState.agents` entry has this shape:
 
 The server derives `provenance`. Native lifecycle events are
 `harness-reported`. Session/environment metadata is `environment-reported`.
-This value identifies the reporting channel, not verified identity or
-delegation. The server also derives `stale` from lifecycle freshness and a
+Shared state never includes `runId`, `agentId`, or `parentAgentId`. This value
+identifies the reporting channel, not verified identity or delegation. The
+server also derives `stale` from lifecycle freshness and a
 live transport session for the same actor and run. Terminal executions are not
-stale. The dashboard uses
-only the resolved `parentId` for the tree and does not display the raw run or
-agent ids. `parentUnavailable` distinguishes a reported parent that is absent
-from a true root. Missing parents and cycles render under **Unattached agents**.
+stale. The dashboard uses only the resolved `parentId` for the tree.
+`parentUnavailable` distinguishes a reported parent that is absent from a true
+root. Missing parents and cycles render under **Unattached agents**.
 
 A transport `Session` still expires after its normal heartbeat TTL. Its linked
 logical execution remains and loses only the `sessionId` association.
 Transport shutdown does not mean logical completion. The server returns at
 most 200 active executions and 50 recent terminal executions in `agents`.
-`agentCount` reports all retained executions. The server prunes terminal
-executions and event retry records after seven days on a later lifecycle
-report. It also limits retry records to 5,000 per project user.
+`agentCount` reports all retained executions. Lifecycle reports and state reads
+prune terminal and stale, unlinked nonterminal executions after seven days.
+Each project user keeps the newest 1,000 unlinked executions plus all linked
+executions. The server also limits event retry records to 5,000 per project
+user.
 
 The installer wires the dependency-free lifecycle bridge into Codex and
 Claude Code for `SessionStart`, `SessionEnd`, `SubagentStart`, and
@@ -212,6 +222,11 @@ server, repository mapping, credential, or input is unavailable. Kimi has no
 native lifecycle hook and therefore remains MCP/environment-only. Its sessions
 stay visible, but a crew tree appears only when valid lineage is available.
 Native session and agent ids are scoped and hashed before upload.
+
+Each native hook invocation creates one occurrence timestamp and a unique
+event id. Thus, a `Start` after `End` resumes the same logical execution.
+`SubagentStart` refreshes the root and starts the child. `SubagentStop` reports
+only the child's completion and does not reopen the root.
 
 Crew task and reason text is visible to every project member. Report only a
 short telemetry-safe summary: never copy a prompt, transcript, assistant

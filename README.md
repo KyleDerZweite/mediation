@@ -95,7 +95,7 @@ Product spec: [`docs/PRODUCT.md`](docs/PRODUCT.md).
 | POST | `/api/projects/:p/sessions/:id/heartbeat` | keep alive / report activity |
 | DELETE | `/api/projects/:p/sessions/:id` | end session, release claims |
 | POST | `/api/projects/:p/sessions/:id/repo` | report branch/revision/dirty files |
-| POST | `/api/projects/:p/agent-events` | report an idempotent harness lifecycle event |
+| POST | `/api/projects/:p/agent-events` | report a device-authenticated lifecycle event |
 | POST | `/api/projects/:p/claims` | create work claim (returns overlap warnings) |
 | PATCH | `/api/projects/:p/claims/:id` | update status/files/findings |
 | POST | `/api/projects/:p/claims/:id/complete` | finish with commits/PRs |
@@ -108,11 +108,12 @@ Conflicts are **warnings, not locks**. No request is ever rejected because of
 overlap. Full agent-facing instructions with request/response examples:
 [`docs/PROTOCOL.md`](docs/PROTOCOL.md) (served to agents at `/AGENT.md`).
 
-`ProjectState.agents` is a bounded flat preview of durable logical executions,
-with `agentCount` giving the total and `parentId` giving the server-resolved
-edge. The dashboard turns it into a collapsible crew tree and keeps claims as
-the primary ownership view. Native hook reports are
-labelled `harness-reported`, while optional MCP environment metadata is
+`ProjectState.agents` is a bounded flat preview of durable logical executions.
+`agentCount` gives the total, and `parentId` gives the server-resolved edge.
+Shared state strips raw run, agent, and parent agent ids. Sessions expose only
+an `agentLineage` marker. The dashboard turns the preview into a collapsible
+crew tree and keeps claims as the primary ownership view. Native hook reports
+are labelled `harness-reported`, while optional MCP environment metadata is
 `environment-reported`. Both labels describe the reporting channel, not
 verified delegation. Hooks never forward prompts, transcripts, messages, tool
 I/O, secrets, model/permission data, or paths, and all failures degrade to the

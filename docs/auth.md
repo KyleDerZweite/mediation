@@ -127,7 +127,8 @@ token, and do not persist a human login/cookie. If you are driving the
 | --- | --- | --- |
 | PUBLIC | none | `GET /api/health`, mode-specific sign-in/device routes, `POST /api/users/logout`, `GET /api/auth/me`, GitHub callback/webhook, all non-`/api` routes |
 | AGENT-OR-USER | valid Bearer **or** active user cookie | `GET /api/projects` (the response is filtered to what you may see) |
-| PROJECT-MEMBER | member of `:p` (any role), **or** instance admin cookie | everything under `/api/projects/:p/`: sessions, heartbeat, repo, agent events, claims, bugs, state, check |
+| DEVICE-AGENT | valid device Bearer whose owner is a member of `:p` | `POST /api/projects/:p/agent-events` |
+| PROJECT-MEMBER | member of `:p` (any role), **or** instance admin cookie | all other routes under `/api/projects/:p/`: sessions, heartbeat, repo, claims, bugs, state, check |
 | PROJECT-OWNER | `owner` of `:p` (or instance admin), human cookie only | `POST/PATCH/DELETE /api/projects/:p/members*`, `DELETE /api/projects/:p` |
 | USER | active user cookie (human only) | `POST /api/projects`, `GET /api/users/me`, `GET/DELETE /api/auth/credentials*` |
 | ADMIN | active user cookie, `role=admin` | `GET /api/users`, `PATCH /api/users/:id`, `DELETE /api/users/:id` |
@@ -146,11 +147,14 @@ if present, otherwise the user that owns the Bearer credential. A credential
 whose owner is missing or not `active` never authenticates. Reactivate the
 account, then use `mediation_setup` again if the device credential was revoked.
 
-`POST /api/projects/:p/agent-events` needs project membership but no transport
-session capability. The server scopes execution identity and parent lookup to
-the authenticated actor, project, and run. It derives the developer and
-provenance, so the request cannot claim either value. Provenance describes the
-reporting channel. It does not verify identity or delegation.
+`POST /api/projects/:p/agent-events` needs a device Bearer and project
+membership, but no transport session capability. A user cookie alone gets 403.
+If a request has both credentials, the device credential owner supplies the
+identity and membership. The cookie cannot lend access or instance-admin
+power. The server scopes execution identity and parent lookup to that actor,
+project, and run. It also derives the developer and provenance. The request
+cannot claim either value. Provenance describes the reporting channel. It does
+not verify identity or delegation.
 
 ## Manual-mode human user accounts
 
