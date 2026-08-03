@@ -85,7 +85,7 @@ export const agentEvent = z.object({
   task: displayText(280).nullish(),
   state: agentState,
   stateReason: displayText(280).nullish(),
-  occurredAt: z.number().int().nonnegative().optional(),
+  occurredAt: z.number().int().safe().nonnegative(),
 }).strict().superRefine(validateAgentLineage);
 
 export const repoReport = z.object({

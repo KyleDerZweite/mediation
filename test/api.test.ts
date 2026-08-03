@@ -104,6 +104,7 @@ test('session execution metadata round-trips through create, heartbeat and proje
   assert.equal(execution.sessionId, created.body.id);
   assert.equal(execution.stale, false);
   assert.equal(execution.parentUnavailable, false);
+  assert.equal(execution.parentOutsidePreview, false);
   assert.ok(!('runId' in execution) && !('agentId' in execution) && !('parentAgentId' in execution));
   const sharedSession = state.sessions.find((s: { id: string }) => s.id === created.body.id);
   assert.equal(sharedSession.agentLineage, true);
@@ -112,6 +113,10 @@ test('session execution metadata round-trips through create, heartbeat and proje
 
 test('agent event endpoint is idempotent and ignores older lifecycle updates', async () => {
   const now = Date.now();
+  const missingTime = await post(`${P}/agent-events`, {
+    eventId: 'api-event-no-time', runId: 'event-run', agentId: 'event-worker', harness: 'codex', state: 'active',
+  });
+  assert.equal(missingTime.status, 400);
   const start = await post(`${P}/agent-events`, {
     eventId: 'api-event-start', runId: 'event-run', agentId: 'event-worker', harness: 'codex',
     task: 'Inspect server', state: 'active', occurredAt: now,
@@ -145,7 +150,7 @@ test('agent event endpoint is idempotent and ignores older lifecycle updates', a
 
   const collision = await post(`${P}/agent-events`, {
     eventId: 'api-event-start', runId: 'different-run', agentId: 'different-worker', harness: 'codex',
-    state: 'active',
+    state: 'active', occurredAt: now,
   });
   assert.equal(collision.status, 409);
 });

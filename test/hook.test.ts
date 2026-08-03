@@ -67,28 +67,49 @@ test('maps root and child lifecycle without exporting private hook fields', asyn
   assert.equal(seen.length, 3);
   assert.deepEqual(seen.map((request) => request.path), Array(3).fill('/api/projects/project-1/agent-events'));
   assert.equal(seen.every((request) => request.auth === 'Bearer device-secret'), true);
+  const runId = seen[0]!.body.runId;
+  const childId = seen[2]!.body.agentId;
+  const rootAt = seen[0]!.body.occurredAt;
+  const childAt = seen[1]!.body.occurredAt;
+  assert.match(String(runId), /^native-[a-f0-9]{32}$/);
+  assert.match(String(childId), /^native-[a-f0-9]{32}$/);
+  assert.equal(typeof rootAt, 'number');
+  assert.equal(typeof childAt, 'number');
+  assert.equal(seen[2]!.body.occurredAt, childAt);
   assert.deepEqual(seen[0]!.body, {
-    eventId: seen[0]!.body.eventId, runId: 'run-1', agentId: 'run-1', harness: 'codex', role: 'root-role', state: 'active',
+    eventId: seen[0]!.body.eventId, runId, agentId: runId, harness: 'codex', role: 'root-role', state: 'active',
+    occurredAt: rootAt,
   });
   assert.deepEqual(seen[1]!.body, {
-    eventId: seen[1]!.body.eventId, runId: 'run-1', agentId: 'run-1', harness: 'codex', state: 'active',
+    eventId: seen[1]!.body.eventId, runId, agentId: runId, harness: 'codex', state: 'active', occurredAt: childAt,
   });
   assert.deepEqual(seen[2]!.body, {
-    eventId: seen[2]!.body.eventId, runId: 'run-1', agentId: 'child-1', parentAgentId: 'run-1',
-    harness: 'codex', role: 'Explore', state: 'active',
+    eventId: seen[2]!.body.eventId, runId, agentId: childId, parentAgentId: runId,
+    harness: 'codex', role: 'Explore', state: 'active', occurredAt: childAt,
   });
-  assert.doesNotMatch(JSON.stringify(seen.map((request) => request.body)), /\/secret\/transcript|private answer|cat \.env|prompt|transcript|tool_input/);
+  assert.doesNotMatch(JSON.stringify(seen.map((request) => request.body)),
+    /run-1|child-1|\/secret\/transcript|private answer|cat \.env|prompt|transcript|tool_input/);
 });
 
-test('repeated stop delivery has stable event ids and keeps the observed root active', async () => {
+test('each stop occurrence is distinct and never reopens the root', async () => {
   seen.length = 0;
   const input = { hook_event_name: 'SubagentStop', session_id: 'run-2', agent_id: 'child-2', cwd: nested, agent_type: 'Plan' };
   await run(input); await run(input);
-  assert.equal(seen.length, 4);
-  assert.equal(seen[0]!.body.eventId, seen[2]!.body.eventId);
-  assert.equal(seen[1]!.body.eventId, seen[3]!.body.eventId);
-  assert.equal(seen[0]!.body.state, 'active');
-  assert.equal(seen[1]!.body.state, 'completed');
+  assert.equal(seen.length, 2);
+  assert.notEqual(seen[0]!.body.eventId, seen[1]!.body.eventId);
+  assert.equal(seen.every((request) => request.body.state === 'completed'), true);
+  assert.equal(seen.every((request) => request.body.agentId !== request.body.runId), true);
+});
+
+test('a resumed native session gets a new Start occurrence after completion', async () => {
+  seen.length = 0;
+  const base = { session_id: 'resumed-run', cwd: nested };
+  await run({ ...base, hook_event_name: 'SessionStart' });
+  await run({ ...base, hook_event_name: 'SessionEnd' });
+  await run({ ...base, hook_event_name: 'SessionStart' });
+  assert.deepEqual(seen.map((request) => request.body.state), ['active', 'completed', 'active']);
+  assert.equal(new Set(seen.map((request) => request.body.eventId)).size, 3);
+  assert.equal(seen.every((request) => typeof request.body.occurredAt === 'number'), true);
 });
 
 test('maps Claude root completion without reading Claude-only private output', async () => {
@@ -96,10 +117,12 @@ test('maps Claude root completion without reading Claude-only private output', a
   const result = await run({ hook_event_name: 'SessionEnd', session_id: 'claude-run', cwd: nested,
     last_assistant_message: 'must stay local', transcript_path: '/private.jsonl' }, {}, 'claude-code');
   assert.deepEqual(result, { status: 0, stdout: '', stderr: '' });
+  const runId = seen[0]!.body.runId;
+  const occurredAt = seen[0]!.body.occurredAt;
   assert.deepEqual(seen[0]!.body, {
-    eventId: seen[0]!.body.eventId, runId: 'claude-run', agentId: 'claude-run', harness: 'claude-code', state: 'completed',
+    eventId: seen[0]!.body.eventId, runId, agentId: runId, harness: 'claude-code', state: 'completed', occurredAt,
   });
-  assert.doesNotMatch(JSON.stringify(seen[0]!.body), /must stay local|private\.jsonl/);
+  assert.doesNotMatch(JSON.stringify(seen[0]!.body), /claude-run|must stay local|private\.jsonl/);
 });
 
 test('is silent and fail-open when offline, unconfigured, or given unsafe identity', async () => {

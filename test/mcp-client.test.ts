@@ -5,6 +5,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
+import { createHash } from 'node:crypto';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -189,6 +190,9 @@ function spawnClient(name: string, args: Record<string, unknown>, onReply: (text
       // Never let a test reach the developer's real `gh`: the default is one
       // that fails every call, and a test opts in to the working stub.
       PATH: `${ghDeadBin}:${process.env.PATH}`,
+      MEDIATION_RUN_ID: '', MEDIATION_AGENT_ID: '', MEDIATION_PARENT_AGENT_ID: '',
+      MEDIATION_AGENT_NAME: '', MEDIATION_AGENT_ROLE: '', MEDIATION_AGENT_TASK: '',
+      MEDIATION_AGENT_STATE: '', MEDIATION_AGENT_STATE_REASON: '', CODEX_THREAD_ID: '',
       ...extraEnv,
     },
     stdio: ['pipe', 'pipe', 'ignore'],
@@ -265,7 +269,7 @@ test('mediation_claim binds a GitHub session and publishes the claim', async () 
   assert.equal(claimPosts.at(-1)?.intent, 'test work');
 });
 
-test('explicit harness agent metadata reaches session creation and heartbeats', async () => {
+test('explicit harness agent metadata initializes the session without becoming a fake live heartbeat', async () => {
   sessionPosts.length = 0;
   beats.length = 0;
   await callTool('mediation_claim', { dryRun: true }, {
@@ -305,20 +309,14 @@ test('explicit harness agent metadata reaches session creation and heartbeats', 
   assert.equal(created.agentProvenance, undefined, 'the server derives provenance');
 
   const deadline = Date.now() + 1_000;
-  while (!beats.some((item) => item.agentTask === 'inspect schemas') && Date.now() < deadline) {
+  while (!beats.length && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  const beat = beats.find((item) => item.agentTask === 'inspect schemas');
-  assert.deepEqual({
-    agentTask: beat?.agentTask,
-    agentState: beat?.agentState,
-    agentStateReason: beat?.agentStateReason,
-  }, {
-    agentTask: 'inspect schemas',
-    agentState: 'active',
-    agentStateReason: 'reading core types',
-  });
-  assert.equal(beat?.parentAgentId, undefined, 'lineage is immutable after session creation');
+  const beat = beats.at(-1);
+  assert.equal(beat?.agentTask, undefined);
+  assert.equal(beat?.agentState, undefined);
+  assert.equal(beat?.agentStateReason, undefined);
+  assert.equal(beat?.parentAgentId, undefined, 'static environment metadata is creation-only');
 });
 
 test('invalid harness metadata is omitted instead of breaking old sessions', async () => {
@@ -340,6 +338,17 @@ test('invalid harness metadata is omitted instead of breaking old sessions', asy
     assert.equal(created[field], undefined, `${field} should be omitted`);
   }
   assert.equal(created.agent, 'claude-code');
+});
+
+test('native Codex thread identity is project-scoped before it leaves the client', async () => {
+  sessionPosts.length = 0;
+  await callTool('mediation_claim', { dryRun: true }, { CODEX_THREAD_ID: 'thread-raw-42' });
+  const created = sessionPosts.at(-1);
+  const expected = `native-${createHash('sha256')
+    .update(`${origin}\0github:acme/widgets\0thread-raw-42`).digest('hex').slice(0, 32)}`;
+  assert.equal(created.runId, expected);
+  assert.notEqual(created.runId, 'thread-raw-42');
+  assert.equal(created.agentId, undefined, 'a thread id does not invent an agent identity');
 });
 
 // Claiming IS checking: the create response carries the same overlap warnings,

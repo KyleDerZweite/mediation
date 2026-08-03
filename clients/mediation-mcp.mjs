@@ -310,9 +310,23 @@ function envId(name) {
 /* Harnesses that know their own agent tree may pass it through explicitly.
    CODEX_THREAD_ID is a native run identifier, but says nothing about which
    agent spawned which; parentage therefore has no heuristic fallback. */
-function agentMetadata() {
-  const state = envValue('MEDIATION_AGENT_STATE', 20);
-  const runId = envId('MEDIATION_RUN_ID') || envId('CODEX_THREAD_ID');
+function nativeRunId(state) {
+  const raw = envId('CODEX_THREAD_ID');
+  const scope = state?.project
+    ? `project:${state.project}`
+    : state?.repository?.owner && state?.repository?.repository
+      ? `github:${state.repository.owner.toLowerCase()}/${state.repository.repository.toLowerCase()}`
+      : null;
+  if (!raw || !scope) return undefined;
+  // Native conversation ids are stable outside Mediation. Scope and hash them
+  // before upload so project members can correlate one crew without receiving
+  // a reusable cross-project harness identifier.
+  return `native-${createHash('sha256').update(`${SERVER_KEY}\0${scope}\0${raw}`).digest('hex').slice(0, 32)}`;
+}
+
+function agentMetadata(projectState) {
+  const reportedState = envValue('MEDIATION_AGENT_STATE', 20);
+  const runId = envId('MEDIATION_RUN_ID') || nativeRunId(projectState);
   const agentId = runId ? envId('MEDIATION_AGENT_ID') : undefined;
   const parentAgentId = agentId ? envId('MEDIATION_PARENT_AGENT_ID') : undefined;
   const metadata = {
@@ -322,17 +336,11 @@ function agentMetadata() {
     agentName: envText('MEDIATION_AGENT_NAME', 80),
     agentRole: envText('MEDIATION_AGENT_ROLE', 64),
     agentTask: envText('MEDIATION_AGENT_TASK', 280),
-    agentState: ['starting', 'active', 'waiting', 'blocked', 'needs-input', 'completed', 'failed', 'cancelled'].includes(state)
-      ? state : undefined,
+    agentState: ['starting', 'active', 'waiting', 'blocked', 'needs-input', 'completed', 'failed', 'cancelled'].includes(reportedState)
+      ? reportedState : undefined,
     agentStateReason: envText('MEDIATION_AGENT_STATE_REASON', 280),
   };
   return Object.fromEntries(Object.entries(metadata).filter(([, value]) => value !== undefined));
-}
-
-function heartbeatMetadata() {
-  const { agentTask, agentState, agentStateReason } = agentMetadata();
-  return Object.fromEntries(Object.entries({ agentTask, agentState, agentStateReason })
-    .filter(([, value]) => value !== undefined));
 }
 // Beat well inside the server's session TTL: an agent that claims work and then
 // codes for ten minutes without calling another tool has only these beats
@@ -423,7 +431,7 @@ async function githubSession(state) {
     agent: envText('MEDIATION_HARNESS', 64) || 'claude-code',
     machine: os.hostname(),
     worktree: worktreeId(),
-    ...agentMetadata(),
+    ...agentMetadata(state),
   });
   const project = typeof created.project === 'string' ? created.project : created.project?.id;
   const id = typeof created.session === 'string' ? created.session : created.session?.id;
@@ -443,7 +451,7 @@ async function ensureSession() {
     ? githubSession(state)
     : api('POST', `/api/projects/${encodeURIComponent(state.project)}/sessions`, {
       agent: envText('MEDIATION_HARNESS', 64) || 'claude-code', machine: os.hostname(), worktree: worktreeId(),
-      ...agentMetadata(),
+      ...agentMetadata(state),
     }));
   const current = { id: created.id, capability: created.capability, project: created.project || state.project, heartbeat: null };
   session = current;
@@ -453,7 +461,7 @@ async function ensureSession() {
      where a collision is most likely to form unnoticed. */
   const beat = () =>
     api('POST', `/api/projects/${encodeURIComponent(current.project)}/sessions/${current.id}/heartbeat`,
-      { ...repoReport(), ...heartbeatMetadata() }, { sessionCapability: current.capability })
+      repoReport(), { sessionCapability: current.capability })
       .catch((error) => {
         // A dropped beat is a network event, not a verdict. Giving up on the
         // first one leaves the agent working under a session the server then

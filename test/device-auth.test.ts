@@ -20,6 +20,7 @@ test('device login is global, waits for approval, and sessions cannot cross-cont
   await req('POST', '/api/projects', { id: 'private' }, { cookie: alice.cookie });
   const lifecycle = {
     eventId: 'alice-lifecycle', runId: 'alice-run', agentId: 'worker', harness: 'codex', state: 'active',
+    occurredAt: Date.now(),
   };
   const cookieOnly = await req('POST', '/api/projects/private/agent-events', lifecycle, { cookie: alice.cookie });
   assert.equal(cookieOnly.status, 403);

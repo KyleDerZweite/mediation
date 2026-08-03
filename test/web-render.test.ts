@@ -99,7 +99,7 @@ test('Now groups harness-reported agents into a stable expandable crew tree', ()
   ];
   const html = renderNowTab({ ...projectState, agents }, now, 'proj-42');
 
-  assert.match(html, /<details class="crew-branch" data-crew-node="node-root" open>/);
+  assert.match(html, /<details class="crew-branch" data-crew-node="proj-42:node-root" open>/);
   assert.match(html, /Coordinator/);
   assert.match(html, /Build crew view/);
   assert.match(html, /Harness-reported/);
@@ -107,10 +107,28 @@ test('Now groups harness-reported agents into a stable expandable crew tree', ()
   assert.ok(html.indexOf('Dashboard') < html.indexOf('Tests'), 'children have stable creation order');
   assert.ok(!html.includes('Lineage unavailable'));
 
-  state.crewClosed.add('node-root');
+  state.crewClosed.add('proj-42:node-root');
   const collapsed = renderNowTab({ ...projectState, agents }, now, 'proj-42');
-  assert.match(collapsed, /data-crew-node="node-root">/);
-  assert.ok(!collapsed.includes('data-crew-node="node-root" open'));
+  assert.match(collapsed, /data-crew-node="proj-42:node-root">/);
+  assert.ok(!collapsed.includes('data-crew-node="proj-42:node-root" open'));
+});
+
+test('Crew forgets ordering and disclosure state after executions leave the preview', () => {
+  const { renderNowTab, state } = loadApp();
+  const oldAgents = [
+    { id: 'old-root', parentId: null, harness: 'codex', state: 'active', startedAt: now, updatedAt: now },
+    { id: 'old-child', parentId: 'old-root', harness: 'codex', state: 'active', startedAt: now + 1, updatedAt: now },
+  ];
+  renderNowTab({ ...projectState, agents: oldAgents }, now, 'proj-42');
+  state.crewClosed.add('proj-42:old-root');
+  assert.equal(state.crewOrder.has('proj-42:old-root'), true);
+
+  renderNowTab({ ...projectState, agents: [
+    { id: 'new-root', parentId: null, harness: 'codex', state: 'active', startedAt: now + 2, updatedAt: now + 2 },
+  ] }, now + 2, 'proj-42');
+  assert.equal(state.crewOrder.has('proj-42:old-root'), false);
+  assert.equal(state.crewOrder.has('proj-42:old-child'), false);
+  assert.equal(state.crewClosed.has('proj-42:old-root'), false);
 });
 
 test('Crew summarizes blocked, stale, and unattached sessions', () => {
@@ -118,16 +136,71 @@ test('Crew summarizes blocked, stale, and unattached sessions', () => {
   const agents = [
     { id: 'root', parentId: null, harness: 'codex', name: 'Root', state: 'running', sessionId: 'root-session', startedAt: now, updatedAt: now, endedAt: null },
     { id: 'blocked', parentId: 'root', harness: 'codex', name: 'Blocked child', state: 'blocked', stateReason: 'Waiting for API', sessionId: 'blocked-session', startedAt: now + 1, updatedAt: now, endedAt: null },
-    { id: 'orphan', parentId: 'missing', harness: 'codex', name: 'Orphan', state: 'running', sessionId: 'orphan-session', startedAt: now + 2, updatedAt: now - 121_000, endedAt: null, stale: true },
+    { id: 'orphan', parentId: null, parentUnavailable: true, harness: 'codex', name: 'Orphan', state: 'running', sessionId: 'orphan-session', startedAt: now + 2, updatedAt: now - 121_000, endedAt: null, stale: true },
   ];
   const html = renderNowTab({ ...projectState, agents }, now, 'proj-42');
 
   assert.match(html, /<b>1<\/b> blocked/);
   assert.match(html, /<b>1<\/b> stale/);
-  assert.match(html, /Stale · last reported 2m ago/);
+  assert.match(html, /Working · stale/);
+  assert.match(html, /last reported 2m ago/);
   assert.match(html, /<b>1<\/b> unattached/);
   assert.match(html, /Unattached agents/);
   assert.match(html, /Waiting for API/);
+});
+
+test('Crew keeps descendants visible below a privacy-safe unavailable parent', () => {
+  const { renderNowTab } = loadApp();
+  const agents = [
+    { id: 'orphan-root', parentId: null, parentUnavailable: true, harness: 'codex', name: 'Unattached root',
+      state: 'active', startedAt: now, updatedAt: now, endedAt: null },
+    { id: 'known-child', parentId: 'orphan-root', parentUnavailable: false, harness: 'codex', name: 'Known child',
+      state: 'active', startedAt: now + 1, updatedAt: now, endedAt: null },
+  ];
+  const html = renderNowTab({ ...projectState, agents }, now, 'proj-42');
+
+  assert.match(html, /<b>2<\/b> unattached/);
+  assert.match(html, /Unattached root/);
+  assert.match(html, /Known child/);
+  assert.match(html, /data-crew-node="proj-42:orphan-root"/);
+});
+
+test('Crew maps lifecycle states to truthful human labels', () => {
+  const { renderNowTab } = loadApp();
+  const agents = ['starting', 'active', 'waiting', 'needs-input', 'completed', 'failed', 'cancelled', 'mystery']
+    .map((state, i) => ({ id: `state-${i}`, parentId: null, harness: 'codex', name: state,
+      state, startedAt: now + i, updatedAt: now, endedAt: ['completed', 'failed', 'cancelled'].includes(state) ? now : null }));
+  const html = renderNowTab({ ...projectState, agents }, now, 'proj-42');
+
+  for (const label of ['Working', 'Waiting', 'Needs input', 'Done', 'Failed', 'Stopped', 'Unknown']) {
+    assert.match(html, new RegExp(`>${label}<`));
+  }
+  assert.ok(!html.includes('>Active<'));
+});
+
+test('Crew preserves actionable lifecycle state when freshness is stale', () => {
+  const { renderNowTab } = loadApp();
+  const agents = [{ id: 'stale-blocked', parentId: null, harness: 'codex', name: 'Blocked worker',
+    state: 'blocked', stateReason: 'Waiting for review', stale: true,
+    startedAt: now - 300_000, updatedAt: now - 180_000, endedAt: null }];
+  const html = renderNowTab({ ...projectState, agents }, now, 'proj-42');
+
+  assert.match(html, /<b>1<\/b> blocked/);
+  assert.match(html, /<b>1<\/b> stale/);
+  assert.match(html, /Blocked · stale/);
+  assert.match(html, /crew-reason attention[^>]*>Waiting for review/);
+});
+
+test('Crew renders a very deep valid lineage without recursion overflow', () => {
+  const { renderNowTab } = loadApp();
+  const agents = Array.from({ length: 1200 }, (_, i) => ({
+    id: `deep-${i}`, parentId: i ? `deep-${i - 1}` : null, harness: 'codex', name: `Agent ${i}`,
+    state: 'active', startedAt: now + i, updatedAt: now, endedAt: null,
+  }));
+  const html = renderNowTab({ ...projectState, agents }, now, 'proj-42');
+  assert.match(html, /Agent 0/);
+  assert.match(html, /Agent 1199/);
+  assert.equal((html.match(/data-crew-node=/g) || []).length, 1199);
 });
 
 test('Crew truthfully falls back when the harness reports no lineage', () => {
@@ -142,18 +215,16 @@ test('Crew truthfully falls back when the harness reports no lineage', () => {
   assert.match(html, /claude-code/);
 });
 
-test('Crew falls back to lineaged sessions without joining raw parent agent ids', () => {
+test('Crew falls back to privacy-safe session lineage markers', () => {
   const { renderNowTab } = loadApp();
   const sessions = [
-    { id: 'root-session', runId: 'run-1', agentId: 'external-root', parentAgentId: null, agent: 'codex', agentName: 'Root', developer: null, machine: null, createdAt: now, lastSeenAt: now, repo: null },
-    { id: 'child-session', runId: 'run-1', agentId: 'external-child', parentAgentId: 'external-root', agent: 'codex', agentName: 'Child', developer: null, machine: null, createdAt: now + 1, lastSeenAt: now, repo: null },
+    { id: 'root-session', agentLineage: true, agent: 'codex', agentName: 'Root', developer: null, machine: null, createdAt: now, lastSeenAt: now, repo: null },
+    { id: 'child-session', agentLineage: true, agent: 'codex', agentName: 'Child', developer: null, machine: null, createdAt: now + 1, lastSeenAt: now, repo: null },
   ];
   const html = renderNowTab({ ...projectState, sessions }, now, 'proj-42');
 
   assert.match(html, /crew-panel/);
-  assert.ok(!html.includes('crew-branch'), 'raw parentAgentId is never joined in the browser');
-  assert.ok(!html.includes('external-root'));
-  assert.ok(!html.includes('external-child'));
+  assert.ok(!html.includes('crew-branch'), 'a boolean fallback never invents a parent relationship');
 });
 
 test('Crew contains malformed parent cycles without losing agents', () => {
@@ -167,6 +238,30 @@ test('Crew contains malformed parent cycles without losing agents', () => {
   assert.match(html, /<b>2<\/b> unattached/);
   assert.equal((html.match(/Cycle A/g) || []).length, 1);
   assert.equal((html.match(/Cycle B/g) || []).length, 1);
+});
+
+test('Crew discloses a bounded server preview and unknown freshness', () => {
+  const { renderNowTab } = loadApp();
+  const agents = [{ id: 'only', parentId: null, harness: 'codex', name: 'Only returned',
+    state: 'active', startedAt: now, updatedAt: null }];
+  const html = renderNowTab({ ...projectState, agents, agentCount: 7 }, now, 'proj-42');
+  assert.match(html, /6 additional executions outside this preview/);
+  assert.match(html, /Freshness unknown/);
+  assert.match(html, /<ul class="crew-tree"/);
+  assert.match(html, /class="crew-scroll"[^>]*tabindex="0"/);
+});
+
+test('Crew distinguishes a parent outside the preview from unavailable lineage', () => {
+  const { renderNowTab } = loadApp();
+  const agents = [{ id: 'continued-child', parentId: null, parentOutsidePreview: true,
+    parentUnavailable: false, harness: 'codex', name: 'Visible descendant',
+    state: 'active', startedAt: now, updatedAt: now, endedAt: null }];
+  const html = renderNowTab({ ...projectState, agents, agentCount: 2 }, now, 'proj-42');
+
+  assert.match(html, /Lineage continues outside preview/);
+  assert.match(html, /Visible descendant/);
+  assert.match(html, /<b>0<\/b> unattached/);
+  assert.ok(!html.includes('Unattached agents'));
 });
 
 /* Twenty finished claims with paragraph-long summaries pushed the live half of

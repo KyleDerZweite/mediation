@@ -48,6 +48,9 @@ export interface AgentExecution {
   runId: string;
   agentId: string;
   parentId: string | null;
+  // A parent was reported but is not present in the same authenticated run.
+  // The raw external parent id stays server-side.
+  parentUnavailable: boolean;
   harness: string;
   name: string | null;
   role: string | null;
@@ -62,6 +65,18 @@ export interface AgentExecution {
   endedAt: number | null;
   stale: boolean;
 }
+
+// Shared project state never publishes harness correlation identifiers. The
+// reporting actor receives those values on its mutation response; other
+// project members get only server-resolved identity and lineage.
+export type ProjectAgentExecution = Omit<AgentExecution, 'runId' | 'agentId'> & {
+  // The persisted parent exists but is not part of this bounded state preview.
+  // `parentId` is cleared in that case so clients never receive a dangling edge.
+  parentOutsidePreview: boolean;
+};
+export type ProjectSession = Omit<Session, 'runId' | 'agentId' | 'parentAgentId'> & {
+  agentLineage: boolean;
+};
 
 // `abandoned` is the terminal status for work that was claimed and then dropped
 // (usually because the claim surfaced a conflict and the agent backed off). It
@@ -247,8 +262,9 @@ export interface RecentFile {
 export interface ProjectState {
   project: string;
   now: number;
-  agents: AgentExecution[];
-  sessions: Session[];
+  agents: ProjectAgentExecution[];
+  agentCount: number; // total before the bounded ProjectState preview
+  sessions: ProjectSession[];
   claims: Claim[]; // active only (status !== 'done')
   bugs: Bug[];
   completed: Claim[]; // status === 'done', newest first, capped

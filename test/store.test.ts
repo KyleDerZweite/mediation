@@ -9,6 +9,7 @@ const P = 'test-project';
 
 // Store methods take zod output types; parse builds them with defaults filled.
 const mkClaim = (input: Record<string, unknown>): ClaimCreate => claimCreate.parse(input);
+const mkAgentEvent = (input: Record<string, unknown>) => agentEvent.parse({ occurredAt: Date.now(), ...input });
 
 before(() => {
   store = new Store({ dbPath: ':memory:', sessionTtlMs: 1000, claimIdleTtlMs: 60_000 });
@@ -63,7 +64,7 @@ test('session metadata creates a durable execution, heartbeat updates it, and tr
 test('native agent events are idempotent, ordered by occurredAt, and heal child-first parentage', () => {
   const s = new Store({ dbPath: ':memory:', sessionTtlMs: 1000 });
   const now = Date.now();
-  const childInput = agentEvent.parse({
+  const childInput = mkAgentEvent({
     eventId: 'child-start', runId: 'run-tree', agentId: 'child', parentAgentId: 'root', harness: 'codex',
     name: 'Child', state: 'active', occurredAt: now - 100,
   });
@@ -82,7 +83,7 @@ test('native agent events are idempotent, ordered by occurredAt, and heal child-
   assert.equal(s.reportAgentEvent('crew-events', 'user-1', 'Ada',
     { ...childInput, state: 'failed' }).state, 'active', 'legacy NULL hashes remain best-effort idempotent');
 
-  const root = s.reportAgentEvent('crew-events', 'user-1', 'Ada', agentEvent.parse({
+  const root = s.reportAgentEvent('crew-events', 'user-1', 'Ada', mkAgentEvent({
     eventId: 'root-start', runId: 'run-tree', agentId: 'root', harness: 'codex', state: 'active',
     occurredAt: now,
   }));
@@ -93,11 +94,11 @@ test('native agent events are idempotent, ordered by occurredAt, and heal child-
   assert.ok(!('runId' in sharedChild) && !('agentId' in sharedChild),
     'shared execution state omits raw harness ids');
 
-  s.reportAgentEvent('crew-events', 'user-1', 'Ada', agentEvent.parse({
+  s.reportAgentEvent('crew-events', 'user-1', 'Ada', mkAgentEvent({
     eventId: 'child-stop', runId: 'run-tree', agentId: 'child', parentAgentId: 'root', harness: 'codex',
     state: 'completed', occurredAt: now + 100,
   }));
-  const afterOlder = s.reportAgentEvent('crew-events', 'user-1', 'Ada', agentEvent.parse({
+  const afterOlder = s.reportAgentEvent('crew-events', 'user-1', 'Ada', mkAgentEvent({
     eventId: 'child-late-old', runId: 'run-tree', agentId: 'child', parentAgentId: 'root', harness: 'codex',
     state: 'waiting', occurredAt: now - 50,
   }));
@@ -105,24 +106,26 @@ test('native agent events are idempotent, ordered by occurredAt, and heal child-
   assert.ok(afterOlder.endedAt);
   assert.equal(afterOlder.stale, false, 'terminal executions are never stale');
 
-  const afterAncient = s.reportAgentEvent('crew-events', 'user-1', 'Ada', agentEvent.parse({
+  const afterAncient = s.reportAgentEvent('crew-events', 'user-1', 'Ada', mkAgentEvent({
     eventId: 'child-ancient', runId: 'run-tree', agentId: 'child', parentAgentId: 'root', harness: 'codex',
     state: 'active', occurredAt: now - 10 * 60_000,
   }));
   assert.equal(afterAncient.state, 'completed', 'an out-of-window past event cannot reopen terminal work');
 
-  assert.throws(() => s.reportAgentEvent('crew-events', 'user-1', 'Ada', agentEvent.parse({
+  assert.throws(() => s.reportAgentEvent('crew-events', 'user-1', 'Ada', mkAgentEvent({
     eventId: 'child-start', runId: 'other-run', agentId: 'other', harness: 'codex', state: 'active',
   })), (error: any) => error.statusCode === 409);
 
-  const receivedAfter = Date.now();
-  const secondsScale = s.reportAgentEvent('crew-events', 'user-1', 'Ada', agentEvent.parse({
+  assert.throws(() => s.reportAgentEvent('crew-events', 'user-1', 'Ada', mkAgentEvent({
     eventId: 'seconds-clock', runId: 'clock-run', agentId: 'clock-agent', harness: 'codex',
     state: 'active', occurredAt: 1_700_000_000,
+  })), (error: any) => error.statusCode === 409,
+  'an old report cannot create a fresh-looking execution');
+  s.reportAgentEvent('crew-events', 'user-1', 'Ada', mkAgentEvent({
+    eventId: 'clock-current', runId: 'clock-run', agentId: 'clock-agent', harness: 'codex',
+    state: 'active',
   }));
-  assert.ok(secondsScale.updatedAt >= receivedAfter && secondsScale.updatedAt <= Date.now(),
-    'timestamps outside the skew window use server receipt time');
-  const ignoredAncient = s.reportAgentEvent('crew-events', 'user-1', 'Ada', agentEvent.parse({
+  const ignoredAncient = s.reportAgentEvent('crew-events', 'user-1', 'Ada', mkAgentEvent({
     eventId: 'seconds-clock-late', runId: 'clock-run', agentId: 'clock-agent', parentAgentId: 'invented',
     harness: 'other', task: 'stale task', state: 'waiting', occurredAt: 1_700_000_001,
   }));
@@ -131,7 +134,7 @@ test('native agent events are idempotent, ordered by occurredAt, and heal child-
   assert.equal(ignoredAncient.parentUnavailable, false, 'ancient events cannot change current parent metadata');
 
   const futureReceivedAfter = Date.now();
-  const future = s.reportAgentEvent('crew-events', 'user-1', 'Ada', agentEvent.parse({
+  const future = s.reportAgentEvent('crew-events', 'user-1', 'Ada', mkAgentEvent({
     eventId: 'future-clock', runId: 'future-run', agentId: 'future-agent', harness: 'codex',
     state: 'active', occurredAt: Date.now() + 10 * 60_000,
   }));
@@ -140,15 +143,43 @@ test('native agent events are idempotent, ordered by occurredAt, and heal child-
   s.close();
 });
 
+test('an exact old retry cannot recreate an execution after all retention rows expire', () => {
+  const realNow = Date.now;
+  let clock = 1_800_000_000_000;
+  Date.now = () => clock;
+  const s = new Store({ dbPath: ':memory:' });
+  try {
+    const start = mkAgentEvent({
+      eventId: 'expired-start', runId: 'expired-run', agentId: 'worker', harness: 'codex', state: 'active',
+    });
+    s.reportAgentEvent('crew-expired-retry', 'user-1', 'Ada', start);
+    clock += 100;
+    s.reportAgentEvent('crew-expired-retry', 'user-1', 'Ada', mkAgentEvent({
+      eventId: 'expired-stop', runId: 'expired-run', agentId: 'worker', harness: 'codex', state: 'completed',
+    }));
+
+    clock += 8 * 24 * 60 * 60_000;
+    assert.equal(s.getState('crew-expired-retry').agentCount, 0);
+    assert.equal(Number((s.db.prepare(`SELECT COUNT(*) AS n FROM agent_events
+      WHERE project_id = 'crew-expired-retry'`).get() as { n: number }).n), 0);
+    assert.throws(() => s.reportAgentEvent('crew-expired-retry', 'user-1', 'Ada', start),
+      (error: any) => error.statusCode === 409 && /too old/.test(error.message));
+    assert.equal(s.getState('crew-expired-retry').agentCount, 0);
+  } finally {
+    s.close();
+    Date.now = realNow;
+  }
+});
+
 test('execution identity and parent resolution are isolated by authenticated user', () => {
   const s = new Store({ dbPath: ':memory:' });
-  const root = s.reportAgentEvent('crew-users', 'alice', 'Alice', agentEvent.parse({
+  const root = s.reportAgentEvent('crew-users', 'alice', 'Alice', mkAgentEvent({
     eventId: 'alice-root', runId: 'same-run', agentId: 'root', harness: 'codex', state: 'active',
   }));
-  const sameExternal = s.reportAgentEvent('crew-users', 'bob', 'Bob', agentEvent.parse({
+  const sameExternal = s.reportAgentEvent('crew-users', 'bob', 'Bob', mkAgentEvent({
     eventId: 'bob-root', runId: 'same-run', agentId: 'root', harness: 'codex', state: 'active',
   }));
-  const child = s.reportAgentEvent('crew-users', 'bob', 'Bob', agentEvent.parse({
+  const child = s.reportAgentEvent('crew-users', 'bob', 'Bob', mkAgentEvent({
     eventId: 'bob-child', runId: 'same-run', agentId: 'child', parentAgentId: 'missing',
     harness: 'codex', state: 'active',
   }));
@@ -171,7 +202,7 @@ test('a root hook event attaches a unique run-only session without inventing an 
   const session = s.startSession('crew-run-only', sessionCreate.parse({ agent: 'codex', runId: 'thread-1' }),
     'cap', 'user-1');
   assert.equal(s.getState('crew-run-only').agents.length, 0);
-  const root = s.reportAgentEvent('crew-run-only', 'user-1', 'Ada', agentEvent.parse({
+  const root = s.reportAgentEvent('crew-run-only', 'user-1', 'Ada', mkAgentEvent({
     eventId: 'hook-root', runId: 'thread-1', agentId: 'root', harness: 'codex', state: 'active',
   }));
   assert.equal(root.sessionId, session.id);
@@ -183,7 +214,7 @@ test('a root hook event attaches a unique run-only session without inventing an 
 
 test('environment session metadata never overwrites native harness lifecycle', () => {
   const s = new Store({ dbPath: ':memory:' });
-  s.reportAgentEvent('crew-precedence', 'user-1', 'Ada', agentEvent.parse({
+  s.reportAgentEvent('crew-precedence', 'user-1', 'Ada', mkAgentEvent({
     eventId: 'native-start', runId: 'run-native', agentId: 'worker', harness: 'codex-hook',
     task: 'Native task', state: 'active', stateReason: 'hook says active',
   }));
@@ -206,7 +237,7 @@ test('environment session metadata never overwrites native harness lifecycle', (
 
 test('stale is derived from lifecycle age and a fresh session for the same actor and run', () => {
   const s = new Store({ dbPath: ':memory:', sessionTtlMs: 1000 });
-  const execution = s.reportAgentEvent('crew-stale', 'user-1', 'Ada', agentEvent.parse({
+  const execution = s.reportAgentEvent('crew-stale', 'user-1', 'Ada', mkAgentEvent({
     eventId: 'stale-start', runId: 'run-stale', agentId: 'worker', harness: 'codex', state: 'active',
   }));
   s.db.prepare('UPDATE agent_executions SET updated_at = ? WHERE id = ?')
@@ -222,7 +253,7 @@ test('state reads prune old executions for every actor, preserve live runs, and 
   const s = new Store({ dbPath: ':memory:', sessionTtlMs: 60_000 });
   const report = (userId: string, eventId: string, runId: string, agentId: string,
     state: 'active' | 'completed', parentAgentId?: string) => s.reportAgentEvent(
-    'crew-retention', userId, userId, agentEvent.parse({
+    'crew-retention', userId, userId, mkAgentEvent({
       eventId, runId, agentId, parentAgentId, harness: 'codex', state,
     }));
   const terminal = report('alice', 'old-terminal-event', 'old-terminal-run', 'terminal', 'completed');
@@ -287,6 +318,31 @@ test('execution history keeps 1000 newest unlinked rows plus every session-linke
   assert.equal(Number((s.db.prepare(
     "SELECT COUNT(*) AS n FROM agent_events WHERE event_id = 'old-dedupe'").get() as { n: number }).n), 0);
   assert.ok(s.db.prepare('SELECT 1 FROM agent_executions WHERE session_id = ?').get(linked.id));
+  s.close();
+});
+
+test('bounded state previews distinguish an omitted parent from unavailable lineage', () => {
+  const s = new Store({ dbPath: ':memory:' });
+  const insert = s.db.prepare(`INSERT INTO agent_executions
+    (id, project_id, user_id, run_id, agent_id, parent_agent_id, parent_id, harness,
+     name, role, task, state, state_reason, provenance, session_id, developer,
+     started_at, updated_at, ended_at)
+    VALUES (?, 'crew-preview', 'preview-user', 'preview-run', ?, ?, ?, 'codex', NULL, NULL, NULL,
+      'active', NULL, 'harness-reported', NULL, 'Ada', ?, ?, NULL)`);
+  const base = Date.now() - 201;
+  insert.run('preview-root', 'root', null, null, base, base);
+  for (let i = 0; i < 200; i += 1) {
+    insert.run(`preview-child-${i}`, `child-${i}`, 'root', 'preview-root', base + i + 1, base + i + 1);
+  }
+
+  const state = s.getState('crew-preview');
+  assert.equal(state.agentCount, 201);
+  assert.equal(state.agents.length, 200);
+  assert.ok(!state.agents.some((agent) => agent.id === 'preview-root'));
+  const child = state.agents.find((agent) => agent.id === 'preview-child-199')!;
+  assert.equal(child.parentId, null, 'shared state never exposes a dangling preview edge');
+  assert.equal(child.parentOutsidePreview, true);
+  assert.equal(child.parentUnavailable, false, 'the persisted parent still exists');
   s.close();
 });
 

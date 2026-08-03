@@ -57,4 +57,7 @@ test('agent events are bounded, strict lifecycle reports without caller-selected
     /cannot be its own parent/);
   assert.throws(() => agentEvent.parse({ ...event, task: 'safe\u202ebut misleading' }), /bidirectional/);
   assert.throws(() => agentEvent.parse({ ...event, stateReason: 'line one\nline two' }), /control/);
+  assert.throws(() => agentEvent.parse({ ...event, occurredAt: Number.MAX_VALUE }));
+  const { occurredAt: _occurredAt, ...withoutTime } = event;
+  assert.throws(() => agentEvent.parse(withoutTime), /occurredAt/);
 });

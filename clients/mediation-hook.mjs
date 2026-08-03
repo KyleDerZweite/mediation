@@ -2,7 +2,7 @@
 // Fail-open lifecycle bridge for Codex and Claude Code. It deliberately reads
 // only stable identity fields from hook stdin; prompts, transcripts, tool data,
 // assistant messages, and the original input never leave this process.
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -82,9 +82,21 @@ function eventId(...parts) {
   return createHash('sha256').update(parts.join('\0')).digest('hex');
 }
 
-function payload(input, event, root = false) {
-  const runId = safeId(input.session_id);
-  const childId = safeId(input.agent_id);
+function scopeId(server, state, value) {
+  const id = safeId(value);
+  const scope = state?.project
+    ? `project:${state.project}`
+    : state?.repository?.owner && state?.repository?.repository
+      ? `github:${state.repository.owner.toLowerCase()}/${state.repository.repository.toLowerCase()}`
+      : null;
+  return id && scope
+    ? `native-${createHash('sha256').update(`${server}\0${scope}\0${id}`).digest('hex').slice(0, 32)}`
+    : null;
+}
+
+function payload(input, event, server, localState, occurrence, root = false) {
+  const runId = scopeId(server, localState, input.session_id);
+  const childId = scopeId(server, localState, input.agent_id);
   const agentId = root || !event.startsWith('Subagent') ? runId : childId;
   if (!runId || !agentId) return null;
   const state = event.endsWith('Start') ? 'active' : 'completed';
@@ -92,13 +104,14 @@ function payload(input, event, root = false) {
     ? ['root-observed', event, runId, childId]
     : [event, runId, agentId];
   return {
-    eventId: eventId(harness, ...key),
+    eventId: eventId(harness, occurrence.id, ...key),
     runId,
     agentId,
     ...(root || agentId === runId ? {} : { parentAgentId: runId }),
     harness,
     ...(root ? {} : { role: safeRole(input.agent_type) }),
-    state: root && event === 'SubagentStop' ? 'active' : state,
+    state,
+    occurredAt: occurrence.at,
   };
 }
 
@@ -118,8 +131,6 @@ async function main() {
   const input = await readInput();
   const event = input?.hook_event_name;
   if (!input || !allowedEvents.has(event)) return;
-  const agent = payload(input, event);
-  if (!agent) return;
   const token = credential(server);
   if (!token) return;
   const state = findState(typeof input.cwd === 'string' ? input.cwd : process.cwd());
@@ -130,9 +141,15 @@ async function main() {
   const projects = await request(server, token, 'GET', '/api/projects');
   const project = projectId(state, projects);
   if (!project) return;
+  // One hook invocation is one lifecycle occurrence. Its nonce keeps a resumed
+  // session's second Start distinct from the original Start, while a single
+  // invocation gives every derived report the same ordering timestamp.
+  const occurrence = { id: randomUUID(), at: Date.now() };
+  const agent = payload(input, event, server, state, occurrence);
+  if (!agent) return;
   const endpoint = `/api/projects/${encodeURIComponent(project)}/agent-events`;
-  if (event.startsWith('Subagent')) {
-    const root = payload(input, event, true);
+  if (event === 'SubagentStart') {
+    const root = payload(input, event, server, state, occurrence, true);
     if (root) await request(server, token, 'POST', endpoint, root);
   }
   await request(server, token, 'POST', endpoint, agent);

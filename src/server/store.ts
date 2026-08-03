@@ -313,9 +313,14 @@ function agentEventPayloadHash(input: AgentEvent): string {
   return createHash('sha256').update(JSON.stringify(input, keys)).digest('base64url');
 }
 
-function sharedAgentExecution(execution: AgentExecution): ProjectAgentExecution {
+function sharedAgentExecution(execution: AgentExecution, previewIds: ReadonlySet<string>): ProjectAgentExecution {
   const { runId: _runId, agentId: _agentId, ...shared } = execution;
-  return shared;
+  const parentOutsidePreview = shared.parentId != null && !previewIds.has(shared.parentId);
+  return {
+    ...shared,
+    parentId: parentOutsidePreview ? null : shared.parentId,
+    parentOutsidePreview,
+  };
 }
 
 function sharedSession(session: Session): ProjectSession {
@@ -739,11 +744,12 @@ export class Store {
 
   reportAgentEvent(projectId: string, userId: string, developer: string | null, input: AgentEvent): AgentExecution {
     const receivedAt = Date.now();
-    // Client clocks are advisory. Bound them hard enough to preserve ordering without
-    // letting one far-future timestamp suppress every later lifecycle event.
+    // Client clocks are advisory. Future skew is clamped; a far-past report may
+    // only no-op an existing execution, never create fresh-looking history.
     const skew = 5 * 60_000;
-    const reportedAt = input.occurredAt ?? receivedAt;
+    const reportedAt = input.occurredAt;
     const occurredAt = Math.abs(reportedAt - receivedAt) <= skew ? reportedAt : receivedAt;
+    const outOfWindowPast = reportedAt < receivedAt - skew;
     const payloadHash = agentEventPayloadHash(input);
     let execution!: Row;
     let applied = true;
@@ -767,6 +773,7 @@ export class Store {
           ?? (() => { throw new Error('agent event exists without its execution'); })();
         applied = false;
       } else if (!existing) {
+        if (outOfWindowPast) fail('agent lifecycle event is too old to establish a new execution', 409);
         const endedAt = TERMINAL_AGENT_STATES.includes(input.state) ? occurredAt : null;
         this.db.prepare(`INSERT INTO agent_executions
           (id, project_id, user_id, run_id, agent_id, parent_agent_id, parent_id, harness,
@@ -778,7 +785,6 @@ export class Store {
             input.state, input.stateReason ?? null, developer, occurredAt, occurredAt, endedAt);
         execution = this.executionRow(projectId, userId, input.runId, input.agentId)!;
       } else {
-        const outOfWindowPast = input.occurredAt != null && input.occurredAt < receivedAt - skew;
         if (outOfWindowPast) {
           execution = existing;
           applied = false;
@@ -2022,8 +2028,10 @@ export class Store {
       .all(projectId, TERMINAL_AGENT_LIMIT) as Row[];
     const agentCount = Number((this.db.prepare(`SELECT COUNT(*) AS n FROM agent_executions
       WHERE project_id = ?`).get(projectId) as Row).n);
-    const agents = [...activeAgents, ...terminalAgents]
-      .map((row) => sharedAgentExecution(agentExecutionFromRow(row, this.executionIsStale(row, now))));
+    const previewExecutions = [...activeAgents, ...terminalAgents]
+      .map((row) => agentExecutionFromRow(row, this.executionIsStale(row, now)));
+    const previewIds = new Set(previewExecutions.map((execution) => execution.id));
+    const agents = previewExecutions.map((execution) => sharedAgentExecution(execution, previewIds));
     const claims = this.activeClaims(projectId);
     const bugs = (this.db.prepare('SELECT * FROM bugs WHERE projectId = ? ORDER BY createdAt')
       .all(projectId) as Row[]).map(bugFromRow);
