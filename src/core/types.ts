@@ -8,7 +8,25 @@ export interface RepoState {
   reportedAt: number;
 }
 
-export interface Session {
+export type AgentState = 'starting' | 'active' | 'waiting' | 'blocked' | 'needs-input'
+  | 'completed' | 'failed' | 'cancelled';
+export type AgentProvenance = 'harness-reported' | 'environment-reported';
+
+// Optional harness-native identity. These fields describe a logical agent run;
+// the session remains the short-lived authenticated transport carrying it.
+export interface AgentLineage {
+  runId: string | null;
+  agentId: string | null;
+  parentAgentId: string | null;
+  agentName: string | null;
+  agentRole: string | null;
+  agentTask: string | null;
+  agentState: AgentState | null;
+  agentStateReason: string | null;
+  agentProvenance: AgentProvenance | null;
+}
+
+export interface Session extends AgentLineage {
   id: string;
   projectId: string;
   agent: string;
@@ -20,6 +38,29 @@ export interface Session {
   repo: RepoState | null;
   createdAt: number;
   lastSeenAt: number;
+}
+
+// Durable logical execution reported by a harness. Unlike Session, this row
+// survives transport recycling and can therefore form a stable agent tree.
+export interface AgentExecution {
+  id: string;
+  projectId: string;
+  runId: string;
+  agentId: string;
+  parentId: string | null;
+  harness: string;
+  name: string | null;
+  role: string | null;
+  task: string | null;
+  state: AgentState;
+  stateReason: string | null;
+  provenance: AgentProvenance;
+  sessionId: string | null;
+  developer: string | null;
+  startedAt: number;
+  updatedAt: number;
+  endedAt: number | null;
+  stale: boolean;
 }
 
 // `abandoned` is the terminal status for work that was claimed and then dropped
@@ -206,6 +247,7 @@ export interface RecentFile {
 export interface ProjectState {
   project: string;
   now: number;
+  agents: AgentExecution[];
   sessions: Session[];
   claims: Claim[]; // active only (status !== 'done')
   bugs: Bug[];

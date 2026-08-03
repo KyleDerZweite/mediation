@@ -7,6 +7,40 @@ import { z } from 'zod';
 const str = z.string().min(1);
 const optStr = z.string().min(1).nullish();
 const files = z.array(z.string()).default([]);
+const opaqueId = z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/,
+  'must contain only ASCII letters, digits, dot, underscore, colon, or hyphen');
+const unsafeText = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u;
+const displayText = (max: number) => z.string().trim().min(1).max(max)
+  .refine((value) => !unsafeText.test(value), 'must not contain control or bidirectional formatting characters');
+
+export const agentState = z.enum([
+  'starting', 'active', 'waiting', 'blocked', 'needs-input', 'completed', 'failed', 'cancelled',
+]);
+export const agentProvenance = z.enum(['harness-reported', 'environment-reported']);
+
+const agentLineageFields = {
+  runId: opaqueId.nullish(),
+  agentId: opaqueId.nullish(),
+  parentAgentId: opaqueId.nullish(),
+  agentName: displayText(80).nullish(),
+  agentRole: displayText(64).nullish(),
+  agentTask: displayText(280).nullish(),
+  agentState: agentState.nullish(),
+  agentStateReason: displayText(280).nullish(),
+};
+
+const validateAgentLineage = (value: { runId?: string | null; agentId?: string | null; parentAgentId?: string | null },
+  ctx: z.RefinementCtx): void => {
+  if (value.agentId && !value.runId) {
+    ctx.addIssue({ code: 'custom', path: ['agentId'], message: 'agentId requires runId' });
+  }
+  if (value.parentAgentId && !value.agentId) {
+    ctx.addIssue({ code: 'custom', path: ['parentAgentId'], message: 'parentAgentId requires agentId' });
+  }
+  if (value.agentId && value.parentAgentId === value.agentId) {
+    ctx.addIssue({ code: 'custom', path: ['parentAgentId'], message: 'an agent cannot be its own parent' });
+  }
+};
 
 export const activeClaimStatus = z.enum(['investigating', 'in-progress', 'testing', 'blocked']);
 // How a claim ends. `done` is finished work and enters the completed feed;
@@ -22,7 +56,8 @@ export const sessionCreate = z.object({
   developer: optStr,
   machine: optStr,
   worktree: optStr,
-});
+  ...agentLineageFields,
+}).strict().superRefine(validateAgentLineage);
 
 // Repo state rides ALONG with the beat rather than needing its own call: the
 // beat already fires on a timer, so real touched files keep flowing while the
@@ -32,7 +67,26 @@ export const heartbeat = z.object({
   branch: optStr,
   revision: optStr,
   dirtyFiles: z.array(z.string()).optional(),
-});
+  agentTask: agentLineageFields.agentTask,
+  agentState: agentLineageFields.agentState,
+  agentStateReason: agentLineageFields.agentStateReason,
+}).strict();
+
+// Native harness hook. Provenance is deliberately absent: the authenticated
+// endpoint determines whether this was harness- or environment-reported.
+export const agentEvent = z.object({
+  eventId: opaqueId,
+  runId: opaqueId,
+  agentId: opaqueId,
+  parentAgentId: opaqueId.nullish(),
+  harness: displayText(64),
+  name: displayText(80).nullish(),
+  role: displayText(64).nullish(),
+  task: displayText(280).nullish(),
+  state: agentState,
+  stateReason: displayText(280).nullish(),
+  occurredAt: z.number().int().nonnegative().optional(),
+}).strict().superRefine(validateAgentLineage);
 
 export const repoReport = z.object({
   branch: optStr,
@@ -138,7 +192,8 @@ export const githubRepositorySession = z.object({
   agent: str,
   machine: optStr,
   worktree: optStr,
-});
+  ...agentLineageFields,
+}).strict().superRefine(validateAgentLineage);
 
 export const userPatch = z.object({
   role: z.enum(['user', 'admin']).optional(),
@@ -166,6 +221,7 @@ export const memberPatch = z.object({
 
 export type SessionCreate = z.infer<typeof sessionCreate>;
 export type Heartbeat = z.infer<typeof heartbeat>;
+export type AgentEvent = z.infer<typeof agentEvent>;
 export type RepoReport = z.infer<typeof repoReport>;
 export type ClaimCreate = z.infer<typeof claimCreate>;
 export type ClaimPatch = z.infer<typeof claimPatch>;
