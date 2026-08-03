@@ -28,6 +28,7 @@ const patches: any[] = [];
 const claimPosts: any[] = [];
 const completions: any[] = [];
 const beats: any[] = [];
+const sessionPosts: any[] = [];
 let bigState = false; // when set, the stub answers with a busy project
 // When set, the stub answers a completion the way the server does for a claim
 // it had to adopt from an ended session.
@@ -56,7 +57,12 @@ before(async () => {
     // heartbeat test below runs in seconds rather than minutes.
     if (req.url === '/api/health') return send({ ok: true, authMode: 'github-app', sessionTtlMs: 8_000 });
     if (req.url === '/api/repositories/github/session') {
-      return send({ project: { id: PROJECT_ID }, session: { id: 'sess-1' }, capability: 'cap-1' });
+      let raw = '';
+      req.on('data', (c) => { raw += c; });
+      return req.on('end', () => {
+        sessionPosts.push(JSON.parse(raw || '{}'));
+        send({ project: { id: PROJECT_ID }, session: { id: 'sess-1' }, capability: 'cap-1' });
+      });
     }
     if (req.url?.endsWith('/heartbeat')) {
       heartbeats += 1;
@@ -257,6 +263,83 @@ test('mediation_claim binds a GitHub session and publishes the claim', async () 
   assert.match(out, /Claim created: claim-1/);
   assert.ok(seen.includes('POST /api/repositories/github/session'), seen.join(', '));
   assert.equal(claimPosts.at(-1)?.intent, 'test work');
+});
+
+test('explicit harness agent metadata reaches session creation and heartbeats', async () => {
+  sessionPosts.length = 0;
+  beats.length = 0;
+  await callTool('mediation_claim', { dryRun: true }, {
+    MEDIATION_HARNESS: '  codex  ',
+    MEDIATION_RUN_ID: '  run-7  ',
+    CODEX_THREAD_ID: 'native-run-loses-to-explicit',
+    MEDIATION_AGENT_ID: 'agent-2',
+    MEDIATION_PARENT_AGENT_ID: 'agent-1',
+    MEDIATION_AGENT_NAME: 'schema scout',
+    MEDIATION_AGENT_ROLE: 'researcher',
+    MEDIATION_AGENT_TASK: 'inspect schemas',
+    MEDIATION_AGENT_STATE: 'active',
+    MEDIATION_AGENT_STATE_REASON: 'reading core types',
+  });
+
+  const created = sessionPosts.at(-1);
+  assert.equal(created.agent, 'codex');
+  assert.deepEqual({
+    runId: created.runId,
+    agentId: created.agentId,
+    parentAgentId: created.parentAgentId,
+    agentName: created.agentName,
+    agentRole: created.agentRole,
+    agentTask: created.agentTask,
+    agentState: created.agentState,
+    agentStateReason: created.agentStateReason,
+  }, {
+    runId: 'run-7',
+    agentId: 'agent-2',
+    parentAgentId: 'agent-1',
+    agentName: 'schema scout',
+    agentRole: 'researcher',
+    agentTask: 'inspect schemas',
+    agentState: 'active',
+    agentStateReason: 'reading core types',
+  });
+  assert.equal(created.agentProvenance, undefined, 'the server derives provenance');
+
+  const deadline = Date.now() + 1_000;
+  while (!beats.some((item) => item.agentTask === 'inspect schemas') && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  const beat = beats.find((item) => item.agentTask === 'inspect schemas');
+  assert.deepEqual({
+    agentTask: beat?.agentTask,
+    agentState: beat?.agentState,
+    agentStateReason: beat?.agentStateReason,
+  }, {
+    agentTask: 'inspect schemas',
+    agentState: 'active',
+    agentStateReason: 'reading core types',
+  });
+  assert.equal(beat?.parentAgentId, undefined, 'lineage is immutable after session creation');
+});
+
+test('invalid harness metadata is omitted instead of breaking old sessions', async () => {
+  sessionPosts.length = 0;
+  await callTool('mediation_claim', { dryRun: true }, {
+    MEDIATION_RUN_ID: 'not a valid id',
+    CODEX_THREAD_ID: 'also not valid',
+    MEDIATION_AGENT_ID: 'orphan-agent',
+    MEDIATION_PARENT_AGENT_ID: 'orphan-parent',
+    MEDIATION_AGENT_NAME: 'n'.repeat(81),
+    MEDIATION_AGENT_ROLE: 'r'.repeat(65),
+    MEDIATION_AGENT_TASK: 't'.repeat(281),
+    MEDIATION_AGENT_STATE: 'running',
+    MEDIATION_AGENT_STATE_REASON: 's'.repeat(281),
+  });
+  const created = sessionPosts.at(-1);
+  for (const field of ['runId', 'agentId', 'parentAgentId', 'agentName', 'agentRole',
+    'agentTask', 'agentState', 'agentStateReason', 'agentProvenance']) {
+    assert.equal(created[field], undefined, `${field} should be omitted`);
+  }
+  assert.equal(created.agent, 'claude-code');
 });
 
 // Claiming IS checking: the create response carries the same overlap warnings,

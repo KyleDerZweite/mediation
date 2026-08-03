@@ -290,6 +290,50 @@ const TIMEOUT_MS = 5000;
 let session = null; // { id, capability, project, heartbeat }; never persisted
 let sessionPromise = null;
 let authMode = null;
+
+function envValue(name, max) {
+  const value = process.env[name]?.trim();
+  return value && value.length <= max ? value : undefined;
+}
+
+const UNSAFE_DISPLAY_TEXT = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u;
+function envText(name, max) {
+  const value = envValue(name, max);
+  return value && !UNSAFE_DISPLAY_TEXT.test(value) ? value : undefined;
+}
+
+function envId(name) {
+  const value = envValue(name, 128);
+  return value && /^[A-Za-z0-9._:-]+$/.test(value) ? value : undefined;
+}
+
+/* Harnesses that know their own agent tree may pass it through explicitly.
+   CODEX_THREAD_ID is a native run identifier, but says nothing about which
+   agent spawned which; parentage therefore has no heuristic fallback. */
+function agentMetadata() {
+  const state = envValue('MEDIATION_AGENT_STATE', 20);
+  const runId = envId('MEDIATION_RUN_ID') || envId('CODEX_THREAD_ID');
+  const agentId = runId ? envId('MEDIATION_AGENT_ID') : undefined;
+  const parentAgentId = agentId ? envId('MEDIATION_PARENT_AGENT_ID') : undefined;
+  const metadata = {
+    runId,
+    agentId,
+    parentAgentId: parentAgentId !== agentId ? parentAgentId : undefined,
+    agentName: envText('MEDIATION_AGENT_NAME', 80),
+    agentRole: envText('MEDIATION_AGENT_ROLE', 64),
+    agentTask: envText('MEDIATION_AGENT_TASK', 280),
+    agentState: ['starting', 'active', 'waiting', 'blocked', 'needs-input', 'completed', 'failed', 'cancelled'].includes(state)
+      ? state : undefined,
+    agentStateReason: envText('MEDIATION_AGENT_STATE_REASON', 280),
+  };
+  return Object.fromEntries(Object.entries(metadata).filter(([, value]) => value !== undefined));
+}
+
+function heartbeatMetadata() {
+  const { agentTask, agentState, agentStateReason } = agentMetadata();
+  return Object.fromEntries(Object.entries({ agentTask, agentState, agentStateReason })
+    .filter(([, value]) => value !== undefined));
+}
 // Beat well inside the server's session TTL: an agent that claims work and then
 // codes for ten minutes without calling another tool has only these beats
 // keeping its claims alive, so several must be able to drop without expiring
@@ -376,9 +420,10 @@ async function githubSession(state) {
   const created = await api('POST', '/api/repositories/github/session', {
     owner: current.repository.owner,
     repository: current.repository.repository,
-    agent: process.env.MEDIATION_HARNESS || 'claude-code',
+    agent: envText('MEDIATION_HARNESS', 64) || 'claude-code',
     machine: os.hostname(),
     worktree: worktreeId(),
+    ...agentMetadata(),
   });
   const project = typeof created.project === 'string' ? created.project : created.project?.id;
   const id = typeof created.session === 'string' ? created.session : created.session?.id;
@@ -397,7 +442,8 @@ async function ensureSession() {
   const created = await ((await serverAuthMode()) === 'github-app'
     ? githubSession(state)
     : api('POST', `/api/projects/${encodeURIComponent(state.project)}/sessions`, {
-      agent: process.env.MEDIATION_HARNESS || 'claude-code', machine: os.hostname(), worktree: worktreeId(),
+      agent: envText('MEDIATION_HARNESS', 64) || 'claude-code', machine: os.hostname(), worktree: worktreeId(),
+      ...agentMetadata(),
     }));
   const current = { id: created.id, capability: created.capability, project: created.project || state.project, heartbeat: null };
   session = current;
@@ -407,7 +453,7 @@ async function ensureSession() {
      where a collision is most likely to form unnoticed. */
   const beat = () =>
     api('POST', `/api/projects/${encodeURIComponent(current.project)}/sessions/${current.id}/heartbeat`,
-      repoReport(), { sessionCapability: current.capability })
+      { ...repoReport(), ...heartbeatMetadata() }, { sessionCapability: current.capability })
       .catch((error) => {
         // A dropped beat is a network event, not a verdict. Giving up on the
         // first one leaves the agent working under a session the server then
