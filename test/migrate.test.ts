@@ -10,6 +10,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { Store } from '../src/server/store.ts';
 import { buildApp } from '../src/server/app.ts';
+import { sessionCreate } from '../src/core/schemas.ts';
 
 const OLD_DDL = `
   CREATE TABLE sessions (
@@ -109,6 +110,18 @@ test('pre-Alpha database upgrades in place: projects, ownership, legacy credenti
 
   // added columns are usable
   assert.equal(row<{ n: number }>("SELECT COUNT(*) AS n FROM pragma_table_info('pair_requests') WHERE name = 'approved_by'").n, 1);
+  for (const column of ['runId', 'agentId', 'parentAgentId', 'agentName', 'agentRole', 'agentTask',
+    'agentState', 'agentStateReason', 'agentProvenance', 'agent_execution_id']) {
+    assert.equal(row<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM pragma_table_info('sessions') WHERE name = ?`, column).n, 1, column);
+  }
+  assert.equal(row<{ n: number }>(
+    "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'agent_executions'").n, 1);
+  assert.equal(row<{ n: number }>(
+    "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'agent_events'").n, 1);
+  const lineaged = store.startSession('mediation', sessionCreate.parse({
+    agent: 'codex', runId: 'migrated-run', agentId: 'migrated-agent', agentState: 'active',
+  }), 'cap', 'u-kyle');
   store.close();
 
   // 5. reopening is a no-op with no duplicate members and no re-dating
@@ -116,6 +129,9 @@ test('pre-Alpha database upgrades in place: projects, ownership, legacy credenti
   const members = again.db.prepare('SELECT COUNT(*) AS n FROM project_members').get() as { n: number };
   assert.equal(Number(members.n), 3); // kyle x2 owner + gang member
   assert.equal((again.db.prepare('SELECT created_at FROM projects WHERE id = ?').get('mediation') as { created_at: number }).created_at, T0 + 900);
+  const state = again.getState('mediation');
+  assert.equal(state.sessions.find((s) => s.id === lineaged.id)?.runId, 'migrated-run');
+  assert.equal(state.agents.find((a) => a.runId === 'migrated-run')?.agentId, 'migrated-agent');
   again.close();
   rmSync(path.dirname(file), { recursive: true, force: true });
 });

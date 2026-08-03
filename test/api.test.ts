@@ -82,6 +82,66 @@ test('session lifecycle: create, heartbeat, repo, end', async () => {
   assert.equal(gone.status, 404);
 });
 
+test('session execution metadata round-trips through create, heartbeat and project state', async () => {
+  const created = await post(`${P}/sessions`, {
+    agent: 'codex', runId: 'api-run', agentId: 'api-worker', agentName: 'API worker',
+    agentTask: 'Implement route', agentState: 'starting',
+  });
+  assert.equal(created.status, 200);
+  assert.equal(created.body.runId, 'api-run');
+  assert.equal(created.body.agentProvenance, 'environment-reported');
+
+  const beat = await post(`${P}/sessions/${created.body.id}/heartbeat`, {
+    agentTask: 'Test route', agentState: 'waiting', agentStateReason: 'waiting for fixtures',
+  });
+  assert.equal(beat.status, 200);
+  assert.equal(beat.body.agentState, 'waiting');
+
+  const state = (await get(`${P}/state`)).body;
+  const execution = state.agents.find((a: { runId: string; agentId: string }) =>
+    a.runId === 'api-run' && a.agentId === 'api-worker');
+  assert.equal(execution.task, 'Test route');
+  assert.equal(execution.stateReason, 'waiting for fixtures');
+  assert.equal(execution.sessionId, created.body.id);
+  assert.equal(execution.stale, false);
+  assert.equal(execution.parentUnavailable, false);
+  assert.ok(!('parentAgentId' in execution));
+});
+
+test('agent event endpoint is idempotent and ignores older lifecycle updates', async () => {
+  const now = Date.now();
+  const start = await post(`${P}/agent-events`, {
+    eventId: 'api-event-start', runId: 'event-run', agentId: 'event-worker', harness: 'codex',
+    task: 'Inspect server', state: 'active', occurredAt: now,
+  });
+  assert.equal(start.status, 200);
+  assert.equal(start.body.provenance, 'harness-reported');
+
+  const duplicate = await post(`${P}/agent-events`, {
+    eventId: 'api-event-start', runId: 'event-run', agentId: 'event-worker', harness: 'codex',
+    state: 'failed', occurredAt: now + 100,
+  });
+  assert.equal(duplicate.status, 200);
+  assert.equal(duplicate.body.state, 'active');
+
+  const stop = await post(`${P}/agent-events`, {
+    eventId: 'api-event-stop', runId: 'event-run', agentId: 'event-worker', harness: 'codex',
+    state: 'completed', occurredAt: now + 200,
+  });
+  assert.equal(stop.body.state, 'completed');
+  const old = await post(`${P}/agent-events`, {
+    eventId: 'api-event-old', runId: 'event-run', agentId: 'event-worker', harness: 'codex',
+    state: 'waiting', occurredAt: now - 100,
+  });
+  assert.equal(old.body.state, 'completed');
+
+  const collision = await post(`${P}/agent-events`, {
+    eventId: 'api-event-start', runId: 'different-run', agentId: 'different-worker', harness: 'codex',
+    state: 'active',
+  });
+  assert.equal(collision.status, 409);
+});
+
 test('claim create returns conflict warnings; complete keeps history', async () => {
   const a = (await post(`${P}/sessions`, { agent: 'agent-a' })).body;
   const b = (await post(`${P}/sessions`, { agent: 'agent-b' })).body;
@@ -188,7 +248,8 @@ test('state has the ProjectState shape', async () => {
   assert.equal(status, 200);
   assert.equal(body.project, 'api-test');
   assert.ok(body.now > 0);
-  for (const key of ['sessions', 'claims', 'bugs', 'completed', 'conflicts', 'recentFiles', 'events']) {
+  assert.equal(typeof body.agentCount, 'number');
+  for (const key of ['agents', 'sessions', 'claims', 'bugs', 'completed', 'conflicts', 'recentFiles', 'events']) {
     assert.ok(Array.isArray(body[key]), `${key} is an array`);
   }
   assert.ok(body.events.length > 0);

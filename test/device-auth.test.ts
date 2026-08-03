@@ -22,9 +22,13 @@ test('device login is global, waits for approval, and sessions cannot cross-cont
   const second = await jb(await req('POST', '/api/projects/private/sessions', { agent: 'claude-code' }, { token }));
   assert.match(first.agent, /^claude-code-[0-9a-f]{8}@alice$/);
   assert.notEqual(first.id, second.id);
-  assert.equal((await req('POST', `/api/projects/private/sessions/${first.id}/heartbeat`, {}, { token })).status, 403);
+  assert.equal((await req('POST', `/api/projects/private/sessions/${first.id}/heartbeat`,
+    { agentState: 'failed', agentStateReason: 'forged' }, { token })).status, 403);
+  assert.equal((await jb(await req('GET', '/api/projects/private/state', undefined, { token })))
+    .sessions.find((s: { id: string }) => s.id === first.id).agentState, null);
   const owned = await app.request(`/api/projects/private/sessions/${first.id}/heartbeat`, {
-    method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'x-mediation-session': first.capability }, body: '{}',
+    method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'x-mediation-session': first.capability },
+    body: JSON.stringify({ agentState: 'waiting', agentStateReason: 'owned update' }),
   });
   assert.equal(owned.status, 200);
 

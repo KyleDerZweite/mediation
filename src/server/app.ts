@@ -451,10 +451,11 @@ export function buildApp(store: Store, options: AppOptions = {}): Hono {
     });
     store.grantGithubProjectAccess(project.id, userId, authorization.permission, authorization.expiresAt);
     const capability = randomBytes(32).toString('base64url');
+    const { owner: _owner, repository: _repository, ...sessionMetadata } = body;
     const session = store.startSession(project.id, {
-      agent: body.agent, machine: body.machine ?? null, worktree: body.worktree ?? null,
+      ...sessionMetadata,
       developer: getUser(c)?.displayName ?? getCred(c)?.ownerDisplayName ?? null,
-    }, capability);
+    }, capability, userId);
     store.setGithubSessionAuthorization(project.id, session.id, {
       userId,
       githubUserId: identity.githubUserId,
@@ -527,8 +528,16 @@ export function buildApp(store: Store, options: AppOptions = {}): Hono {
     const user = getUser(c);
     const capability = randomBytes(32).toString('base64url');
     const session = store.startSession(c.req.param('p'),
-      { ...body, developer: user?.displayName ?? cred?.ownerDisplayName ?? null }, capability);
+      { ...body, developer: user?.displayName ?? cred?.ownerDisplayName ?? null }, capability, actorId(c));
     return c.json({ ...session, capability });
+  });
+
+  app.post('/api/projects/:p/agent-events', async (c) => {
+    const userId = actorId(c);
+    if (!userId) return unauthorized(c);
+    const developer = getUser(c)?.displayName ?? getCred(c)?.ownerDisplayName ?? null;
+    return c.json(store.reportAgentEvent(c.req.param('p'), userId, developer,
+      await parseBody(c, schemas.agentEvent)));
   });
 
   app.post('/api/projects/:p/sessions/:id/heartbeat', async (c) => {
@@ -721,6 +730,9 @@ export function buildApp(store: Store, options: AppOptions = {}): Hono {
 
   app.get('/install/mediation-mcp.mjs', (c) =>
     serveFile(c, path.join(ROOT, 'clients', 'mediation-mcp.mjs')));
+
+  app.get('/install/mediation-hook.mjs', (c) =>
+    serveFile(c, path.join(ROOT, 'clients', 'mediation-hook.mjs')));
 
   app.get('/install/mediation-installer.mjs', (c) =>
     serveFile(c, path.join(ROOT, 'clients', 'mediation-installer.mjs')));

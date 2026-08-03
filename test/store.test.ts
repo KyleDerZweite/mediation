@@ -1,7 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { Store } from '../src/server/store.ts';
-import { bugCreate, claimComplete, claimCreate, claimPatch } from '../src/core/schemas.ts';
+import { agentEvent, bugCreate, claimComplete, claimCreate, claimPatch, sessionCreate } from '../src/core/schemas.ts';
 import type { ClaimCreate } from '../src/core/schemas.ts';
 
 let store: Store;
@@ -24,6 +24,165 @@ test('sessions: start, heartbeat, repo state', () => {
   assert.equal(state.sessions.length, 1);
   assert.equal(state.sessions[0].repo?.branch, 'main');
   assert.deepEqual(state.sessions[0].repo?.dirtyFiles, ['x.js']);
+});
+
+test('session metadata creates a durable execution, heartbeat updates it, and transport end only detaches', () => {
+  const s = new Store({ dbPath: ':memory:' });
+  const session = s.startSession('crew-session', sessionCreate.parse({
+    agent: 'codex', runId: 'run-1', agentId: 'worker-1', parentAgentId: 'root-1',
+    agentName: 'Worker', agentRole: 'tester', agentTask: 'Run focused tests', agentState: 'starting',
+  }), 'cap', 'user-1');
+  let state = s.getState('crew-session');
+  assert.equal(state.sessions[0]?.runId, 'run-1');
+  assert.equal(state.sessions[0]?.agentProvenance, 'environment-reported');
+  assert.equal(state.agents[0]?.sessionId, session.id);
+  assert.equal(state.agents[0]?.state, 'starting');
+  assert.equal(state.agents[0]?.parentId, null, 'a missing parent stays unresolved');
+  assert.equal(state.agents[0]?.parentUnavailable, true);
+
+  s.heartbeat('crew-session', session.id, {
+    agentTask: 'Wait for server', agentState: 'waiting', agentStateReason: 'another task owns the API',
+  });
+  state = s.getState('crew-session');
+  assert.equal(state.agents[0]?.task, 'Wait for server');
+  assert.equal(state.agents[0]?.state, 'waiting');
+  assert.equal(state.agents[0]?.stateReason, 'another task owns the API');
+
+  s.heartbeat('crew-session', session.id, { agentState: 'active' });
+  assert.equal(s.getState('crew-session').agents[0]?.stateReason, null,
+    'a new state without a reason clears the obsolete reason');
+  s.endSession('crew-session', session.id);
+  state = s.getState('crew-session');
+  assert.equal(state.agents[0]?.sessionId, null);
+  assert.equal(state.agents[0]?.state, 'active', 'transport shutdown is not logical completion');
+  s.close();
+});
+
+test('native agent events are idempotent, ordered by occurredAt, and heal child-first parentage', () => {
+  const s = new Store({ dbPath: ':memory:', sessionTtlMs: 1000 });
+  const now = Date.now();
+  const childInput = agentEvent.parse({
+    eventId: 'child-start', runId: 'run-tree', agentId: 'child', parentAgentId: 'root', harness: 'codex',
+    name: 'Child', state: 'active', occurredAt: now - 100,
+  });
+  const child = s.reportAgentEvent('crew-events', 'user-1', 'Ada', childInput);
+  assert.equal(child.parentId, null);
+  assert.equal(child.parentUnavailable, true);
+  assert.ok(!('parentAgentId' in child), 'raw external parent ids never reach the read model');
+
+  const duplicate = s.reportAgentEvent('crew-events', 'user-1', 'Ada',
+    { ...childInput, state: 'failed' });
+  assert.equal(duplicate.id, child.id);
+  assert.equal(duplicate.state, 'active', 'the same event id is processed once');
+
+  const root = s.reportAgentEvent('crew-events', 'user-1', 'Ada', agentEvent.parse({
+    eventId: 'root-start', runId: 'run-tree', agentId: 'root', harness: 'codex', state: 'active',
+    occurredAt: now,
+  }));
+  assert.equal(root.parentUnavailable, false);
+  assert.equal(s.getState('crew-events').agents.find((a) => a.id === child.id)?.parentId, root.id,
+    'a parent arriving later backfills unresolved children');
+
+  s.reportAgentEvent('crew-events', 'user-1', 'Ada', agentEvent.parse({
+    eventId: 'child-stop', runId: 'run-tree', agentId: 'child', parentAgentId: 'root', harness: 'codex',
+    state: 'completed', occurredAt: now + 100,
+  }));
+  const afterOlder = s.reportAgentEvent('crew-events', 'user-1', 'Ada', agentEvent.parse({
+    eventId: 'child-late-old', runId: 'run-tree', agentId: 'child', parentAgentId: 'root', harness: 'codex',
+    state: 'waiting', occurredAt: now - 50,
+  }));
+  assert.equal(afterOlder.state, 'completed');
+  assert.ok(afterOlder.endedAt);
+  assert.equal(afterOlder.stale, false, 'terminal executions are never stale');
+
+  assert.throws(() => s.reportAgentEvent('crew-events', 'user-1', 'Ada', agentEvent.parse({
+    eventId: 'child-start', runId: 'other-run', agentId: 'other', harness: 'codex', state: 'active',
+  })), (error: any) => error.statusCode === 409);
+
+  const receivedAfter = Date.now();
+  const secondsScale = s.reportAgentEvent('crew-events', 'user-1', 'Ada', agentEvent.parse({
+    eventId: 'seconds-clock', runId: 'clock-run', agentId: 'clock-agent', harness: 'codex',
+    state: 'active', occurredAt: 1_700_000_000,
+  }));
+  assert.ok(secondsScale.updatedAt >= receivedAfter && secondsScale.updatedAt <= Date.now(),
+    'timestamps outside the skew window use server receipt time');
+  s.close();
+});
+
+test('execution identity and parent resolution are isolated by authenticated user', () => {
+  const s = new Store({ dbPath: ':memory:' });
+  const root = s.reportAgentEvent('crew-users', 'alice', 'Alice', agentEvent.parse({
+    eventId: 'alice-root', runId: 'same-run', agentId: 'root', harness: 'codex', state: 'active',
+  }));
+  const sameExternal = s.reportAgentEvent('crew-users', 'bob', 'Bob', agentEvent.parse({
+    eventId: 'bob-root', runId: 'same-run', agentId: 'root', harness: 'codex', state: 'active',
+  }));
+  const child = s.reportAgentEvent('crew-users', 'bob', 'Bob', agentEvent.parse({
+    eventId: 'bob-child', runId: 'same-run', agentId: 'child', parentAgentId: 'missing',
+    harness: 'codex', state: 'active',
+  }));
+  assert.notEqual(root.id, sameExternal.id);
+  assert.equal(child.parentId, null);
+  assert.equal(child.parentUnavailable, true);
+
+  const self = s.reportAgentEvent('crew-users', 'bob', 'Bob', {
+    eventId: 'self', runId: 'same-run', agentId: 'self', parentAgentId: 'self',
+    harness: 'codex', state: 'active', occurredAt: Date.now(),
+  });
+  assert.equal(self.parentId, null, 'store resolution remains defensive even if validation is bypassed');
+  assert.equal(self.parentUnavailable, true);
+  assert.equal(s.getState('crew-users').agentCount, 4);
+  s.close();
+});
+
+test('a root hook event attaches a unique run-only session without inventing an agent id', () => {
+  const s = new Store({ dbPath: ':memory:' });
+  const session = s.startSession('crew-run-only', sessionCreate.parse({ agent: 'codex', runId: 'thread-1' }),
+    'cap', 'user-1');
+  assert.equal(s.getState('crew-run-only').agents.length, 0);
+  const root = s.reportAgentEvent('crew-run-only', 'user-1', 'Ada', agentEvent.parse({
+    eventId: 'hook-root', runId: 'thread-1', agentId: 'root', harness: 'codex', state: 'active',
+  }));
+  assert.equal(root.sessionId, session.id);
+  assert.equal(s.getState('crew-run-only').sessions[0]?.agentId, null);
+  s.close();
+});
+
+test('environment session metadata never overwrites native harness lifecycle', () => {
+  const s = new Store({ dbPath: ':memory:' });
+  s.reportAgentEvent('crew-precedence', 'user-1', 'Ada', agentEvent.parse({
+    eventId: 'native-start', runId: 'run-native', agentId: 'worker', harness: 'codex-hook',
+    task: 'Native task', state: 'active', stateReason: 'hook says active',
+  }));
+  const session = s.startSession('crew-precedence', sessionCreate.parse({
+    agent: 'codex-mcp', runId: 'run-native', agentId: 'worker', agentName: 'Useful display name',
+    agentTask: 'Environment task', agentState: 'waiting', agentStateReason: 'static environment',
+  }), 'cap', 'user-1');
+  s.heartbeat('crew-precedence', session.id, {
+    agentTask: 'Heartbeat task', agentState: 'failed', agentStateReason: 'transport guess',
+  });
+  const execution = s.getState('crew-precedence').agents[0]!;
+  assert.equal(execution.harness, 'codex-hook');
+  assert.equal(execution.name, 'Useful display name', 'missing display data may be filled');
+  assert.equal(execution.task, 'Native task');
+  assert.equal(execution.state, 'active');
+  assert.equal(execution.stateReason, 'hook says active');
+  assert.equal(execution.provenance, 'harness-reported');
+  s.close();
+});
+
+test('stale is derived from lifecycle age and a fresh session for the same actor and run', () => {
+  const s = new Store({ dbPath: ':memory:', sessionTtlMs: 1000 });
+  const execution = s.reportAgentEvent('crew-stale', 'user-1', 'Ada', agentEvent.parse({
+    eventId: 'stale-start', runId: 'run-stale', agentId: 'worker', harness: 'codex', state: 'active',
+  }));
+  s.db.prepare('UPDATE agent_executions SET updated_at = ? WHERE id = ?')
+    .run(Date.now() - 2000, execution.id);
+  assert.equal(s.getState('crew-stale').agents[0]?.stale, true);
+
+  s.startSession('crew-stale', sessionCreate.parse({ agent: 'codex', runId: 'run-stale' }), 'cap', 'user-1');
+  assert.equal(s.getState('crew-stale').agents[0]?.stale, false);
+  s.close();
 });
 
 test('claims: create, overlap warning on files and task', () => {
