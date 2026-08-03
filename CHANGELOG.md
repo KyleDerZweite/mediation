@@ -49,6 +49,17 @@
   rows stack status and freshness below the agent details. The Crew tree uses
   a bounded, keyboard-focusable scroll region. Stale is a secondary freshness
   qualifier, so blocked, needs-input, and failed lifecycle states stay visible.
+- `DELETE /api/projects/:p/bugs/:id` removes a bug that should never have been
+  filed. It is a hard delete rather than a fourth status: a mistaken, duplicate
+  or obsolete report has no later reader, and `open → claimed → fixed` left it
+  in the list forever. Authorization matches resolution — an agent sends its own
+  `?sessionId=` with the session capability, a signed-in member is authorized by
+  membership. The bug's events are durable and stay, so the feed still records
+  what was reported, and a linked GitHub issue is left open.
+- The dashboard's bug panel leads with a colour-coded severity chip, shows the
+  description and affected files, orders open bugs worst-first, and collapses
+  fixed ones behind a "Show N fixed" toggle. Each row carries a two-step Remove
+  that says the GitHub issue stays open. Rows wrap their actions at phone width.
 
 ## 0.5.1: surviving broken IPv6
 

@@ -231,6 +231,37 @@ test('bugs: report and patch', async () => {
   assert.equal(bare.status, 403);
 });
 
+test('bugs: remove takes a mistaken report out of the project', async () => {
+  const s = (await post(`${P}/sessions`, { agent: 'agent-rm' })).body;
+  const bug = (await post(`${P}/bugs`, { sessionId: s.id, title: 'filed against the wrong repo' })).body;
+
+  // A bare bearer proves an agent machine, not a live session in this project.
+  const bare = await app.request(`${P}/bugs/${bug.id}`, { method: 'DELETE', headers: auth() });
+  assert.equal(bare.status, 403);
+
+  const removed = await app.request(`${P}/bugs/${bug.id}?sessionId=${s.id}`, {
+    method: 'DELETE', headers: { ...auth(), 'x-mediation-session': capabilities.get(s.id)! },
+  });
+  assert.equal(removed.status, 200, await removed.clone().text());
+  assert.deepEqual(await removed.json(), { ok: true });
+
+  const state = (await get(`${P}/state`)).body;
+  assert.ok(!state.bugs.some((b: { id: string }) => b.id === bug.id));
+  assert.ok(state.events.some((e: { type: string; message: string }) =>
+    e.type === 'bug' && e.message.includes('filed against the wrong repo')),
+  'the durable report event outlives the row it was about');
+
+  // Removing it twice is a 404, not a second success.
+  assert.equal((await app.request(`${P}/bugs/${bug.id}`, {
+    method: 'DELETE', headers: { cookie: adminCookie },
+  })).status, 404);
+
+  // The dashboard removes with a member cookie and no sessionId at all.
+  const second = (await post(`${P}/bugs`, { sessionId: s.id, title: 'obsolete since the rewrite' })).body;
+  const byHuman = await app.request(`${P}/bugs/${second.id}`, { method: 'DELETE', headers: { cookie: adminCookie } });
+  assert.equal(byHuman.status, 200, await byHuman.clone().text());
+});
+
 test('check endpoint returns conflicts array from query params', async () => {
   const Q = '/api/projects/check-test';
   const a = (await post(`${Q}/sessions`, { agent: 'agent-d' })).body;

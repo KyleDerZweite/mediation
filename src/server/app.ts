@@ -657,6 +657,22 @@ export function buildApp(store: Store, options: AppOptions = {}): Hono {
     return c.json(store.updateBug(c.req.param('p'), c.req.param('id'), body));
   });
 
+  // Removal answers to the same rule as resolution: a mistaken or duplicate bug
+  // is noise for everyone, so anyone who could close it may also clear it. No
+  // body, so an agent identifies itself with `?sessionId=` and its capability.
+  app.delete('/api/projects/:p/bugs/:id', (c) => {
+    const sessionId = c.req.query('sessionId');
+    if (sessionId) {
+      store.assertSessionCapability(c.req.param('p'), sessionId, c.req.header('x-mediation-session'));
+    } else if (!getUser(c)) {
+      return c.json({
+        error: 'agents must send their own sessionId with the session capability to remove a bug',
+        docs: AUTH_MD,
+      }, 403);
+    }
+    return c.json(store.removeBug(c.req.param('p'), c.req.param('id')));
+  });
+
   app.get('/api/projects/:p/state', (c) => {
     const projectId = c.req.param('p');
     const sessionId = c.req.query('sessionId');

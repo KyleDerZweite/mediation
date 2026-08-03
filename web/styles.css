@@ -363,14 +363,31 @@ input, button { font-family: inherit; }
 
 .bug-row { display: flex; gap: 11px; padding: 10px 0; border-bottom: 1px solid #f2f4f7; }
 .bug-row:last-child { border-bottom: none; }
-.bug-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; margin-top: 5px; background: var(--accent, #98a2b3); }
+/* Fixed bugs stay readable but stop competing with the open ones above them. */
+.bug-row.resolved { opacity: .62; }
 .bug-body { min-width: 0; flex: 1; }
-.bug-action { align-self: flex-start; flex: 0 0 auto; }
+.bug-actions { display: flex; flex-direction: column; gap: 5px; flex: 0 0 auto; }
 .bug-issue { color: #1f6feb; text-decoration: none; }
 .bug-issue:hover { text-decoration: underline; }
+.bug-head { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+/* Severity decides whether a bug is read at all, so it is a chip and not a word
+   in the meta line. The tint derives from the accent, so SEVERITY stays one map. */
+.bug-sev {
+  flex: 0 0 auto; font-size: 9.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .03em;
+  color: var(--accent, #98a2b3); background: color-mix(in srgb, var(--accent, #98a2b3) 12%, #fff);
+  border-radius: 5px; padding: 1px 5px;
+}
 .bug-title { font-size: 12.5px; color: #344054; line-height: 1.4; }
+.bug-desc {
+  font-size: 11.5px; color: #667085; margin-top: 3px; line-height: 1.45; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden;
+}
 .bug-id { font-family: 'IBM Plex Mono', monospace; color: #98a2b3; font-size: 11px; }
 .bug-meta { font-size: 11px; color: #98a2b3; margin-top: 2px; }
+.bug-files { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; }
+.bug-files .file-chip { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bug-files .file-chip.more { color: #98a2b3; }
+.bug-note { font-size: 10.5px; color: #b45309; margin-top: 5px; }
 
 /* completed */
 .done-row { display: flex; gap: 13px; padding: 13px 0; border-bottom: 1px solid #f2f4f7; align-items: center; }
@@ -752,7 +769,7 @@ input, button { font-family: inherit; }
 }
 .shell[data-theme="dark"] :is(
   .proj-card-stats, .repo-chip, .agent-chip, .file-chip, .conflict-intent, .rfile-name,
-  .cell-dev, .role-user, .filter-pill
+  .cell-dev, .role-user, .filter-pill, .bug-desc
 ) { color: var(--dm-muted-text); }
 .shell[data-theme="dark"] .empty-card .mono { color: #a8b5c6; }
 .shell[data-theme="dark"] :is(
@@ -761,7 +778,7 @@ input, button { font-family: inherit; }
 ) { color: #a8b5c6; }
 .shell[data-theme="dark"] :is(
   .section-head .section-sub, .proj-card-foot .foot-ago, .claim-card.rough .file-chip.more,
-  .panel-head .panel-count
+  .bug-files .file-chip.more, .panel-head .panel-count
 ) { color: var(--dm-faint); }
 .shell[data-theme="dark"] :is(
   .crumbs, .search-icon, .stat-hint, .empty-card, .empty-inline, .ministat-label, .col-head-sub,
@@ -787,6 +804,7 @@ input, button { font-family: inherit; }
 .shell[data-theme="dark"] .crew-state { color: var(--dm-strong); }
 .shell[data-theme="dark"] :is(.crew-reason.attention, .crew-state.attention) { color: #ff8fa5; }
 .shell[data-theme="dark"] .crew-state.stale { color: #f4c56d; }
+.shell[data-theme="dark"] .bug-note { color: #f4c56d; }
 .shell[data-theme="dark"] .crew-state.needs-input { background: #321a20; }
 .shell[data-theme="dark"] .tab.active { border-bottom-color: var(--dm-blue); }
 .shell[data-theme="dark"] .menu-item.selected,
@@ -827,12 +845,11 @@ input, button { font-family: inherit; }
   color: #fff; background: #e11d48; border-color: #e11d48;
 }
 
-.shell[data-theme="dark"] :is(.status-badge:not(.rough-badge), .type-tag) {
+.shell[data-theme="dark"] :is(.status-badge:not(.rough-badge), .type-tag, .bug-sev) {
   color: color-mix(in srgb, var(--accent) 65%, white);
   background: color-mix(in srgb, var(--accent) 18%, transparent);
 }
 .shell[data-theme="dark"] .feed-icon { color: color-mix(in srgb, var(--accent) 65%, white); }
-.shell[data-theme="dark"] .bug-dot { background: color-mix(in srgb, var(--accent) 65%, white); }
 
 .shell[data-theme="dark"] svg:is(
   [stroke="#344054"], [stroke="#475467"], [stroke="#5b6b85"], [stroke="#667085"],
@@ -893,4 +910,9 @@ input, button { font-family: inherit; }
   }
   .crew-stale { max-width: none; text-align: left; }
   .crew-children { margin-left: 6px; padding-left: 8px; }
+
+  /* A bug row is text plus two buttons: side by side they leave the title two
+     words wide, so the actions drop to their own line like the Crew states do. */
+  .bug-row { flex-wrap: wrap; }
+  .bug-actions { flex-direction: row; width: 100%; }
 }

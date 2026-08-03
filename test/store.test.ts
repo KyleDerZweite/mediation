@@ -454,6 +454,23 @@ test('bugs: report and update', () => {
   assert.equal(state.bugs.find((b) => b.id === bug.id)?.status, 'claimed');
 });
 
+/* Removal is a hard delete, not another status: a bug filed by mistake has no
+   later reader, unlike an expired claim whose id an agent may still be holding.
+   What stays is the event, which is durable by design and still true. */
+test('bugs: removal deletes the row and keeps the report in the event log', () => {
+  const a = store.startSession(P, { agent: 'agent-rm' });
+  const bug = store.reportBug(P, bugCreate.parse({
+    sessionId: a.id, title: 'duplicate of the billing report', files: ['test/billing.test.js'],
+  }));
+  assert.deepEqual(store.removeBug(P, bug.id), { ok: true });
+
+  const state = store.getState(P);
+  assert.ok(!state.bugs.some((b) => b.id === bug.id));
+  assert.ok(state.events.some((e) => e.type === 'bug' && e.message.includes('duplicate of the billing report')),
+    'the log keeps what was reported; only the row a human has to look at goes');
+  assert.throws(() => store.removeBug(P, bug.id), /bug not found/);
+});
+
 test('conflicts and recentFiles appear in project state', () => {
   const Q = 'conflict-project';
   const a = store.startSession(Q, { agent: 'agent-i' });
@@ -657,6 +674,7 @@ test('unknown session/claim/bug ids produce 404 errors', () => {
   assert.throws(() => store.heartbeat(P, 'nope', {}), is404(/session not found/));
   assert.throws(() => store.updateClaim(P, 'nope', {}), is404(/no claim with this id exists/));
   assert.throws(() => store.updateBug(P, 'nope', {}), is404(/bug not found/));
+  assert.throws(() => store.removeBug(P, 'nope'), is404(/bug not found/));
   assert.throws(() => store.endSession(P, 'nope'), is404(/session not found/));
 });
 

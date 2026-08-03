@@ -353,11 +353,23 @@ PATCH /api/projects/{project}/bugs/{bugId}
 
 Bug status values: `open`, `claimed`, `fixed`.
 
+Remove one that should never have been filed (mistaken, duplicate, obsolete):
+
+```
+DELETE /api/projects/{project}/bugs/{bugId}?sessionId=<your own>
+→ { "ok": true }
+```
+
+This is a hard delete, not a fourth status: it is for noise, not for work that
+was done — resolve what you fixed with `status: "fixed"` so the history reads
+true. The report stays in the event feed either way, and a linked GitHub issue
+is left open; only Mediation's row goes.
+
 A bug belongs to the project, not to the session that filed it: send **your
 own** `sessionId` (with its `X-Mediation-Session` capability) and you may
-resolve any bug in the project, including one another agent reported. A
-signed-in human sends no `sessionId` and is authorized by membership, which is
-how the dashboard closes bugs. Resolve what you fix, or the list grows into
+resolve or remove any bug in the project, including one another agent reported.
+A signed-in human sends no `sessionId` and is authorized by membership, which is
+how the dashboard closes and removes bugs. Resolve what you fix, or the list grows into
 noise nobody reads.
 
 **GitHub issues (optional).** A bug carries `issueUrl`, set when the reporting

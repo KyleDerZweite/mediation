@@ -1392,6 +1392,20 @@ export class Store {
     return bug;
   }
 
+  /* A hard delete, unlike an expired claim: that row is kept because an agent
+     may come back holding its id and needs to be told what happened. Nobody
+     returns to a bug filed by mistake, and a status nobody can clear is exactly
+     the list the reporter wanted gone. The bug's EVENTS stay: they are durable
+     by design (DURABLE_EVENT_TYPES), and the log records what was reported,
+     which remains true after the row goes. A linked GitHub issue is external
+     and is left open; only the dashboard row disappears. */
+  removeBug(projectId: string, bugId: string): { ok: true } {
+    const row = this.db.prepare('SELECT 1 FROM bugs WHERE projectId = ? AND id = ?').get(projectId, bugId);
+    if (!row) notFound('bug not found');
+    this.db.prepare('DELETE FROM bugs WHERE projectId = ? AND id = ?').run(projectId, bugId);
+    return { ok: true };
+  }
+
   // ---- projects + membership (see docs/auth.md) ----
 
   projectExists(id: string): boolean {

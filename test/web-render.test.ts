@@ -97,11 +97,68 @@ test('renderNowTab renders bug rows with the project id it was passed', () => {
 });
 
 test('a fixed bug offers Reopen and escapes the project id', () => {
-  const { renderNowTab } = loadApp();
+  const { renderNowTab, state } = loadApp();
+  state.allBugs = true; // fixed bugs sit behind the "Show N fixed" toggle
   const bugs = [{ ...projectState.bugs[0], status: 'fixed' }];
   const html = renderNowTab({ ...projectState, bugs }, now, 'p<&1');
   assert.match(html, /Reopen/);
   assert.match(html, /data-pid="p&lt;&amp;1"/);
+});
+
+test('a bug row leads with severity and shows what it is about', () => {
+  const { renderNowTab } = loadApp();
+  const bugs = [{
+    ...projectState.bugs[0],
+    description: 'the panel blanks on every poll',
+    files: ['web/app.js', 'web/styles.css', 'src/server/app.ts', 'src/core/types.ts'],
+    issueUrl: 'https://github.com/kyle/mediation/issues/42',
+  }];
+  const html = renderNowTab({ ...projectState, bugs }, now, 'proj-42');
+
+  assert.match(html, /class="bug-sev"[^>]*>high</);
+  assert.match(html, /the panel blanks on every poll/);
+  assert.match(html, /issue #42/);
+  assert.match(html, /web\/styles\.css/);
+  assert.match(html, /\+1</, 'files past the preview are counted, not listed');
+});
+
+/* Removal is the one irreversible thing on this panel, so it takes two clicks
+   and says what it does NOT touch. */
+test('removing a bug arms before it fires and admits the GitHub issue stays', () => {
+  const { renderNowTab, state } = loadApp();
+  const bugs = [{ ...projectState.bugs[0], issueUrl: 'https://github.com/kyle/mediation/issues/42' }];
+
+  const idle = renderNowTab({ ...projectState, bugs }, now, 'proj-42');
+  assert.match(idle, /data-bugremove="bug-abcdef1234"/);
+  assert.match(idle, />Remove</);
+  assert.ok(!idle.includes('Confirm remove'), 'the first click is not the destructive one');
+  assert.ok(!idle.includes('GitHub issue stays open'));
+
+  state.armed = 'bug-bug-abcdef1234';
+  const armed = renderNowTab({ ...projectState, bugs }, now, 'proj-42');
+  assert.match(armed, /Confirm remove/);
+  assert.match(armed, /GitHub issue stays open/);
+});
+
+test('open bugs lead by severity and fixed ones collapse below them', () => {
+  const { renderNowTab, state } = loadApp();
+  const bugs = [
+    { ...projectState.bugs[0], id: 'bug-fixed', title: 'already fixed', status: 'fixed' },
+    { ...projectState.bugs[0], id: 'bug-low', title: 'a low one', severity: 'low' },
+    { ...projectState.bugs[0], id: 'bug-crit', title: 'a critical one', severity: 'critical' },
+  ];
+
+  const collapsed = renderNowTab({ ...projectState, bugs }, now, 'proj-42');
+  assert.match(collapsed, /panel-count">2</, 'the count is what is still open');
+  assert.match(collapsed, /Show 1 fixed/);
+  assert.ok(!collapsed.includes('already fixed'));
+  assert.ok(collapsed.indexOf('a critical one') < collapsed.indexOf('a low one'));
+
+  state.allBugs = true;
+  const expanded = renderNowTab({ ...projectState, bugs }, now, 'proj-42');
+  assert.match(expanded, /bug-row resolved/);
+  assert.match(expanded, /already fixed/);
+  assert.match(expanded, /Show less/);
 });
 
 /* A live session that claimed nothing is the case this whole server exists to

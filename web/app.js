@@ -150,6 +150,13 @@ const SEVERITY = {
   low: '#98a2b3',
   unknown: '#98a2b3',
 };
+// Declared worst-first, which is also the order open bugs are listed in: a
+// critical filed on Monday must not sit under three lows filed since.
+const SEVERITY_ORDER = Object.keys(SEVERITY);
+const severityRank = (severity) => {
+  const i = SEVERITY_ORDER.indexOf(severity);
+  return i < 0 ? SEVERITY_ORDER.length : i;
+};
 
 function readDarkMode() {
   try { return localStorage.getItem('mediation-theme') !== 'light'; }
@@ -175,6 +182,7 @@ const state = {
   copied: null,            // key of the element that just copied, for feedback
   armed: null,             // key of a destructive button armed for its second click
   allCompleted: false,     // Now tab: completed work expanded past its preview
+  allBugs: false,          // Now tab: fixed bugs expanded below the open ones
   menu: null,              // key of the open row menu (role editor / overflow)
   crewClosed: new Set(),   // logical agent ids collapsed in the live Crew panel
   crewOrder: new Map(),    // first-seen order keeps 3s polling from moving focused rows
@@ -808,6 +816,38 @@ function completedRow(c, now) {
   </div>`;
 }
 
+const BUG_FILE_PREVIEW = 3;
+
+function bugRow(b, now, pid) {
+  const armed = state.armed === `bug-${b.id}`;
+  const files = b.files || [];
+  const issue = b.issueUrl
+    ? ` · <a class="bug-issue" href="${esc(b.issueUrl)}" target="_blank" rel="noreferrer noopener">issue #${esc(b.issueUrl.split('/').pop())}</a>`
+    : '';
+  return `<div class="bug-row${b.status === 'fixed' ? ' resolved' : ''}">
+    <div class="bug-body">
+      <div class="bug-head">
+        <span class="bug-sev" style="--accent:${SEVERITY[b.severity] || SEVERITY.unknown}">${esc(b.severity)}</span>
+        <span class="bug-title">${esc(b.title)}</span>
+      </div>
+      ${b.description ? `<div class="bug-desc" title="${esc(b.description)}">${esc(b.description)}</div>` : ''}
+      <div class="bug-meta"><span class="bug-id">${esc(b.id.slice(0, 8))}</span> ${esc(b.reporter)} · ${esc(b.status)} · ${ago(b.createdAt, now)} ago${issue}</div>
+      ${files.length ? `<div class="bug-files">${files.slice(0, BUG_FILE_PREVIEW).map((f) =>
+        `<span class="file-chip" title="${esc(f)}">${esc(f)}</span>`).join('')}${
+        files.length > BUG_FILE_PREVIEW ? `<span class="file-chip more">+${files.length - BUG_FILE_PREVIEW}</span>` : ''}</div>` : ''}
+      ${armed && b.issueUrl ? '<div class="bug-note">Removes it here only; the GitHub issue stays open.</div>' : ''}
+    </div>
+    <div class="bug-actions">
+      <button class="user-act-btn" type="button" data-bugaction="${b.status === 'fixed' ? 'open' : 'fixed'}"
+        data-pid="${esc(pid)}" data-bug="${esc(b.id)}"
+      >${b.status === 'fixed' ? 'Reopen' : 'Mark fixed'}</button>
+      <button class="user-act-btn danger${armed ? ' armed' : ''}" type="button" data-bugremove="${esc(b.id)}"
+        data-pid="${esc(pid)}"
+      >${armed ? 'Confirm remove' : 'Remove'}</button>
+    </div>
+  </div>`;
+}
+
 function renderProject() {
   const { pid, tab } = state.route;
   const ps = state.states.get(pid);
@@ -937,20 +977,24 @@ function renderNowTab(ps, now, pid) {
       : '<div class="empty-inline">No files touched yet.</div>'}</div>
   </div>`;
 
+  /* Fixed bugs are the same kind of noise completed claims were: they are kept,
+     but they must not bury the ones still open. Open first, worst severity
+     first; the rest is one click away. */
+  const openBugs = ps.bugs.filter((b) => b.status !== 'fixed')
+    .sort((a, b) => severityRank(a.severity) - severityRank(b.severity) || b.createdAt - a.createdAt);
+  const fixedBugs = ps.bugs.filter((b) => b.status === 'fixed');
+  const shownBugs = state.allBugs ? openBugs.concat(fixedBugs) : openBugs;
+
   const bugsPanel = `<div class="panel">
-    <div class="panel-head">Discovered bugs<span class="panel-count">${ps.bugs.length}</span></div>
+    <div class="panel-head">Discovered bugs<span class="panel-count">${openBugs.length}</span></div>
     <div class="panel-body">${ps.bugs.length
-      ? ps.bugs.map((b) => `<div class="bug-row">
-          <span class="bug-dot" style="--accent:${SEVERITY[b.severity] || SEVERITY.unknown}"></span>
-          <div class="bug-body">
-            <div class="bug-title"><span class="bug-id">${esc(b.id.slice(0, 8))}</span> ${esc(b.title)}</div>
-            <div class="bug-meta">${esc(b.reporter)} · ${esc(b.severity)} · ${esc(b.status)} · ${ago(b.createdAt, now)} ago${
-              b.issueUrl ? ` · <a class="bug-issue" href="${esc(b.issueUrl)}" target="_blank" rel="noreferrer noopener">issue #${esc(b.issueUrl.split('/').pop())}</a>` : ''}</div>
-          </div>
-          <button class="user-act-btn bug-action" type="button" data-bugaction="${b.status === 'fixed' ? 'open' : 'fixed'}"
-            data-pid="${esc(pid)}" data-bug="${esc(b.id)}"
-          >${b.status === 'fixed' ? 'Reopen' : 'Mark fixed'}</button>
-        </div>`).join('')
+      ? (shownBugs.length
+        ? shownBugs.map((b) => bugRow(b, now, pid)).join('')
+        : '<div class="empty-inline">Nothing open.</div>')
+        + (fixedBugs.length
+          ? `<button class="user-act-btn done-more" type="button" data-bugsmore="1"
+              >${state.allBugs ? 'Show less' : `Show ${fixedBugs.length} fixed`}</button>`
+          : '')
       : '<div class="empty-inline">No bugs reported.</div>'}</div>
   </div>`;
 
@@ -1552,6 +1596,8 @@ function renderDesignSystem() {
   const chips = dsSection('Chips, badges &amp; tags', '', `
     ${dsRow(DS_STATUSES.map((k) => dsItem(`.status-badge (${k})`,
       `<span class="status-badge" style="color:${STATUS[k].color};background:${STATUS[k].tint}">${STATUS[k].label}</span>`)))}
+    ${dsRow(DS_SEVERITIES.map((k) => dsItem(`.bug-sev (${k})`,
+      `<span class="bug-sev" style="--accent:${SEVERITY[k]}">${k}</span>`)))}
     ${dsRow([
       dsItem('.role-chip.role-admin', roleChip('admin')),
       dsItem('.role-chip.role-user', roleChip('user')),
@@ -1951,6 +1997,21 @@ document.addEventListener('click', async (e) => {
     // No sessionId: a signed-in member is authorized by the cookie alone.
     await send('PATCH', `/api/projects/${encodeURIComponent(pid)}/bugs/${encodeURIComponent(bug)}`, { status });
     refresh();
+    return;
+  }
+
+  const bugRemoveEl = e.target.closest('[data-bugremove]');
+  if (bugRemoveEl) {
+    const { bugremove: bug, pid } = bugRemoveEl.dataset;
+    if (!arm(`bug-${bug}`)) return; // first click arms, second confirms
+    await send('DELETE', `/api/projects/${encodeURIComponent(pid)}/bugs/${encodeURIComponent(bug)}`);
+    refresh();
+    return;
+  }
+
+  if (e.target.closest('[data-bugsmore]')) {
+    state.allBugs = !state.allBugs;
+    render();
     return;
   }
 
