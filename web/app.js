@@ -151,6 +151,11 @@ const SEVERITY = {
   unknown: '#98a2b3',
 };
 
+function readDarkMode() {
+  try { return localStorage.getItem('mediation-theme') !== 'light'; }
+  catch { return true; }
+}
+
 /* ---------------- state ---------------- */
 
 const state = {
@@ -165,6 +170,7 @@ const state = {
   authView: 'login',       // login | register (manual-mode logged-out view)
   serverAuthMode: 'manual',
   designSystemPublic: false, // dev instances serve #/design without a session
+  darkMode: readDarkMode(),  // dark by default; only an explicit saved light preference opts out
   authMsg: '',             // message shown on the login/register card
   copied: null,            // key of the element that just copied, for feedback
   armed: null,             // key of a destructive button armed for its second click
@@ -325,14 +331,33 @@ function renderHeader() {
   $('pageTitle').textContent = meta[2];
 }
 
+function applyTheme() {
+  const dashboard = !!state.me && state.route.view !== 'design';
+  const shell = document.querySelector('.shell');
+  if (dashboard) shell.dataset.theme = state.darkMode ? 'dark' : 'light';
+  else shell.removeAttribute('data-theme');
+
+  const toggle = $('themeToggle');
+  if (toggle) {
+    toggle.hidden = !dashboard;
+    toggle.setAttribute('aria-pressed', String(dashboard && state.darkMode));
+  }
+}
+
+function toggleTheme() {
+  state.darkMode = !state.darkMode;
+  try { localStorage.setItem('mediation-theme', state.darkMode ? 'dark' : 'light'); } catch { /* preference is optional */ }
+  applyTheme();
+}
+
 /* ---------------- shared fragments ---------------- */
 
 function eventRow(ev, now, projTag) {
   const [color, ic, tint] = EVENT_KIND[ev.type] || EVENT_KIND.activity;
   return `<div class="act-row">
-    <span class="feed-icon" style="color:${color};margin-top:1px">${icon(ic, color, 16)}</span>
+    <span class="feed-icon" style="--accent:${color};margin-top:1px">${icon(ic, 'currentColor', 16)}</span>
     <div class="act-body">
-      <div class="act-text"><span class="type-tag" style="color:${color};background:${tint}">${esc(ev.type)}</span>${esc(ev.message)}</div>
+      <div class="act-text"><span class="type-tag" style="--accent:${color};--tint:${tint}">${esc(ev.type)}</span>${esc(ev.message)}</div>
       ${projTag ? `<div class="act-meta"><span class="mono">${esc(projTag)}</span></div>` : ''}
     </div>
     <span class="act-ago">${ago(ev.at, now)} ago</span>
@@ -459,7 +484,7 @@ function claimCard(claim, sessionsById, conflicts, now) {
         </div>
       </div>
       <div class="claim-right">
-        <span class="status-badge" style="background:${st.tint};color:${st.color}">${st.label}</span>
+        <span class="status-badge" style="--accent:${st.color};--tint:${st.tint}">${st.label}</span>
         <span class="claim-activity"><span class="dot dot-ok pulse"></span>${ago(claim.updatedAt, now)} ago</span>
       </div>
     </div>
@@ -685,7 +710,7 @@ function renderNowTab(ps, now, pid) {
     <div class="panel-head">Discovered bugs<span class="panel-count">${ps.bugs.length}</span></div>
     <div class="panel-body">${ps.bugs.length
       ? ps.bugs.map((b) => `<div class="bug-row">
-          <span class="bug-dot" style="background:${SEVERITY[b.severity] || SEVERITY.unknown}"></span>
+          <span class="bug-dot" style="--accent:${SEVERITY[b.severity] || SEVERITY.unknown}"></span>
           <div class="bug-body">
             <div class="bug-title"><span class="bug-id">${esc(b.id.slice(0, 8))}</span> ${esc(b.title)}</div>
             <div class="bug-meta">${esc(b.reporter)} · ${esc(b.severity)} · ${esc(b.status)} · ${ago(b.createdAt, now)} ago${
@@ -1467,6 +1492,7 @@ function renderAuth() {
 }
 
 function showAuth() {
+  applyTheme();
   document.querySelector('.sidebar').style.display = 'none';
   document.querySelector('.topbar').style.display = 'none';
   // The design reference is the one page a dev instance shows signed out.
@@ -1523,6 +1549,7 @@ async function doRegister(username, password) {
 let lastRouteKey = null;
 
 function render() {
+  applyTheme();
   if (!state.me) return; // logged out: managed by showAuth()
   renderSidebar();
   renderHeader();
@@ -1561,6 +1588,11 @@ $('searchIcon').innerHTML = icon('search', '#98a2b3', 15);
 // feedback goes through `state` + render(), never direct DOM mutation.
 let copiedTimer = null;
 document.addEventListener('click', async (e) => {
+  if (e.target.closest('[data-theme-toggle]')) {
+    toggleTheme();
+    return;
+  }
+
   const authEl = e.target.closest('[data-auth]');
   if (authEl) {
     e.preventDefault();

@@ -17,16 +17,36 @@ const stub = (): any => new Proxy(function () {}, {
   set: () => true,
 });
 
-function loadApp() {
+function loadApp(storedTheme?: string) {
+  const values = new Map<string, string>();
+  if (storedTheme !== undefined) values.set('mediation-theme', storedTheme);
+  const localStorage = {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => values.set(key, value),
+  };
+  const shell: any = {
+    dataset: {},
+    removeAttribute: (name: string) => { if (name === 'data-theme') delete shell.dataset.theme; },
+  };
+  const toggle: any = {
+    hidden: true,
+    attributes: new Map<string, string>(),
+    setAttribute: (name: string, value: string) => toggle.attributes.set(name, value),
+  };
+  const document = new Proxy({
+    querySelector: (selector: string) => selector === '.shell' ? shell : stub(),
+    getElementById: (id: string) => id === 'themeToggle' ? toggle : stub(),
+  }, { get: (target: any, key) => key in target ? target[key] : stub() });
   const ctx: any = vm.createContext({
     document: stub(), window: stub(), location: { hash: '' }, navigator: stub(),
-    localStorage: stub(), console, fetch: () => new Promise(() => {}),
+    localStorage, console, fetch: () => new Promise(() => {}),
     EventSource: function () { return stub(); },
     setInterval: () => 0, setTimeout: () => 0, clearTimeout: () => {},
   });
+  ctx.document = document;
   ctx.globalThis = ctx;
-  vm.runInContext(`${src}\n;globalThis.__app = { renderNowTab, renderProject, state };`, ctx);
-  return ctx.__app;
+  vm.runInContext(`${src}\n;globalThis.__app = { renderNowTab, renderProject, state, applyTheme, toggleTheme };`, ctx);
+  return { ...ctx.__app, theme: { shell, toggle, values } };
 }
 
 const now = Date.now();
@@ -42,6 +62,30 @@ const projectState = {
     issueUrl: null,
   }],
 };
+
+test('dark mode is the persisted dashboard-only default', () => {
+  const dark = loadApp();
+  assert.equal(dark.state.darkMode, true);
+  dark.state.me = { id: 'user-1' };
+  dark.state.route = { view: 'overview', pid: null, tab: null };
+  dark.applyTheme();
+  assert.equal(dark.theme.shell.dataset.theme, 'dark');
+  assert.equal(dark.theme.toggle.hidden, false);
+  assert.equal(dark.theme.toggle.attributes.get('aria-pressed'), 'true');
+
+  dark.toggleTheme();
+  assert.equal(dark.theme.shell.dataset.theme, 'light');
+  assert.equal(dark.theme.values.get('mediation-theme'), 'light');
+  assert.equal(dark.theme.toggle.attributes.get('aria-pressed'), 'false');
+
+  dark.state.route.view = 'design';
+  dark.applyTheme();
+  assert.equal(dark.theme.shell.dataset.theme, undefined);
+  assert.equal(dark.theme.toggle.hidden, true);
+
+  assert.equal(loadApp('light').state.darkMode, false);
+  assert.equal(loadApp('unknown').state.darkMode, true);
+});
 
 test('renderNowTab renders bug rows with the project id it was passed', () => {
   const { renderNowTab } = loadApp();
