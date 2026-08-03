@@ -11,7 +11,13 @@ tmp="$(mktemp "${TMPDIR:-/tmp}/mediation-installer.XXXXXX.mjs")"; trap 'rm -f "$
 curl -fsSL "$MEDIATION_URL/install/mediation-installer.mjs" -o "$tmp"
 args=(install --server "$MEDIATION_URL")
 [ "$#" -gt 0 ] && args+=("$@")
-if [ "$#" -eq 0 ] && [ -r /dev/tty ]; then
+# Headless by default: most installs are run by agents. `[ -r /dev/tty ]` only
+# checked the device node's permission bits, so a session with no controlling
+# terminal passed it and then died with ENXIO on the redirect. The picker is
+# opt-in now, and even then only if /dev/tty actually opens.
+tty_in=0
+case " $* " in *" --interactive "*) ( : < /dev/tty ) 2>/dev/null && tty_in=1;; esac
+if [ "$tty_in" -eq 1 ]; then
   node "$tmp" "${args[@]}" < /dev/tty
 else
   node "$tmp" "${args[@]}"

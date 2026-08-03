@@ -167,7 +167,8 @@ Enforcement summary (all of it in the one `/api/*` middleware in
   Codex users must review/trust the command in `/hooks`. Kimi stays MCP-only.
 - `clients/install.sh` is the installer template; the server serves it with
   `__MEDIATION_URL__` replaced. Its dependency-free Node helper performs
-  transactional, manifest-owned changes and supports wizard or headless use.
+  transactional, manifest-owned changes and runs headless unless `--interactive`
+  asks for the harness picker on a real terminal.
   Detects claude-code + codex + kimi (Kimi Code
   CLI `~/.kimi-code`, legacy Kimi CLI `~/.kimi`; both take an `mcpServers`
   JSON at `<dir>/mcp.json` and a skill at `<dir>/skills/`), registers the MCP

@@ -38,7 +38,7 @@ function parseArgs() {
   const agents = [];
   for (let i = 0; i < argv.length; i++) if (argv[i] === '--agent') agents.push(argv[++i]);
   for (const a of agents) if (!supportedAgents.includes(a)) fail(`unknown agent: ${a}`);
-  return { uninstall: has('--uninstall'), keepAuth: has('--keep-auth'), dry: has('--dry-run'), yes: has('--yes'), noLogin: has('--no-login'), all: has('--all'), agents, server: take('--server') };
+  return { uninstall: has('--uninstall'), keepAuth: has('--keep-auth'), dry: has('--dry-run'), yes: has('--yes'), noLogin: has('--no-login'), all: has('--all'), interactive: has('--interactive'), agents, server: take('--server') };
 }
 function atomic(file, content) {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
@@ -185,7 +185,11 @@ async function install(opt) {
   if (!opt.server) fail('--server is required');
   let server; try { server = new URL(opt.server).origin; } catch { fail('invalid --server URL'); }
   let selected = opt.agents.length ? [...new Set(opt.agents)] : detect();
-  if (!opt.agents.length && !opt.all && !opt.yes && process.stdin.isTTY && process.stderr.isTTY) {
+  // The picker is opt-in: agents install far more often than humans do, and a
+  // question nobody can answer is worse than the [all] default it falls back
+  // to. --agent/--all/--yes still win, and a --interactive run without real
+  // TTYs proceeds headless rather than failing: this is an installer.
+  if (opt.interactive && !opt.agents.length && !opt.all && !opt.yes && process.stdin.isTTY && process.stderr.isTTY) {
     const choices = selected.map((x, i) => `${i + 1}:${x}`).join(', ');
     const rl = createInterface({ input: process.stdin, output: process.stderr });
     const answer = (await rl.question(`Install Mediation for ${choices} [all]: `)).trim();

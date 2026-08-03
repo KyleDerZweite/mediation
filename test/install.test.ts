@@ -10,8 +10,12 @@ const root = mkdtempSync(join(tmpdir(), 'mediation-install-'));
 const assets = {
   '/install/mediation-mcp.mjs': readFileSync('clients/mediation-mcp.mjs', 'utf8'),
   '/install/mediation-hook.mjs': readFileSync('clients/mediation-hook.mjs', 'utf8'),
+  '/install/mediation-installer.mjs': readFileSync('clients/mediation-installer.mjs', 'utf8'),
   '/install/SKILL.md': readFileSync('clients/skills/mediation/SKILL.md', 'utf8'),
 };
+// The picker needs real TTYs, which a spawned test child never has. This
+// wrapper claims them on a pipe so the prompt path is reachable without a pty.
+const ttyWrapper = join(root, 'tty-run.mjs');
 const server = createServer((req, res) => {
   const body = assets[req.url as keyof typeof assets];
   res.writeHead(body ? 200 : 404); res.end(body || 'missing');
@@ -21,7 +25,13 @@ let origin = '';
 // exactly one owned handler on each, and uninstall must leave none.
 const claudeHookEvents = ['SessionStart', 'SessionEnd', 'SubagentStart', 'SubagentStop',
   'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Notification', 'Stop', 'PreCompact'];
-before(async () => { await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve)); origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`; });
+before(async () => {
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  origin = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  writeFileSync(ttyWrapper, 'import { pathToFileURL } from "node:url";\n'
+    + 'process.stdin.isTTY = true; process.stderr.isTTY = true;\n'
+    + `await import(pathToFileURL(${JSON.stringify(join(process.cwd(), 'clients/mediation-installer.mjs'))}).href);\n`);
+});
 after(() => { server.close(); rmSync(root, { recursive: true, force: true }); });
 
 function run(home: string, args: string[], extra: Record<string, string> = {}) {
@@ -33,6 +43,78 @@ function run(home: string, args: string[], extra: Record<string, string> = {}) {
     child.on('close', (status) => resolve({ status, stderr }));
   });
 }
+
+function runTty(home: string, args: string[], answer?: string) {
+  return new Promise<{ status: number | null; stderr: string }>((resolve) => {
+    const child = spawn(process.execPath, [ttyWrapper, ...args], {
+      cwd: process.cwd(), stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, HOME: home, MEDIATION_HOME: join(home, 'data'), MEDIATION_AUTH_HOME: join(home, 'auth') },
+    });
+    let stderr = ''; child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.stdin.end(answer ?? '');
+    child.on('close', (status) => resolve({ status, stderr }));
+  });
+}
+
+// Headless by default: agents run the installer far more often than humans, so
+// a plain run must never ask a question, not even on a terminal.
+test('the harness picker is opt-in and never blocks a default install', async () => {
+  const home = join(root, 'headless');
+  mkdirSync(join(home, '.kimi-code'), { recursive: true });
+  mkdirSync(join(home, '.kimi'), { recursive: true });
+  const result = await runTty(home, ['--server', origin]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.doesNotMatch(result.stderr, /Install Mediation for/);
+  assert.equal(existsSync(join(home, '.kimi-code', 'mcp.json')), true);
+  assert.equal(existsSync(join(home, '.kimi', 'mcp.json')), true);
+});
+
+test('--interactive on a terminal asks and honours the selection', async () => {
+  const home = join(root, 'interactive');
+  mkdirSync(join(home, '.kimi-code'), { recursive: true });
+  mkdirSync(join(home, '.kimi'), { recursive: true });
+  const result = await runTty(home, ['--server', origin, '--interactive'], '2\n');
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /Install Mediation for 1:kimi-code, 2:kimi-cli \[all\]: /);
+  assert.equal(existsSync(join(home, '.kimi', 'mcp.json')), true);
+  assert.equal(existsSync(join(home, '.kimi-code', 'mcp.json')), false);
+});
+
+// Fail open: --interactive without a terminal installs everything detected
+// rather than dying on a question nobody can answer.
+test('--interactive without a TTY proceeds headless', async () => {
+  const home = join(root, 'interactive-headless');
+  mkdirSync(join(home, '.kimi-code'), { recursive: true });
+  const result = await run(home, ['--server', origin, '--interactive']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.doesNotMatch(result.stderr, /Install Mediation for/);
+  assert.equal(existsSync(join(home, '.kimi-code', 'mcp.json')), true);
+});
+
+// Regression: the bootstrap gated the picker on `[ -r /dev/tty ]`, which passes
+// on a session with no controlling terminal and then dies with ENXIO on open.
+test('install.sh bootstraps without a controlling terminal', async () => {
+  const home = join(root, 'bootstrap');
+  mkdirSync(join(home, '.kimi-code'), { recursive: true });
+  // setsid drops the controlling terminal, which is what makes opening
+  // /dev/tty fail with ENXIO; without it the test still covers the happy path.
+  const detached = spawnSync('setsid', ['--wait', 'true']).status === 0;
+  const [command, args] = detached
+    ? ['setsid', ['--wait', 'bash', 'clients/install.sh']]
+    : ['bash', ['clients/install.sh']];
+  // spawnSync would deadlock: the asset server shares this event loop.
+  const result = await new Promise<{ status: number | null; stderr: string }>((resolve) => {
+    const child = spawn(command, args, {
+      cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, HOME: home, MEDIATION_URL: origin, MEDIATION_HOME: join(home, 'data'), MEDIATION_AUTH_HOME: join(home, 'auth') },
+    });
+    let stderr = ''; child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('close', (status) => resolve({ status, stderr }));
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.doesNotMatch(result.stderr, /\/dev\/tty/);
+  assert.equal(existsSync(join(home, '.kimi-code', 'mcp.json')), true);
+});
 
 test('installer is idempotent and uninstaller preserves unrelated configuration', async () => {
   const home = join(root, 'one'); mkdirSync(join(home, '.codex'), { recursive: true });

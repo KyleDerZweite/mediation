@@ -2,6 +2,14 @@
 
 ## Unreleased: live agent crews
 
+- The installer is headless by default: it installs for every detected harness
+  without asking. `curl -fsSL <server>/install.sh | bash` no longer opens
+  `/dev/tty`, which failed with `No such device or address` in agent and CI
+  sessions that have no controlling terminal and aborted the install. The
+  harness picker is now opt-in via `--interactive`, and only runs when stdin
+  and stderr are real terminals; without them it proceeds headless instead of
+  failing. `--agent`, `--all`, and `--yes` keep their meanings.
+
 - The Agents page gains an **Update installed agents** panel next to the
   install one: a fixed paste-into-an-agent prompt that re-runs the idempotent
   installer. It names no version on purpose — `/install.sh` always serves what

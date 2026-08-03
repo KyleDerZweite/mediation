@@ -18,8 +18,9 @@ When a user says to register and install Mediation from this server:
 
 1. Install the MCP client and skill with `curl -fsSL <server>/install.sh | bash`
    (Windows PowerShell: `irm <server>/install.ps1 | iex`).
-   The installer has an interactive harness picker; for headless execution use
-   `--all --yes` after `bash -s --`.
+   The installer is headless: it installs for every harness it detects without
+   asking. A human on a real terminal can pick with `bash -s -- --interactive`;
+   `--agent <name>`, `--all`, and `--yes` still select without any question.
 2. Restart the agent harness if it does not discover the new MCP server in the
    current process.
 3. Follow this server's authorization mode below. In GitHub App mode the human
