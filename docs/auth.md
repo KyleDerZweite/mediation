@@ -1,5 +1,8 @@
 # Mediation Authentication & Authorization
 
+> Archived project: Mediation is discontinued and no longer maintained. This
+> document describes authentication in the final archived implementation.
+
 This document is the auth discovery manifest for the Mediation API. It is served
 at `/auth.md`, and every `401` response advertises it:
 

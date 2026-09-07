@@ -1,5 +1,11 @@
 # Changelog
 
+## Project archived
+
+Mediation is discontinued and preserved as a public archive. Development has
+ended; no further releases, bug fixes, or security updates are planned.
+The unreleased changes below remain part of the archived source.
+
 ## Unreleased: live agent crews
 
 - The installer is headless by default: it installs for every detected harness

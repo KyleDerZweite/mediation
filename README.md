@@ -1,5 +1,15 @@
 # Mediation
 
+## Public archive
+
+Mediation is discontinued. This repository is a public archive for reference
+and is no longer maintained. No further releases, bug fixes, or security
+updates are planned, and issues and pull requests are no longer accepted.
+
+I am replacing Mediation with another self-hosted solution. The documentation
+below describes the final archived code and remains available for anyone
+who wants to inspect or fork it.
+
 Live coordination for developers and coding agents. See overlapping work
 **before Git makes it visible**.
 

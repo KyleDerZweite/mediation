@@ -1,5 +1,8 @@
 # Mediation Agent Instructions
 
+> Archived project: Mediation is discontinued and no longer maintained. These
+> instructions document the final archived implementation for reference.
+
 You are a coding agent. This service tells you what other developers and agents
 are working on **right now**, before their work reaches Git. Check it before you
 start work so you never duplicate effort.

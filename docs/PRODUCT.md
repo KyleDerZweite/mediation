@@ -1,5 +1,9 @@
 # Mediation: Live Coordination for Coding Agents
 
+> Archived project: Mediation is discontinued and no longer maintained. This
+> specification is preserved for historical reference. Unimplemented plans
+> below are not a roadmap for future releases.
+
 ## Purpose
 
 Build an independent coordination service that prevents developers and coding agents from unknowingly performing the same work.
